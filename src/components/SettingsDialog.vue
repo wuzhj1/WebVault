@@ -62,6 +62,7 @@ async function save(): Promise<void> {
   const wasConfigured = settings.configured
   try {
     await settings.save({ ...draft.value })
+    draft.value = { ...settings.settings }
     saved.value = true
     setTimeout(() => {
       saved.value = false
@@ -77,6 +78,7 @@ async function save(): Promise<void> {
 
 async function test(): Promise<void> {
   await settings.save({ ...draft.value })
+  draft.value = { ...settings.settings }
   await sync.checkConnection()
 }
 
@@ -181,7 +183,7 @@ onMounted(() => {
         </label>
 
         <label class="field__wrap">
-          <span class="field__label">空间地址 owner(用户名或组织)</span>
+          <span class="field__label">空间地址 owner(用户名或组织,也可直接粘贴仓库地址)</span>
           <input v-model="draft.owner" class="field" placeholder="例如 zhangsan" autocomplete="off" spellcheck="false" />
         </label>
 
@@ -195,6 +197,9 @@ onMounted(() => {
           <input v-model="draft.branch" class="field" placeholder="master" autocomplete="off" spellcheck="false" />
         </label>
       </div>
+      <p class="field__tip">
+        owner / repo 里直接粘贴 <code>gitee.com/&lt;owner&gt;/&lt;repo&gt;</code> 的完整地址也可以,保存时会自动拆成三段。
+      </p>
 
       <div class="row">
         <label class="check">
@@ -327,6 +332,7 @@ onMounted(() => {
         <li><code>Ctrl / ⌘ + ,</code> — 打开设置</li>
         <li><code>Ctrl / ⌘ + 单击</code> 编辑器里的 <code>[[链接]]</code> — 跳转(不存在则创建)</li>
         <li>在正文里输入 <code>[[</code> — 触发链接补全</li>
+        <li>行首输入 <code>/</code> — 斜杠命令:标题、列表、任务、引用、代码块、表格、分割线、日期</li>
         <li><code>Esc</code> — 关闭弹窗</li>
       </ul>
 

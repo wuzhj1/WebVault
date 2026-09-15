@@ -8,7 +8,7 @@
     "icons": "node scripts/make-icons.mjs",
     "build": "node scripts/make-icons.mjs && vite build",
     "typecheck": "vue-tsc --noEmit",
-    "verify": "node scripts/verify-parse.mts && node scripts/verify-rewrite.mts && node scripts/verify-merge.mts && node scripts/verify-remote-diff.mts && node scripts/verify-search.mts",
+    "verify": "node scripts/verify-config.mts && node scripts/verify-parse.mts && node scripts/verify-rewrite.mts && node scripts/verify-merge.mts && node scripts/verify-remote-diff.mts && node scripts/verify-search.mts",
     "preview": "vite preview"
   },
   "dependencies": {

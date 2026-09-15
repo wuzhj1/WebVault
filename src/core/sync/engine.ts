@@ -411,8 +411,9 @@ async function mergeWithRemote(
 }
 
 /**
- * Gitee mirrors GitLab's multi-file commit endpoint. If a deployment does not expose it,
- * fall back to one request per file rather than failing the whole sync.
+ * Gitee mirrors GitLab's multi-file commit endpoint, but gitee.com answers 406 to this
+ * client's JSON body shape. Any of 404/405/406 means "batching unavailable here", so fall
+ * back to one contents-API request per file rather than failing the whole sync.
  */
 let multiCommitBroken = false
 
@@ -422,9 +423,10 @@ async function commitBatch(cfg: GiteeConfig, message: string, batch: CommitActio
       await gitee.commitFiles(cfg, message, batch)
       return
     } catch (err) {
-      if (err instanceof gitee.GiteeError && (err.status === 404 || err.status === 405)) {
+      const status = err instanceof gitee.GiteeError ? err.status : 0
+      if (status === 404 || status === 405 || status === 406) {
         multiCommitBroken = true
-        await logSync('warn', 'Gitee 多文件提交接口不可用,已降级为逐文件提交')
+        await logSync('warn', `Gitee 多文件提交接口不可用(${status}),已降级为逐文件提交`)
       } else {
         throw err
       }

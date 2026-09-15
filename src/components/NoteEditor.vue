@@ -8,6 +8,7 @@ import {
   markActiveBlock,
   type WikilinkLookup,
 } from '@/core/editor/wikilink-dom.ts'
+import { slashHint } from '@/core/editor/slash-commands.ts'
 import { isAttachmentTarget, resolveTarget } from '@/core/index/resolve.ts'
 import { useSyncStore } from '@/stores/sync.ts'
 import { useVaultStore } from '@/stores/vault.ts'
@@ -50,7 +51,9 @@ async function flushSave(): Promise<void> {
   }
   if (pendingValue === null || !loadedPath) return
   const path = loadedPath
-  const value = pendingValue
+  // `pendingValue` only marks "something changed": undo does not always fire the input
+  // callback, so the live editor content is the only trustworthy source at flush time.
+  const value = editor?.getValue() ?? pendingValue
   pendingValue = null
   await vault.saveBody(path, value)
   sync.schedulePush()
@@ -114,10 +117,12 @@ let activeBlock: HTMLElement | null = null
 function queueDecorate(): void {
   if (decorateQueued) return
   decorateQueued = true
-  setTimeout(() => {
+  // Microtask, not setTimeout: a macrotask can run after a paint, showing one frame of
+  // undecorated markdown whenever a block folds.
+  queueMicrotask(() => {
     decorateQueued = false
     runDecorate()
-  }, 0)
+  })
 }
 
 function runDecorate(): void {
@@ -149,9 +154,18 @@ async function followLink(raw: string): Promise<void> {
   emit('open-link', await vault.createFromLink(target))
 }
 
-/** Without this the browser moves the caret into the chip, unfolding it before the click. */
+function isTaskCheckbox(target: EventTarget | null): target is HTMLInputElement {
+  return target instanceof HTMLInputElement && target.type === 'checkbox'
+}
+
+/**
+ * Without this the browser moves the caret into the chip, unfolding it before the click. A task
+ * checkbox needs the same treatment: letting it take focus paints Chrome's focus ring over the
+ * tiny box and selects the `<input>`, which reads as a gray film for as long as the editor keeps
+ * focus. Canceling the default leaves focus and caret in the text; the click still toggles the box.
+ */
 function onEditorMouseDown(event: MouseEvent): void {
-  if (chipFromEvent(event.target)) event.preventDefault()
+  if (chipFromEvent(event.target) || isTaskCheckbox(event.target)) event.preventDefault()
 }
 
 function onEditorClick(event: MouseEvent): void {
@@ -160,6 +174,13 @@ function onEditorClick(event: MouseEvent): void {
     event.preventDefault()
     event.stopPropagation()
     void followLink(chip.dataset.target ?? '')
+    return
+  }
+
+  if (isTaskCheckbox(event.target)) {
+    // detail > 0 means a real mouse click; a Tab-focused box keeps its ring.
+    if (event.detail > 0) event.target.blur()
+    releaseCheckboxSelection(event.target)
     return
   }
 
@@ -188,6 +209,23 @@ function onEditorClick(event: MouseEvent): void {
   event.preventDefault()
   event.stopPropagation()
   void followLink(raw)
+}
+
+/**
+ * Clicking a checkbox inside a contenteditable makes Chrome select the `<input>` itself, and the
+ * selection background stays painted over the box as a gray film. Collapsing the range to the
+ * offset just before it clears the highlight; landing on the checkbox child also keeps the block's
+ * fold state, since `blockWithCaret` reads that offset as "no caret here".
+ */
+function releaseCheckboxSelection(box: HTMLInputElement): void {
+  const selection = document.getSelection()
+  if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return
+  const parent = box.parentNode
+  if (!parent) return
+  const caret = document.createRange()
+  caret.setStart(parent, [...parent.childNodes].indexOf(box))
+  selection.removeAllRanges()
+  selection.addRange(caret)
 }
 
 /** Uses Vditor's own insertion API: safe in IR mode, unlike touching the contenteditable DOM. */
@@ -224,34 +262,18 @@ onMounted(() => {
     height: '100%',
     minHeight: 240,
     cache: { enable: false },
-    placeholder: '开始记录… 输入 [[ 链接其它笔记,Ctrl/⌘+K 打开链接选择器',
+    placeholder: '开始记录… 行首 / 呼出命令菜单,输入 [[ 链接其它笔记,Ctrl/⌘+K 打开链接选择器',
     undoDelay: 0,
-    toolbar: [
-      'headings',
-      'bold',
-      'italic',
-      'strike',
-      '|',
-      'quote',
-      'list',
-      'ordered-list',
-      'check',
-      '|',
-      'code',
-      'inline-code',
-      'table',
-      'link',
-      '|',
-      'undo',
-      'redo',
-      '|',
-      'edit-mode',
-      'outline',
-      'fullscreen',
-    ],
-    toolbarConfig: { pin: true },
+    toolbar: [],
     counter: { enable: true, type: 'text' },
-    hint: { delay: 100, parse: false, extend: [{ key: '[[', hint: hintLinks }] },
+    hint: {
+      delay: 100,
+      parse: true,
+      extend: [
+        { key: '[[', hint: hintLinks },
+        { key: '/', hint: slashHint },
+      ],
+    },
     preview: {
       hljs: { style: 'github', lineNumber: false },
       theme: { current: 'dark' },
@@ -338,13 +360,61 @@ defineExpose({ flushSave, insertLink })
 }
 
 .editor__host :deep(.vditor-toolbar) {
-  padding: 4px 14px !important;
-  background: var(--bg-elevated);
-  border-bottom: 1px solid var(--border);
+  display: none;
+}
+
+.editor__host :deep(.slash-hint__alias) {
+  display: inline-block;
+  min-width: 44px;
+  margin-right: 8px;
+  color: var(--text-muted);
+  font-size: 11px;
+  text-transform: uppercase;
 }
 
 .editor__host :deep(.vditor-content) {
   background: var(--bg);
+}
+
+/* Vditor paints the editing root gray (--panel-background-color) and swaps it to a lighter
+   gray (--textarea-background-color) on :focus, so the whole area flashed whenever focus moved
+   between the text and a task checkbox. Both states must be the app background. The theme
+   variables are left alone on purpose: --panel-background-color also paints the hint popup. */
+.editor__host :deep(.vditor-ir pre.vditor-reset),
+.editor__host :deep(.vditor-ir pre.vditor-reset:focus) {
+  background-color: var(--bg);
+}
+
+/* A native checkbox is UA-painted: Chrome fills the pressed box near-black and rings it on
+   focus, which flashed against this theme. Every state is drawn here instead. Vditor's own
+   margin/font-size/vertical-align are left alone so the list layout does not shift. */
+.editor__host :deep(.vditor-task input[type='checkbox']) {
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border: 1.5px solid var(--border);
+  border-radius: 4px;
+  background-color: var(--bg-elevated);
+  cursor: pointer;
+}
+
+.editor__host :deep(.vditor-task input[type='checkbox']:hover),
+.editor__host :deep(.vditor-task input[type='checkbox']:active) {
+  border-color: var(--accent);
+}
+
+.editor__host :deep(.vditor-task input[type='checkbox']:focus-visible) {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.editor__host :deep(.vditor-task input[type='checkbox']:checked) {
+  border-color: var(--accent);
+  background-color: var(--accent);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath fill='none' stroke='%23fff' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round' d='M3.6 8.4 6.5 11.3 12.4 4.7'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: 12px;
 }
 
 .editor__host :deep(.vditor-reset) {

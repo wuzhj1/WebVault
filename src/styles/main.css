@@ -12,6 +12,10 @@
   --warn: #f9e2af;
   --sidebar-w: 268px;
   --right-w: 300px;
+  /* The app is dark-only; without this the UA paints native controls (task checkboxes,
+     selects) in its light theme, so a pressed checkbox flips to a black fill. */
+  color-scheme: dark;
+  accent-color: var(--accent);
 }
 
 * {

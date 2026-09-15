@@ -20,6 +20,36 @@ export interface GiteeConfig {
   branch: string
 }
 
+/**
+ * People paste the address bar (`https://gitee.com/owner/repo/tree/main`) into the owner or
+ * repo field, and the API path built from that bare string then 404s. Split such a value back
+ * into segments so pasting the repo address just works.
+ */
+export function parseRepoUrl(value: string): Partial<Pick<GiteeConfig, 'owner' | 'repo' | 'branch'>> | null {
+  const text = value.trim()
+  const url = text.match(
+    /^(?:https?:\/\/)?(?:www\.)?gitee\.com\/([^/?#\s]+)(?:\/([^/?#\s]+?))?(?:\.git)?(?:\/tree\/([^/?#\s]+))?\/?(?:[?#].*)?$/i,
+  )
+  if (url) return { owner: url[1], repo: url[2] || undefined, branch: url[3] || undefined }
+  const bare = text.match(/^([^/\s]+)\/([^/\s]+)$/)
+  return bare ? { owner: bare[1], repo: bare[2] } : null
+}
+
+export function normalizeGiteeConfig(cfg: GiteeConfig): GiteeConfig {
+  const next = { ...cfg }
+  for (const field of ['owner', 'repo'] as const) {
+    const parsed = parseRepoUrl(next[field])
+    if (!parsed) continue
+    if (parsed.owner) next.owner = parsed.owner
+    if (parsed.repo) next.repo = parsed.repo
+    if (parsed.branch) next.branch = parsed.branch
+  }
+  next.owner = next.owner.trim().replace(/\/+$/, '')
+  next.repo = next.repo.trim().replace(/\.git$/i, '').replace(/\/+$/, '')
+  next.branch = next.branch.trim().replace(/\/+$/, '')
+  return next
+}
+
 export interface TreeEntry {
   path: string
   sha: string
@@ -33,13 +63,14 @@ export type CommitAction =
   | { action: 'move'; path: string; previousPath: string }
 
 export class GiteeError extends Error {
-  constructor(
-    readonly status: number,
-    message: string,
-    readonly retryable: boolean,
-  ) {
+  readonly status: number
+  readonly retryable: boolean
+
+  constructor(status: number, message: string, retryable: boolean) {
     super(message)
     this.name = 'GiteeError'
+    this.status = status
+    this.retryable = retryable
   }
 }
 
@@ -87,6 +118,9 @@ async function raw(
 ): Promise<RawResponse> {
   const headers: Record<string, string> = { Accept: 'application/json' }
   if (options.etag) headers['If-None-Match'] = options.etag
+  // Without Content-Type Gitee cannot parse the JSON body and answers 406; bodyless GETs
+  // worked fine, which is why only pushes failed.
+  if (options.body !== undefined) headers['Content-Type'] = 'application/json'
 
   let response: Response
   try {
@@ -131,7 +165,7 @@ function describeError(status: number, data: unknown): string {
         ? '触发 Gitee 接口频率限制,稍后会自动重试。'
         : `无权限访问该仓库(403)。${msg}`
     case 404:
-      return `仓库、分支或文件不存在(404)。${msg}`
+      return `仓库、分支或文件不存在(404)。请核对 owner/repo/branch 与仓库地址 gitee.com/<owner>/<repo> 是否一致;私有仓库要求令牌勾选了 projects 权限;完全空的仓库没有分支,需先提交一个文件。${msg}`
     default:
       return msg || `Gitee 接口返回 ${status}`
   }
@@ -228,8 +262,8 @@ export async function getBlob(cfg: GiteeConfig, sha: string): Promise<string | n
 
 /**
  * Commit several files at once. Gitee mirrors GitLab's `actions` array here, which is
- * what makes batching cheap; `commitFilesOneByOne` is the fallback if the endpoint is
- * unavailable on a given deployment.
+ * what makes batching cheap; gitee.com itself rejects this body shape (406), in which case
+ * `commitBatch` in the engine degrades to one contents-API request per action.
  */
 export async function commitFiles(
   cfg: GiteeConfig,

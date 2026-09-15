@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import { getSetting, putSetting } from '@/core/db.ts'
-import type { GiteeConfig } from '@/core/sync/gitee.ts'
+import { normalizeGiteeConfig, type GiteeConfig } from '@/core/sync/gitee.ts'
 
 export interface SyncSettings extends GiteeConfig {
   autoSync: boolean
@@ -46,7 +46,9 @@ export const useSettingsStore = defineStore('settings', () => {
   }
 
   async function save(patch: Partial<SyncSettings>): Promise<void> {
-    settings.value = { ...settings.value, ...patch }
+    const merged = { ...settings.value, ...patch }
+    const fixed = normalizeGiteeConfig(merged)
+    settings.value = { ...merged, owner: fixed.owner, repo: fixed.repo, branch: fixed.branch }
     await putSetting(KEY, settings.value)
   }
 

@@ -82,11 +82,27 @@ export function chipFromEvent(target: EventTarget | null): HTMLElement | null {
 
 function blockWithCaret(root: HTMLElement): HTMLElement | null {
   const selection = document.getSelection()
-  if (!selection || selection.rangeCount === 0) return null
-  const node = selection.anchorNode
-  // `node === root` happens when clicking the editor's empty padding; walking up from
-  // there would leave the root and report an ancestor that contains every block.
-  if (!node || node === root || !root.contains(node)) return null
+  const anchor = selection && selection.rangeCount > 0 ? selection.anchorNode : null
+  if (anchor && anchor !== root && root.contains(anchor)) {
+    // Focusing a checkbox leaves the selection anchored on the <li> with an offset pointing
+    // at the <input>; that is not a caret, so keep the unfold state as it is.
+    const pointed = anchor.nodeType === Node.ELEMENT_NODE
+      ? (anchor as HTMLElement).childNodes[selection?.anchorOffset ?? 0] ?? anchor
+      : anchor
+    if (pointed instanceof HTMLInputElement) {
+      return root.querySelector<HTMLElement>(`.${ACTIVE_BLOCK_CLASS}`)
+    }
+    return blockOf(root, anchor)
+  }
+  const focused = document.activeElement
+  if (!(focused instanceof HTMLElement) || focused === root || !root.contains(focused)) return null
+  // Toggling a task checkbox moves focus without moving the caret. Unfolding (or folding)
+  // the line for that would flash the link chips' colors, so keep the current unfold state.
+  if (focused.tagName === 'INPUT') return root.querySelector<HTMLElement>(`.${ACTIVE_BLOCK_CLASS}`)
+  return blockOf(root, focused)
+}
+
+function blockOf(root: HTMLElement, node: Node): HTMLElement | null {
   let current: Node = node
   while (current.parentNode && current.parentNode !== root) current = current.parentNode
   return current instanceof HTMLElement ? current : null
