@@ -38,10 +38,28 @@ export function ensureMdExt(name: string): string {
   return isNotePath(trimmed) ? trimmed : trimmed + MD_EXT
 }
 
-/** `notes/Redis 面试.md` -> `Redis 面试` */
+/**
+ * A zettel id prefix in a filename: twelve digits of local `YYYYMMDDHHmm`, an optional
+ * letter suffix that breaks same-minute collisions, then a separator.
+ *
+ * The separator is required, which is why this is not the same pattern as `isZid`: a note named
+ * exactly `202609151423.md` keeps that as its title instead of being stripped to nothing.
+ */
+export const ZID_PREFIX = /^\d{12}[a-z]{0,3}[ _-]+/
+
+/**
+ * `notes/sub/a.md` -> `a`, and `202609151423 卡片盒.md` -> `卡片盒`.
+ *
+ * Stripping the id here rather than at each call site is the whole point: `titleOf` feeds the top
+ * bar, the file tree, backlinks, graph labels, sync progress, search documents and the link
+ * picker, so one change keeps a timestamp out of all of them. It also makes `[[卡片盒]]` and
+ * `[[202609151423 卡片盒]]` resolve to the same note, since the resolver buckets by this value.
+ */
 export function titleOf(path: string): string {
   const base = path.slice(path.lastIndexOf('/') + 1)
-  return isNotePath(base) ? base.slice(0, -MD_EXT.length) : base
+  const stem = isNotePath(base) ? base.slice(0, -MD_EXT.length) : base
+  const stripped = stem.replace(ZID_PREFIX, '')
+  return stripped === '' ? stem : stripped
 }
 
 /** `notes/sub/a.md` -> `notes/sub`; `a.md` -> `` */

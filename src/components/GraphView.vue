@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { db } from '@/core/db.ts'
 import { cssColor } from '@/core/theme/apply.ts'
 import { titleOf } from '@/core/vault/paths.ts'
+import { buildDegrees, isOrphan } from '@/core/zettel/orphans.ts'
 import { useAppearanceStore } from '@/stores/appearance.ts'
 import { useVaultStore } from '@/stores/vault.ts'
 
@@ -14,12 +15,15 @@ const appearance = useAppearanceStore()
 const canvas = ref<HTMLCanvasElement | null>(null)
 const wrap = ref<HTMLElement | null>(null)
 const local = ref(false)
+const orphansOnly = ref(false)
 const stats = ref({ nodes: 0, edges: 0 })
 
 interface GNode {
   path: string
   title: string
   degree: number
+  /** Nothing connects to it and it connects to nothing: drawn hollow. */
+  orphan: boolean
   x: number
   y: number
   vx: number
@@ -58,6 +62,8 @@ interface Palette {
   edgeIdle: string
   labelBg: string
   label: string
+  /** Interior of an orphan dot: the page showing through, ringed in the idle edge colour. */
+  hollow: string
 }
 
 /**
@@ -75,6 +81,7 @@ function colors(): Palette {
     edgeIdle: cssColor('--text-muted'),
     labelBg: cssColor('--bg'),
     label: cssColor('--text'),
+    hollow: cssColor('--bg'),
   }
   return palette
 }
@@ -93,6 +100,11 @@ async function load(): Promise<void> {
   const active = vault.activePath
   const scope = vault.notes.filter((n) => !n.removedLocal)
 
+  // Graded from the rows just read, not from the store's debounced copy: the hollow dots and the
+  // sidebar's orphan list must never disagree about whether a card is alone.
+  const degrees = buildDegrees(rows.map((r) => ({ src: r.src, targetPath: r.targetPath })))
+  const alone = (path: string): boolean => isOrphan(path, degrees)
+
   let keep: Set<string> | null = null
   if (local.value && active) {
     keep = new Set<string>([active])
@@ -100,6 +112,10 @@ async function load(): Promise<void> {
       if (r.src === active && r.targetPath) keep.add(r.targetPath)
       if (r.targetPath === active) keep.add(r.src)
     }
+  }
+  if (orphansOnly.value) {
+    const lonely = new Set(scope.filter((n) => alone(n.path)).map((n) => n.path))
+    keep = keep ? new Set([...keep].filter((p) => lonely.has(p))) : lonely
   }
 
   const chosen = keep ? scope.filter((n) => keep!.has(n.path)) : scope
@@ -115,6 +131,7 @@ async function load(): Promise<void> {
       path: n.path,
       title: n.title || titleOf(n.path),
       degree: 0,
+      orphan: alone(n.path),
       x: old?.x ?? Math.cos(angle) * radius + (Math.random() - 0.5) * 20,
       y: old?.y ?? Math.sin(angle) * radius + (Math.random() - 0.5) * 20,
       vx: 0,
@@ -255,10 +272,18 @@ function draw(): void {
   for (let i = 0; i < nodes.length; i++) {
     const n = nodes[i]
     const r = (2.6 + Math.sqrt(n.degree) * 1.5) / Math.max(scale, 0.35)
-    ctx.fillStyle = i === activeIndex ? c.active : i === hovered ? c.hovered : c.node
     ctx.beginPath()
     ctx.arc(n.x, n.y, r, 0, Math.PI * 2)
-    ctx.fill()
+    if (n.orphan && i !== activeIndex && i !== hovered) {
+      ctx.fillStyle = c.hollow
+      ctx.fill()
+      ctx.lineWidth = 1.2 / scale
+      ctx.strokeStyle = c.edgeIdle
+      ctx.stroke()
+    } else {
+      ctx.fillStyle = i === activeIndex ? c.active : i === hovered ? c.hovered : c.node
+      ctx.fill()
+    }
   }
 
   const labelFor = (i: number | null): void => {
@@ -398,7 +423,7 @@ function onKeydown(event: KeyboardEvent): void {
   }
 }
 
-watch(local, () => {
+watch([local, orphansOnly], () => {
   void load()
 })
 
@@ -433,6 +458,10 @@ onBeforeUnmount(() => {
             <input v-model="local" type="checkbox" :disabled="!hasActive" />
             <span>只看当前笔记的邻居</span>
           </label>
+          <label class="graph__toggle">
+            <input v-model="orphansOnly" type="checkbox" />
+            <span>只看孤儿卡</span>
+          </label>
           <span class="graph__stats">{{ stats.nodes }} 篇 · {{ stats.edges }} 条链接</span>
           <div class="graph__gap"></div>
           <button class="graph__btn" @click="recenter">重置视图</button>
@@ -441,11 +470,14 @@ onBeforeUnmount(() => {
 
         <div ref="wrap" class="graph__canvas">
           <canvas ref="canvas"></canvas>
-          <p v-if="stats.nodes === 0" class="graph__empty">还没有笔记可以绘制。</p>
+          <p v-if="stats.nodes === 0" class="graph__empty">
+            {{ orphansOnly ? '没有孤儿卡片:每一篇都至少有一条能解析的链接。' : '还没有笔记可以绘制。' }}
+          </p>
           <p class="graph__legend">
             拖动节点可调整位置 · 滚轮缩放 · 拖动空白处平移 · 点击节点打开笔记
             <span class="dot dot--active"></span>当前笔记
             <span class="dot dot--hover"></span>鼠标所指
+            <span class="dot dot--orphan"></span>孤儿卡片
           </p>
         </div>
       </div>
@@ -483,6 +515,7 @@ onBeforeUnmount(() => {
 .graph__head {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 12px;
   flex: none;
   padding: 10px 14px;
@@ -606,6 +639,11 @@ onBeforeUnmount(() => {
 
 .dot--hover {
   background: var(--warn);
+}
+
+.dot--orphan {
+  background: var(--bg);
+  box-shadow: inset 0 0 0 1.5px var(--text-muted);
 }
 
 @media (max-width: 640px) {

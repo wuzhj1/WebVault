@@ -1,4 +1,5 @@
 import Dexie, { type EntityTable } from 'dexie'
+import type { CardType } from './zettel/card.ts'
 
 /**
  * Sync state per note.
@@ -52,6 +53,34 @@ export interface TagRow {
   line: number
 }
 
+/**
+ * Zettelkasten metadata for one note, mirrored out of its frontmatter.
+ *
+ * A separate table rather than new columns on `notes`: `notes` carries the base/local/remote shas
+ * and the dirty flags the sync engine lives on, and declaring `version(2)` with only a new store
+ * leaves the five version-1 stores byte-identical. There is no upgrade function because there is
+ * nothing to convert — the table starts empty and the backfill fills it.
+ *
+ * Like `links` and `tags` this is purely derived: it can be cleared and rebuilt from OPFS at any
+ * time without losing anything the user wrote.
+ */
+export interface CardRow {
+  /** also the join key into `notes` */
+  path: string
+  /** the permanent id, or '' when the note has none */
+  zid: string
+  type: CardType
+  /** epoch ms parsed out of `created`, or 0 when absent, so ordering stays deterministic */
+  created: number
+  /** the string as written, for lossless rewrite */
+  createdRaw: string
+  aliases: string[]
+  /** frontmatter `tags:` merged with the body's `#tag`s, deduped and lowercased */
+  tags: string[]
+  /** 1 = the body was actually read; 0 = placeholder the resumable backfill has not reached */
+  parsed: 0 | 1
+}
+
 export interface SettingRow {
   key: string
   value: string
@@ -68,6 +97,7 @@ class VaultDB extends Dexie {
   notes!: EntityTable<NoteMeta, 'path'>
   links!: EntityTable<LinkRow, 'id'>
   tags!: EntityTable<TagRow, 'id'>
+  cards!: EntityTable<CardRow, 'path'>
   settings!: EntityTable<SettingRow, 'key'>
   syncLog!: EntityTable<SyncLogRow, 'id'>
 
@@ -79,6 +109,10 @@ class VaultDB extends Dexie {
       tags: '++id, tag, path',
       settings: 'key',
       syncLog: '++id, at',
+    })
+    // Only the new store is listed; Dexie carries the version-1 schema forward untouched.
+    this.version(2).stores({
+      cards: 'path, type, zid, created, parsed',
     })
   }
 }

@@ -9,8 +9,10 @@ import {
   type WikilinkLookup,
 } from '@/core/editor/wikilink-dom.ts'
 import { slashHint } from '@/core/editor/slash-commands.ts'
+import { frontmatterLostGuard } from '@/core/parse/frontmatter.ts'
 import { isAttachmentTarget, resolveTarget } from '@/core/index/resolve.ts'
 import { codeThemeFor, type ThemeMode } from '@/core/theme/themes.ts'
+import { titleOf } from '@/core/vault/paths.ts'
 import { useAppearanceStore } from '@/stores/appearance.ts'
 import { useSyncStore } from '@/stores/sync.ts'
 import { useVaultStore } from '@/stores/vault.ts'
@@ -34,6 +36,8 @@ let suppressInput = false
 let saveTimer: ReturnType<typeof setTimeout> | null = null
 let pendingValue: string | null = null
 let loadedPath: string | null = null
+/** What is on disk for `loadedPath`. The guard needs a "before" to compare the editor against. */
+let loadedBody: string | null = null
 
 const vault = useVaultStore()
 const sync = useSyncStore()
@@ -58,7 +62,20 @@ async function flushSave(): Promise<void> {
   // callback, so the live editor content is the only trustworthy source at flush time.
   const value = editor?.getValue() ?? pendingValue
   pendingValue = null
+
+  if (loadedBody !== null && frontmatterLostGuard(loadedBody, value)) {
+    // Restoring keeps the editor and the file in agreement, and without it every following
+    // keystroke would re-arm the same refusal and warn again 700ms later.
+    setContent(loadedBody, true)
+    sync.notify(
+      'warn',
+      `「${titleOf(path)}」开头的元数据块被删掉了,已还原。这个块是卡片的永久地址,[[id]] 链接和同步都靠它。要清空的话请只删掉里面的内容,保留首尾两行 ---。`,
+    )
+    return
+  }
+
   await vault.saveBody(path, value)
+  loadedBody = value
   sync.schedulePush()
 }
 
@@ -87,6 +104,7 @@ async function loadActive(): Promise<void> {
   const path = vault.activePath
   if (!path) {
     loadedPath = null
+    loadedBody = null
     state.value = 'empty'
     setContent('', false)
     return
@@ -96,12 +114,14 @@ async function loadActive(): Promise<void> {
   const body = await vault.readBody(path)
   if (body === null) {
     // Index-only stub: the sync store is fetching it, bodyRevision will wake us up.
+    loadedBody = null
     state.value = 'loading'
     setContent('', false)
     if (sync.available) void sync.fetchBody(path)
     return
   }
 
+  loadedBody = body
   state.value = 'ready'
   setContent(body, true)
 }
@@ -438,6 +458,32 @@ defineExpose({ flushSave, insertLink })
   font-size: 15px;
   line-height: 1.85;
   caret-color: var(--accent);
+}
+
+/* A card's metadata block is its permanent address, not prose, so it reads as file properties:
+   monospace, dimmed, ruled on the left. Existing tokens only — a new one would have to be
+   hand-tuned across five themes and eight accents. */
+.editor__host :deep([data-type='yaml-front-matter']) {
+  margin-bottom: 14px;
+  padding: 6px 12px;
+  border-left: 2px solid var(--border-strong);
+  border-radius: 0 6px 6px 0;
+  background-color: var(--bg-elevated);
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.7;
+}
+
+/* `themes.css` gives every `pre > code` the code-block background from a selector shaped
+   `html .vditor-reset pre > code`, so the reset has to repeat that shape to out-rank it. */
+.editor__host :deep([data-type='yaml-front-matter'] pre),
+.editor__host :deep([data-type='yaml-front-matter'] pre > code) {
+  background-color: transparent;
+  color: inherit;
+  font-family: inherit;
+  font-size: inherit;
+  line-height: inherit;
 }
 
 /* Brackets and the aliased path are hidden with CSS, never removed: IR mode serializes

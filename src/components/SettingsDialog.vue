@@ -2,10 +2,13 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import * as opfs from '@/core/vault/opfs.ts'
 import { ACCENTS, THEMES } from '@/core/theme/themes.ts'
+import { CARD_TYPES, CARD_TYPE_LABELS } from '@/core/zettel/card.ts'
 import { useAppearanceStore } from '@/stores/appearance.ts'
 import { useSettingsStore, type SyncSettings } from '@/stores/settings.ts'
 import { useSyncStore } from '@/stores/sync.ts'
 import { useVaultStore } from '@/stores/vault.ts'
+import { useZettelStore } from '@/stores/zettel.ts'
+import type { ZettelSettings } from '@/core/zettel/settings.ts'
 import Modal from './Modal.vue'
 
 const emit = defineEmits<{ (e: 'close'): void }>()
@@ -14,13 +17,15 @@ const settings = useSettingsStore()
 const sync = useSyncStore()
 const vault = useVaultStore()
 const appearance = useAppearanceStore()
+const zettel = useZettelStore()
 
-const TABS = ['sync', 'appearance', 'data', 'about'] as const
+const TABS = ['sync', 'appearance', 'zettel', 'data', 'about'] as const
 type Tab = (typeof TABS)[number]
 
 const TAB_LABELS: Record<Tab, string> = {
   sync: 'Gitee 同步',
   appearance: '外观',
+  zettel: '卡片盒',
   data: '数据与日志',
   about: '关于与快捷键',
 }
@@ -54,6 +59,17 @@ const stats = computed(() => {
 })
 
 const dirty = computed(() => JSON.stringify(draft.value) !== JSON.stringify(settings.settings))
+
+const zettelDraft = ref<ZettelSettings>({ ...zettel.settings })
+const zettelSaved = ref(false)
+const rebuilding = ref(false)
+
+const zettelDirty = computed(
+  () => JSON.stringify(zettelDraft.value) !== JSON.stringify(zettel.settings),
+)
+
+/** Notes with no metadata block are not cards, so the card total is what is left over. */
+const cardTotal = computed(() => zettel.livePaths.length - zettel.counts.plain)
 
 async function refreshUsage(): Promise<void> {
   if (typeof navigator.storage?.estimate !== 'function') {
@@ -93,6 +109,24 @@ async function test(): Promise<void> {
   await settings.save({ ...draft.value })
   draft.value = { ...settings.settings }
   await sync.checkConnection()
+}
+
+async function saveZettel(): Promise<void> {
+  await zettel.saveSettings({ ...zettelDraft.value })
+  zettelDraft.value = { ...zettel.settings }
+  zettelSaved.value = true
+  setTimeout(() => {
+    zettelSaved.value = false
+  }, 2000)
+}
+
+async function rebuildCards(): Promise<void> {
+  rebuilding.value = true
+  try {
+    await zettel.rebuildCards()
+  } finally {
+    rebuilding.value = false
+  }
 }
 
 async function reindex(): Promise<void> {
@@ -139,8 +173,20 @@ watch(
   { deep: true },
 )
 
+// The store only reads its settings after the backfill finishes, so on a large vault this dialog
+// can open while the draft still holds the defaults. Adopting the loaded value keeps the user from
+// saving a preference they never saw.
+watch(
+  () => zettel.settings,
+  (next) => {
+    if (!zettelDirty.value) zettelDraft.value = { ...next }
+  },
+  { deep: true },
+)
+
 onMounted(() => {
   draft.value = { ...settings.settings }
+  zettelDraft.value = { ...zettel.settings }
   void refreshUsage()
   void sync.refreshLog()
 })
@@ -297,6 +343,74 @@ onMounted(() => {
       </div>
       <p class="field__tip">
         强调色用于链接、双链胶囊、选中态和关系图谱的节点。浅色主题会自动把强调色压深,保证小字号文本的对比度。
+      </p>
+    </template>
+
+    <template v-else-if="tab === 'zettel'">
+      <div class="callout callout--warn">
+        <strong>这一页只影响这台设备。</strong> 卡片自己的 <code>id</code>、<code>type</code>、
+        <code>created</code>、<code>tags</code>、<code>aliases</code> 写在 <code>.md</code>
+        文件开头的元数据块里,会跟着仓库同步到别的设备;而「新建卡片时怎么命名」存在本机浏览器里,不会同步。
+        没手动设置过时,应用会照着仓库里已有的命名习惯推断,所以第二台设备通常会自动跟第一台一致。
+      </div>
+
+      <h4 class="sub sub--first">新卡片文件名</h4>
+      <div class="row">
+        <label class="check">
+          <input v-model="zettelDraft.idPrefix" type="checkbox" />
+          <span>文件名带 ID 前缀</span>
+        </label>
+      </div>
+      <p class="field__tip">
+        开:<code>202609151423 卡片盒笔记法.md</code>;关:<code>卡片盒笔记法.md</code>。ID
+        始终写在文件开头的元数据块里,所以关掉之后 <code>[[202609151423]]</code>
+        照样能解析,已有的文件也不会被改名。
+      </p>
+
+      <h4 class="sub">新建卡片的默认类型</h4>
+      <div class="types">
+        <button
+          v-for="t in CARD_TYPES"
+          :key="t"
+          type="button"
+          class="types__btn"
+          :class="{ 'types__btn--on': zettelDraft.defaultType === t }"
+          @click="zettelDraft.defaultType = t"
+        >
+          {{ CARD_TYPE_LABELS[t] }}
+        </button>
+      </div>
+      <p class="field__tip">
+        闪念是还没想清楚的草稿,会留在侧栏「卡片 → 收件箱」里等你处理;文献记下别人的说法;永久是想清楚了的原子卡片;索引是一组卡片的目录。每次新建时都能在弹窗里临时改。
+      </p>
+
+      <p v-if="zettelSaved" class="field__ok">已保存。</p>
+      <div class="row row--end">
+        <button class="btn" type="button" :disabled="!zettelDirty" @click="saveZettel">保存</button>
+      </div>
+
+      <h4 class="sub">当前状况</h4>
+      <dl class="info">
+        <dt>笔记总数</dt>
+        <dd>{{ zettel.livePaths.length }} 篇</dd>
+        <dt>其中卡片</dt>
+        <dd>{{ cardTotal }} 篇(另有 {{ zettel.counts.plain }} 篇是没有元数据块的普通笔记)</dd>
+        <dt>闪念 / 文献 / 永久 / 索引</dt>
+        <dd>
+          {{ zettel.counts.fleeting }} / {{ zettel.counts.literature }} /
+          {{ zettel.counts.permanent }} / {{ zettel.counts.index }}
+        </dd>
+        <dt>孤儿卡片</dt>
+        <dd>{{ zettel.orphans.length }} 篇(没有任何能解析的双链)</dd>
+      </dl>
+
+      <div class="row">
+        <button class="btn" type="button" :disabled="rebuilding" @click="rebuildCards">
+          {{ rebuilding ? '重建中…' : '重建卡片索引' }}
+        </button>
+      </div>
+      <p class="field__tip">
+        卡片索引是从正文派生出来的,随时可以清掉重建。当收件箱、孤儿列表或相关卡片明显不对时用它。<strong>不会改动任何笔记内容</strong>,没有元数据块的旧笔记也永远不会被自动写入。
       </p>
     </template>
 
@@ -572,6 +686,43 @@ onMounted(() => {
   font-size: 12px;
   line-height: 1.7;
   color: var(--text-muted);
+}
+
+.field__tip code {
+  padding: 0 4px;
+  border-radius: 4px;
+  background: var(--bg-hover);
+  color: var(--accent);
+}
+
+.field__tip strong {
+  color: var(--text);
+}
+
+.types {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.types__btn {
+  padding: 5px 13px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg);
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+
+.types__btn:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.types__btn--on {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent-text);
 }
 
 .field__error {

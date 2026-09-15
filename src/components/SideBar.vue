@@ -1,13 +1,24 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref } from 'vue'
-import { dirOf, joinPath, titleOf } from '@/core/vault/paths.ts'
+import { dirOf, titleOf } from '@/core/vault/paths.ts'
+import {
+  CARD_TYPES,
+  CARD_TYPE_LABELS,
+  cardFilename,
+  cardPath,
+  parseTagList,
+  zidStamp,
+  type CardType,
+} from '@/core/zettel/card.ts'
 import FileTree from './FileTree.vue'
 import Modal from './Modal.vue'
 import { useVaultStore } from '@/stores/vault.ts'
+import { useZettelStore } from '@/stores/zettel.ts'
 
 const emit = defineEmits<{ (e: 'open', path: string): void }>()
 
 const vault = useVaultStore()
+const zettel = useZettelStore()
 
 const menu = ref<{ path: string; x: number; y: number } | null>(null)
 const renaming = ref<string | null>(null)
@@ -15,14 +26,82 @@ const renameValue = ref('')
 const renameError = ref<string | null>(null)
 const deleting = ref<string | null>(null)
 const creating = ref(false)
-const createValue = ref('')
+const createTitle = ref('')
+const createDir = ref('')
+const createType = ref<CardType>('fleeting')
+const createTags = ref('')
 const createError = ref<string | null>(null)
 const renameInput = ref<HTMLInputElement | null>(null)
 const createInput = ref<HTMLInputElement | null>(null)
 
-const section = ref<'files' | 'unresolved' | 'tags'>('files')
+const SECTIONS = ['files', 'unresolved', 'tags', 'cards'] as const
+type Section = (typeof SECTIONS)[number]
+
+const SECTION_LABELS: Record<Section, string> = {
+  files: '笔记',
+  unresolved: '待建',
+  tags: '标签',
+  cards: '卡片',
+}
+
+const section = ref<Section>('files')
+
+const CARD_FILTERS = ['inbox', 'orphans', 'all'] as const
+type CardFilter = (typeof CARD_FILTERS)[number]
+
+const CARD_FILTER_LABELS: Record<CardFilter, string> = {
+  inbox: '收件箱',
+  orphans: '孤儿',
+  all: '全部',
+}
+
+const CARD_FILTER_HINTS: Record<CardFilter, string> = {
+  inbox: '收件箱是空的。新建卡片时选「闪念」,想清楚之后再改成「文献」或「永久」,它就会离开这里。',
+  orphans: '没有孤儿卡片。每一篇都至少有一条能解析的 [[双链]]——在卡片盒里,没有链接的卡片等于不存在。',
+  all: '还没有笔记。点击右上角 ＋ 新建一张卡片。',
+}
+
+const cardFilter = ref<CardFilter>('inbox')
+
+const cardCounts = computed<Record<CardFilter, number>>(() => ({
+  inbox: zettel.inbox.length,
+  orphans: zettel.orphans.length,
+  all: zettel.allCards.length,
+}))
+
+const cardRows = computed<{ path: string; meta: string }[]>(() => {
+  if (cardFilter.value === 'orphans') {
+    return zettel.orphans.map((p) => ({ path: p, meta: orphanMeta(p) }))
+  }
+  if (cardFilter.value === 'all') {
+    return zettel.allCards.map((p) => ({ path: p, meta: typeLabel(p) }))
+  }
+  return zettel.inbox.map((p) => ({ path: p, meta: stampOf(p) }))
+})
 
 const uncachedCount = computed(() => vault.uncached.length)
+
+function typeLabel(path: string): string {
+  const type = zettel.typeOf(path)
+  return type === 'plain' ? '' : CARD_TYPE_LABELS[type]
+}
+
+/** An orphan has no degree left to report, so the only useful subtitle is what it reached for. */
+function orphanMeta(path: string): string {
+  const pending = zettel.degrees.unresolved.get(path) ?? 0
+  return pending > 0 ? `${pending} 个待建链接` : typeLabel(path)
+}
+
+/** `2026-09-15 14:23` -> today's clock time, this year's month and day, otherwise the full date. */
+function stampOf(path: string): string {
+  const m = /^(\d{4})-(\d{2}-\d{2})(?:[ T](\d{2}:\d{2}))?/.exec(zettel.createdOf(path).trim())
+  if (!m) return ''
+  const now = new Date()
+  const year = String(now.getFullYear())
+  const today = `${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
+  if (m[1] !== year) return `${m[1]}-${m[2]}`
+  return m[2] === today ? (m[3] ?? m[2]) : m[2]
+}
 
 function open(path: string): void {
   closeMenu()
@@ -87,17 +166,57 @@ async function confirmDelete(): Promise<void> {
 async function startCreate(): Promise<void> {
   creating.value = true
   createError.value = null
-  createValue.value = vault.activePath ? dirOf(vault.activePath) : ''
+  // Never the directory: the old field doubled as both, so pressing Enter in it created `notes.md`.
+  createTitle.value = ''
+  createDir.value = vault.activePath ? dirOf(vault.activePath) : ''
+  createType.value = zettel.settings.defaultType
+  createTags.value = ''
   await nextTick()
   createInput.value?.focus()
 }
 
-async function confirmCreate(): Promise<void> {
-  const raw = createValue.value.trim()
-  if (raw === '') return
+/** The path that will actually be written, so the id prefix is never a surprise at submit time. */
+const createPreview = computed(() => {
+  const title = createTitle.value.trim()
+  if (title === '') return ''
   try {
-    const name = raw.endsWith('.md') ? raw : `${raw}.md`
-    const path = await vault.createNote(name.includes('/') ? name : joinPath('', name))
+    return cardPath(
+      createDir.value.trim(),
+      cardFilename(zidStamp(), title, { idPrefix: zettel.settings.idPrefix }),
+    )
+  } catch {
+    return ''
+  }
+})
+
+async function confirmCreate(): Promise<void> {
+  const title = createTitle.value.trim()
+  if (title === '') {
+    createError.value = '请填写标题。'
+    return
+  }
+  try {
+    const path = await zettel.createCard({
+      title,
+      dir: createDir.value,
+      type: createType.value,
+      tags: parseTagList(createTags.value),
+    })
+    creating.value = false
+    emit('open', path)
+  } catch (err) {
+    createError.value = err instanceof Error ? err.message : String(err)
+  }
+}
+
+async function createPlain(): Promise<void> {
+  const title = createTitle.value.trim()
+  if (title === '') {
+    createError.value = '请填写标题。'
+    return
+  }
+  try {
+    const path = await zettel.createPlainNote(title, createDir.value)
     creating.value = false
     emit('open', path)
   } catch (err) {
@@ -117,16 +236,16 @@ onBeforeUnmount(closeMenu)
     <div class="sidebar__head">
       <nav class="tabs">
         <button
-          v-for="t in (['files', 'unresolved', 'tags'] as const)"
+          v-for="t in SECTIONS"
           :key="t"
           class="tabs__btn"
           :class="{ 'tabs__btn--on': section === t }"
           @click="section = t"
         >
-          {{ t === 'files' ? '笔记' : t === 'unresolved' ? '待建' : '标签' }}
+          {{ SECTION_LABELS[t] }}
         </button>
       </nav>
-      <button class="icon-btn" title="新建笔记" aria-label="新建笔记" @click="startCreate">＋</button>
+      <button class="icon-btn" title="新建卡片" aria-label="新建卡片" @click="startCreate">＋</button>
     </div>
 
     <div class="sidebar__scroll">
@@ -154,7 +273,7 @@ onBeforeUnmount(closeMenu)
         </ul>
       </template>
 
-      <template v-else>
+      <template v-else-if="section === 'tags'">
         <p v-if="vault.allTags.length === 0" class="hint">
           还没有标签。在笔记里写 <code>#标签</code> 即可,支持 <code>#父/子</code> 嵌套。
         </p>
@@ -163,6 +282,37 @@ onBeforeUnmount(closeMenu)
             <button class="list__row" @click="section = 'files'">
               <span class="list__name">#{{ t.tag }}</span>
               <span class="list__meta">{{ t.count }}</span>
+            </button>
+          </li>
+        </ul>
+      </template>
+
+      <template v-else>
+        <nav class="tabs cards__filters">
+          <button
+            v-for="f in CARD_FILTERS"
+            :key="f"
+            class="tabs__btn"
+            :class="{ 'tabs__btn--on': cardFilter === f }"
+            @click="cardFilter = f"
+          >
+            {{ CARD_FILTER_LABELS[f]
+            }}<template v-if="cardCounts[f] > 0"> {{ cardCounts[f] }}</template>
+          </button>
+        </nav>
+
+        <p v-if="zettel.backfill" class="hint">
+          正在建立卡片索引 {{ zettel.backfill.done }}/{{ zettel.backfill.total }}
+        </p>
+
+        <p v-if="cardRows.length === 0" class="hint">
+          {{ vault.notes.length === 0 ? CARD_FILTER_HINTS.all : CARD_FILTER_HINTS[cardFilter] }}
+        </p>
+        <ul v-else class="list">
+          <li v-for="row in cardRows" :key="row.path">
+            <button class="list__row" @click="open(row.path)">
+              <span class="list__name">{{ titleOf(row.path) }}</span>
+              <span v-if="row.meta" class="list__meta">{{ row.meta }}</span>
             </button>
           </li>
         </ul>
@@ -213,19 +363,58 @@ onBeforeUnmount(closeMenu)
       </template>
     </Modal>
 
-    <Modal v-if="creating" title="新建笔记" @close="creating = false">
+    <Modal v-if="creating" title="新建卡片" @close="creating = false">
+      <p class="field__label">标题</p>
       <input
-        v-model="createValue"
+        v-model="createTitle"
         ref="createInput"
         class="field"
-        placeholder="例如 Redis 面试要点,或 00-收集箱/AI/新笔记"
+        placeholder="一句话能说清的一个想法"
         @keydown.enter="confirmCreate"
       />
-      <p class="field__tip">留空 <code>.md</code> 后缀会自动补上;带 <code>/</code> 会创建到对应目录。</p>
+
+      <p class="field__label field__label--gap">目录</p>
+      <input
+        v-model="createDir"
+        class="field"
+        placeholder="留空为仓库根目录,例如 00-收集箱/AI"
+        @keydown.enter="confirmCreate"
+      />
+      <p v-if="createPreview" class="field__tip">
+        将创建 <code>{{ createPreview }}</code>
+      </p>
+
+      <p class="field__label field__label--gap">类型</p>
+      <nav class="tabs picker">
+        <button
+          v-for="t in CARD_TYPES"
+          :key="t"
+          class="tabs__btn"
+          :class="{ 'tabs__btn--on': createType === t }"
+          @click="createType = t"
+        >
+          {{ CARD_TYPE_LABELS[t] }}
+        </button>
+      </nav>
+      <p class="field__tip">
+        闪念是还没想清楚的草稿,会留在收件箱里;文献记下别人的说法;永久是想清楚了的原子卡片;索引是
+        一组卡片的目录。之后随时能在右侧「信息」里改。
+      </p>
+
+      <p class="field__label field__label--gap">标签(可选)</p>
+      <input
+        v-model="createTags"
+        class="field"
+        placeholder="卡片盒, 笔记法"
+        @keydown.enter="confirmCreate"
+      />
+
       <p v-if="createError" class="field__error">{{ createError }}</p>
       <template #footer>
+        <button class="btn btn--ghost" @click="createPlain">只建普通 .md</button>
+        <span class="foot__gap"></span>
         <button class="btn" @click="creating = false">取消</button>
-        <button class="btn btn--primary" @click="confirmCreate">创建</button>
+        <button class="btn btn--primary" @click="confirmCreate">创建卡片</button>
       </template>
     </Modal>
   </aside>
@@ -273,6 +462,10 @@ onBeforeUnmount(closeMenu)
 .tabs__btn--on {
   background: var(--accent-soft);
   color: var(--accent-text);
+}
+
+.cards__filters {
+  margin-bottom: 8px;
 }
 
 .icon-btn {
@@ -400,8 +593,27 @@ onBeforeUnmount(closeMenu)
   color: var(--text-muted);
 }
 
+.field__label--gap {
+  margin-top: 14px;
+}
+
 .field__label code {
   color: var(--text);
+}
+
+.picker {
+  flex: none;
+  gap: 6px;
+}
+
+.picker .tabs__btn {
+  flex: none;
+  padding: 4px 12px;
+  border: 1px solid var(--border);
+}
+
+.picker .tabs__btn--on {
+  border-color: var(--accent);
 }
 
 .field__tip {
@@ -446,5 +658,20 @@ onBeforeUnmount(closeMenu)
   background: var(--danger-soft);
   border-color: var(--danger);
   color: var(--danger);
+}
+
+.btn--ghost {
+  border-color: transparent;
+  background: none;
+  color: var(--text-muted);
+}
+
+.btn--ghost:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.foot__gap {
+  flex: 1;
 }
 </style>

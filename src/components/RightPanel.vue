@@ -1,14 +1,27 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { db } from '@/core/db.ts'
+import { parseFrontmatter } from '@/core/parse/frontmatter.ts'
+import { titleOf } from '@/core/vault/paths.ts'
+import { CARD_TYPES, CARD_TYPE_LABELS, type CardType } from '@/core/zettel/card.ts'
 import { useVaultStore } from '@/stores/vault.ts'
+import { useZettelStore } from '@/stores/zettel.ts'
 
-const emit = defineEmits<{ (e: 'open', path: string): void }>()
+const emit = defineEmits<{
+  (e: 'open', path: string): void
+  /** Routed through App.vue: it owns the editor ref and must flush before the file is rewritten. */
+  (e: 'set-type', path: string, type: CardType): void
+  (e: 'add-meta', path: string, type: CardType): void
+}>()
 
 const vault = useVaultStore()
+const zettel = useZettelStore()
 
 const tags = ref<string[]>([])
 const words = ref<number | null>(null)
+/** Whether the open note's file actually starts with a `---` block. */
+const hasMeta = ref(false)
+const duplicateKeys = ref<string[]>([])
 const section = ref<'links' | 'info'>('links')
 
 const meta = computed(() => vault.activeNote)
@@ -24,6 +37,15 @@ const unresolved = computed(() => {
 })
 const attachments = computed(() => vault.outgoing.filter((l) => l.attachment))
 
+/**
+ * Rendered only for the note it was actually ranked for. Ranking is debounced and asynchronous, so
+ * without this the panel would show the previous note's relatives under the current one's title.
+ */
+const relatedRows = computed(() => (zettel.relatedFor === vault.activePath ? zettel.related : []))
+
+const cardType = computed<CardType>(() => (meta.value ? zettel.typeOf(meta.value.path) : 'plain'))
+const aliases = computed(() => (meta.value ? zettel.aliasesOf(meta.value.path) : []))
+
 const syncState = computed(() => {
   const m = meta.value
   if (!m) return ''
@@ -37,16 +59,38 @@ function labelOf(target: string, alias: string | null): string {
   return alias ?? target
 }
 
+/** Empty for ordinary notes, so a row without a card shows no badge at all. */
+function typeBadge(path: string): string {
+  const type = zettel.typeOf(path)
+  return type === 'plain' ? '' : CARD_TYPE_LABELS[type]
+}
+
+/**
+ * One control, two outcomes. A note that already has a block gets its `type` line rewritten; a note
+ * that has none is promoted to a card, which is what also gives it the id and creation stamp. The
+ * second path matters: writing `type` on its own would create a card with no permanent address.
+ */
+function chooseType(type: CardType): void {
+  if (!meta.value || !meta.value.cached) return
+  if (hasMeta.value) emit('set-type', meta.value.path, type)
+  else emit('add-meta', meta.value.path, type)
+}
+
 async function loadDetails(): Promise<void> {
   const path = vault.activePath
   if (!path) {
     tags.value = []
     words.value = null
+    hasMeta.value = false
+    duplicateKeys.value = []
     return
   }
   tags.value = (await db.tags.where('path').equals(path).toArray()).map((t) => `#${t.tag}`)
   const body = await vault.readBody(path)
   words.value = body === null ? null : countWords(body)
+  const frontmatter = body === null ? null : parseFrontmatter(body)
+  hasMeta.value = frontmatter?.exists ?? false
+  duplicateKeys.value = frontmatter?.duplicates ?? []
 }
 
 function countWords(body: string): number {
@@ -91,6 +135,10 @@ watch(
     </div>
 
     <div class="panel__scroll">
+      <p v-if="duplicateKeys.length > 0" class="warn">
+        元数据块里有重复的键 <code>{{ duplicateKeys.join(', ') }}</code>(可能是同步合并造成的)。已保留第一处,请在编辑器里手动删掉多余的行。
+      </p>
+
       <p v-if="!meta" class="hint">打开一篇笔记后,这里会显示它的反向链接与笔记信息。</p>
 
       <template v-else-if="section === 'links'">
@@ -106,6 +154,7 @@ watch(
             <li v-for="(l, i) in vault.inbound" :key="`${l.path}:${l.line}:${i}`">
               <button class="links__row" @click="emit('open', l.path)">
                 <span class="links__title">
+                  <span v-if="typeBadge(l.path)" class="links__badge">{{ typeBadge(l.path) }}</span>
                   <span v-if="l.embed" class="links__badge">嵌入</span>
                   {{ l.title }}
                 </span>
@@ -158,10 +207,62 @@ watch(
           </h4>
           <p class="hint">附件暂不支持在线预览,可在 Gitee 仓库中查看。</p>
         </section>
+
+        <section v-if="relatedRows.length > 0" class="group">
+          <h4 class="group__title">
+            相关卡片
+            <span class="group__count">{{ relatedRows.length }}</span>
+          </h4>
+          <ul class="links">
+            <li v-for="h in relatedRows" :key="h.path">
+              <button class="links__row" @click="emit('open', h.path)">
+                <span class="links__title">
+                  <span v-if="typeBadge(h.path)" class="links__badge">{{ typeBadge(h.path) }}</span>
+                  {{ titleOf(h.path) }}
+                </span>
+                <span class="links__ctx">{{ h.reasons.join(' · ') }}</span>
+              </button>
+            </li>
+          </ul>
+          <p class="hint">按共引、共同标签与文本相似度推测,不代表已有链接。</p>
+        </section>
       </template>
 
       <template v-else>
         <dl class="info">
+          <dt>类型</dt>
+          <dd>
+            <nav class="picker">
+              <button
+                v-for="t in CARD_TYPES"
+                :key="t"
+                class="tabs__btn"
+                :class="{ 'tabs__btn--on': cardType === t }"
+                :disabled="!meta.cached"
+                @click="chooseType(t)"
+              >
+                {{ CARD_TYPE_LABELS[t] }}
+              </button>
+            </nav>
+            <p v-if="!hasMeta" class="hint">
+              这篇笔记还不是卡片。选一个类型会在文件头写入 <code>id</code> / <code>type</code> /
+              <code>created</code>,正文一个字节都不改。
+            </p>
+            <p v-else-if="!meta.cached" class="hint">内容还没下载到本机,联网同步后再改类型。</p>
+          </dd>
+
+          <template v-if="hasMeta">
+            <dt>ID</dt>
+            <dd class="mono">{{ zettel.zidOf(meta.path) || '无' }}</dd>
+            <dt>创建时间</dt>
+            <dd>{{ zettel.createdOf(meta.path) || '无' }}</dd>
+            <dt>别名</dt>
+            <dd>
+              <span v-if="aliases.length === 0" class="muted">无</span>
+              <span v-for="a in aliases" v-else :key="a" class="tag">{{ a }}</span>
+            </dd>
+          </template>
+
           <dt>路径</dt>
           <dd class="mono">{{ meta.path }}</dd>
           <dt>同步状态</dt>
@@ -179,7 +280,8 @@ watch(
           </dd>
         </dl>
         <p class="hint">
-          正文以 <code>.md</code> 明文保存在本机浏览器的 OPFS 中,并通过 Gitee 仓库在设备间同步。
+          正文以 <code>.md</code> 明文保存在本机浏览器的 OPFS 中,并通过 Gitee 仓库在设备间同步。卡片信息写在文件头的
+          <code>---</code> 块里,所以它跟着仓库走,换设备也不会丢。
         </p>
       </template>
     </div>
@@ -223,6 +325,34 @@ watch(
 .tabs__btn--on {
   background: var(--accent-soft);
   color: var(--accent-text);
+}
+
+.picker {
+  display: flex;
+  gap: 2px;
+  margin-top: 2px;
+}
+
+.picker .tabs__btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.warn {
+  margin: 0 2px 12px;
+  padding: 7px 9px;
+  border: 1px solid var(--warn-line);
+  border-radius: 7px;
+  background: var(--warn-soft);
+  font-size: 12.5px;
+  line-height: 1.65;
+  color: var(--warn);
+}
+
+.warn code {
+  padding: 0 4px;
+  border-radius: 4px;
+  background: var(--bg-hover);
 }
 
 .panel__scroll {

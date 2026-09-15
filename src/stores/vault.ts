@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { computed, ref, shallowRef } from 'vue'
-import { db, type LinkRow, type NoteMeta, type TagRow } from '@/core/db.ts'
+import { db, type CardRow, type LinkRow, type NoteMeta, type TagRow } from '@/core/db.ts'
 import { gitBlobSha } from '@/core/vault/hash.ts'
 import * as opfs from '@/core/vault/opfs.ts'
 import {
@@ -20,6 +20,7 @@ import {
   resolveTarget,
   type Resolver,
 } from '@/core/index/resolve.ts'
+import { cardFromBody, frontmatterTagRows, isZid } from '@/core/zettel/card.ts'
 import { needsRemoteDelete } from '@/core/sync/remote-diff.ts'
 
 export interface TreeNode {
@@ -74,11 +75,25 @@ export const useVaultStore = defineStore('vault', () => {
   const outgoing = shallowRef<OutgoingEntry[]>([])
   const unresolvedTargets = shallowRef<string[]>([])
   const allTags = shallowRef<{ tag: string; count: number }[]>([])
+  /** Frontmatter mirrored into an index; derived data, rebuildable from OPFS at any time. */
+  const cards = shallowRef<CardRow[]>([])
   /** Bumped when the sync engine rewrites the body of the note currently open. */
   const bodyRevision = ref(0)
 
-  const resolver = computed<Resolver>(() => buildResolver(notes.value))
+  const resolver = computed<Resolver>(() => buildResolver(notes.value, cards.value))
   const byPath = computed(() => new Map(notes.value.map((n) => [n.path, n])))
+  const cardByPath = computed(() => new Map(cards.value.map((c) => [c.path, c])))
+
+  /**
+   * Cheap stand-in for a content version counter: any save bumps a note's mtime, which changes this
+   * sum. Shared by the search index and the related-card ranking — two callers each computing their
+   * own would keep invalidating the module-level MiniSearch cache between them.
+   */
+  const revision = computed(() => {
+    let r = 0
+    for (const n of notes.value) r = (r * 31 + n.mtime + n.path.length) % 2147483647
+    return r
+  })
 
   const tree = computed<TreeNode[]>(() => {
     const root: TreeNode[] = []
@@ -198,6 +213,7 @@ export const useVaultStore = defineStore('vault', () => {
     if ((await db.notes.count()) === 0 && onDisk.size === 0) {
       await db.links.clear()
       await db.tags.clear()
+      await db.cards.clear()
     }
 
     notes.value = await db.notes.toArray()
@@ -205,7 +221,15 @@ export const useVaultStore = defineStore('vault', () => {
   }
 
   async function refreshDerived(): Promise<void> {
-    const r = buildResolver(notes.value)
+    // Cards first: the resolver below re-resolves every link, and an `[[id]]` link only resolves
+    // once the id index is in hand.
+    const cardRows = await db.cards.toArray()
+    const live = new Set(notes.value.filter((n) => !n.removedLocal).map((n) => n.path))
+    const staleCards = cardRows.filter((c) => !live.has(c.path))
+    if (staleCards.length > 0) await db.cards.bulkDelete(staleCards.map((c) => c.path))
+    cards.value = cardRows.filter((c) => live.has(c.path))
+
+    const r = buildResolver(notes.value, cards.value)
 
     const links = await db.links.toArray()
     let drifted = false
@@ -271,7 +295,14 @@ export const useVaultStore = defineStore('vault', () => {
       }))
   }
 
-  async function reindexContent(path: string, content: string): Promise<void> {
+  /**
+   * The funnel every body write goes through, which is why it is also the only place the card index
+   * needs maintaining.
+   *
+   * @returns true when the note's permanent id appeared, changed or disappeared — other notes'
+   * `[[id]]` links may resolve differently now, and only a full drift pass picks that up.
+   */
+  async function reindexContent(path: string, content: string): Promise<boolean> {
     const { links, tags } = parseNote(content)
     const r = resolver.value
 
@@ -286,14 +317,22 @@ export const useVaultStore = defineStore('vault', () => {
       line: l.line,
       context: l.context,
     }))
-    const tagRows: TagRow[] = tags.map((t) => ({ tag: t.tag, path, line: t.line }))
+    const tagRows: TagRow[] = [
+      ...tags.map((t) => ({ tag: t.tag, path, line: t.line })),
+      ...frontmatterTagRows(path, content, tags),
+    ]
+    const card = cardFromBody(path, content)
+    const zidChanged = (cardByPath.value.get(path)?.zid ?? '') !== card.zid
 
-    await db.transaction('rw', db.links, db.tags, async () => {
+    await db.transaction('rw', db.links, db.tags, db.cards, async () => {
       await db.links.where('src').equals(path).delete()
       await db.tags.where('path').equals(path).delete()
       if (linkRows.length) await db.links.bulkAdd(linkRows)
       if (tagRows.length) await db.tags.bulkAdd(tagRows)
+      await db.cards.put(card)
     })
+    cards.value = [...cards.value.filter((c) => c.path !== path), card]
+    return zidChanged
   }
 
   async function readBody(path: string): Promise<string | null> {
@@ -311,6 +350,15 @@ export const useVaultStore = defineStore('vault', () => {
   async function reloadNotes(): Promise<void> {
     notes.value = await db.notes.toArray()
     await refreshDerived()
+  }
+
+  /**
+   * Pull the card index back in without re-resolving any link. The backfill writes rows straight
+   * into Dexie a chunk at a time, and `refreshDerived` per chunk would be a full link scan each time.
+   */
+  async function reloadCards(): Promise<void> {
+    const live = new Set(notes.value.filter((n) => !n.removedLocal).map((n) => n.path))
+    cards.value = (await db.cards.toArray()).filter((c) => live.has(c.path))
   }
 
   /** Called by the sync engine after it writes a body from the network. */
@@ -336,9 +384,11 @@ export const useVaultStore = defineStore('vault', () => {
       removedLocal: 0,
     }
     await db.notes.put(meta)
-    await reindexContent(path, content)
+    const zidChanged = await reindexContent(path, content)
     notes.value = await db.notes.toArray()
-    if (activePath.value === path) await refreshActiveLinks()
+    // An id that just appeared can make `[[id]]` links in other notes resolve for the first time,
+    // and only the full drift pass rewrites their targetPath.
+    if (activePath.value === path && !zidChanged) await refreshActiveLinks()
     else await refreshDerived()
     return meta
   }
@@ -406,13 +456,17 @@ export const useVaultStore = defineStore('vault', () => {
       await db.notes.put(tombstone)
     }
 
-    await db.transaction('rw', db.links, db.tags, async () => {
+    await db.transaction('rw', db.links, db.tags, db.cards, async () => {
       const ownLinks = await db.links.where('src').equals(from).toArray()
       const ownTags = await db.tags.where('path').equals(from).toArray()
+      const ownCard = await db.cards.get(from)
       await db.links.where('src').equals(from).delete()
       await db.tags.where('path').equals(from).delete()
+      await db.cards.delete(from)
       if (ownLinks.length) await db.links.bulkAdd(ownLinks.map((l) => ({ ...l, src: to })))
       if (ownTags.length) await db.tags.bulkAdd(ownTags.map((t) => ({ ...t, path: to })))
+      // The id lives in the file, not the filename, so it travels with the card unchanged.
+      if (ownCard) await db.cards.put({ ...ownCard, path: to })
     })
 
     await rewriteInboundLinks(from, to)
@@ -497,15 +551,17 @@ export const useVaultStore = defineStore('vault', () => {
   /** Link suggestions for the `[[` autocomplete popup. */
   function suggestLinks(query: string): { html: string; value: string }[] {
     const q = query.trim().toLowerCase()
+    const typed = query.trim()
     const pool = notes.value.filter((n) => !n.removedLocal)
     const scored = pool
       .map((n) => {
         const title = n.title.toLowerCase()
         const path = n.path.toLowerCase()
+        const card = cardByPath.value.get(n.path)
         let score = -1
         if (q === '') score = 0
-        else if (title.startsWith(q)) score = 1
-        else if (title.includes(q)) score = 2
+        else if (title.startsWith(q) || (card?.zid ?? '').startsWith(q)) score = 1
+        else if (title.includes(q) || card?.aliases.some((a) => a.toLowerCase().includes(q))) score = 2
         else if (path.includes(q)) score = 3
         return { n, score }
       })
@@ -513,11 +569,14 @@ export const useVaultStore = defineStore('vault', () => {
       .sort((a, b) => a.score - b.score || a.n.title.localeCompare(b.n.title, 'zh-Hans-CN'))
       .slice(0, 30)
 
+    // A complete id the user typed is the link they meant to write; substituting the title here
+    // would silently rewrite their intent.
+    const idHit = isZid(typed) ? resolveTarget(resolver.value, typed) : null
     const items = scored.map(({ n }) => ({
       html: `<span class="hint-title">${escapeHtml(n.title)}</span><span class="hint-path">${escapeHtml(
         dirOf(n.path),
       )}</span>`,
-      value: preferredLinkText(resolver.value, n.path),
+      value: idHit !== null && idHit === n.path ? typed : preferredLinkText(resolver.value, n.path),
     }))
 
     if (q !== '' && resolveTarget(resolver.value, query) === null && !isAttachmentTarget(query)) {
@@ -541,6 +600,9 @@ export const useVaultStore = defineStore('vault', () => {
     outgoing,
     unresolvedTargets,
     allTags,
+    cards,
+    cardByPath,
+    revision,
     pendingUpload,
     uncached,
     bodyRevision,
@@ -551,6 +613,7 @@ export const useVaultStore = defineStore('vault', () => {
     openNote,
     notifyBodyChanged,
     reloadNotes,
+    reloadCards,
     readBody,
     saveBody,
     createNote,

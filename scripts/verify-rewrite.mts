@@ -85,5 +85,22 @@ check(
   doc,
 )
 
+// A card's permanent address lives in the metadata block, and so might somebody's own
+// `related: [[…]]` key. A rename rewriting either would be a surprise nobody asked for.
+const metaDoc = [
+  '---',
+  'id: 202609151423',
+  "related: '[[Redis]]'",
+  'tags: [Redis, 缓存]',
+  '---',
+  '正文 [[Redis]] 要改。',
+  '',
+].join('\n')
+const metaOut = rewriteWikilinks(metaDoc, rule)
+check('frontmatter is not prose, so only the body link is rewritten', metaOut.changed, 1)
+check('the metadata block keeps its exact bytes through a rename', metaOut.text.split('\n').slice(0, 5).join('\n'), metaDoc.split('\n').slice(0, 5).join('\n'))
+check('the permanent id in particular is untouched', metaOut.text.split('\n')[1], 'id: 202609151423')
+check('and the body still is', metaOut.text.split('\n')[5], '正文 [[00-数据库/Redis]] 要改。')
+
 console.log(`\n${pass} passed, ${fail} failed`)
 process.exit(fail === 0 ? 0 : 1)

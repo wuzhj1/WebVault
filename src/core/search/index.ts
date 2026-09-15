@@ -66,6 +66,32 @@ export function invalidateIndex(): void {
   indexedRevision = -1
 }
 
+/**
+ * Whether the index is already built for this exact revision.
+ *
+ * Callers that only want a ranking signal use this to avoid triggering `ensureIndex`, which reads
+ * every cached body from OPFS. Cheap when the user has already searched; skipping the text signal
+ * otherwise is what keeps switching between notes from becoming a full-vault scan.
+ */
+export function hasIndex(revision: number): boolean {
+  return index !== null && indexedRevision === revision
+}
+
+/** Scored ids only — no excerpt, so no second OPFS read per hit. */
+export async function searchIds(
+  query: string,
+  revision: number,
+  limit = 60,
+): Promise<{ id: string; score: number }[]> {
+  const q = query.trim()
+  if (q === '') return []
+  const idx = await ensureIndex(revision)
+  return idx
+    .search(q)
+    .slice(0, limit)
+    .map((r) => ({ id: String(r.id), score: r.score }))
+}
+
 export async function search(query: string, revision: number, limit = 40): Promise<SearchHit[]> {
   const q = query.trim()
   if (q === '') return []

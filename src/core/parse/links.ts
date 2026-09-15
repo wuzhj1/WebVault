@@ -6,6 +6,8 @@
  * `[[example]]` syntax would register as a real backlink.
  */
 
+import { FRONTMATTER_DELIM, frontmatterEnd } from './frontmatter.ts'
+
 export interface ParsedLink {
   /** note name or path as written, e.g. `Redis` or `00-收集箱/AI/Redis` */
   target: string
@@ -29,7 +31,6 @@ export interface ParseResult {
 }
 
 const FENCE = /^\s{0,3}(`{3,}|~{3,})/
-const FRONTMATTER_DELIM = /^\s{0,3}---\s*$/
 const INLINE_CODE = /(`+)(?:[^`]|(?!\1)`)*?\1/g
 const WIKILINK = /(!?)\[\[([^\[\]]+?)\]\]/g
 const HEADING = /^ {0,3}(#{1,6})\s+(.+?)\s*#*\s*$/
@@ -127,7 +128,9 @@ export function forEachProseLine(
   for (let i = 0; i < lines.length; i++) {
     const raw = lines[i]
 
-    if (i === 0 && FRONTMATTER_DELIM.test(raw)) {
+    // An unterminated leading `---` is a thematic break, not metadata: the rest of the file is
+    // prose, and swallowing it here would hide every link and tag in the note.
+    if (i === 0 && frontmatterEnd(lines) !== -1) {
       inFrontmatter = true
       continue
     }

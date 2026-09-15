@@ -9,13 +9,16 @@ import SearchPanel from './components/SearchPanel.vue'
 import SettingsDialog from './components/SettingsDialog.vue'
 import SideBar from './components/SideBar.vue'
 import TopBar from './components/TopBar.vue'
+import type { CardType } from './core/zettel/card.ts'
 import { useSyncStore } from './stores/sync.ts'
 import { useVaultStore } from './stores/vault.ts'
+import { useZettelStore } from './stores/zettel.ts'
 
 type Overlay = 'search' | 'graph' | 'settings' | 'picker' | null
 
 const vault = useVaultStore()
 const sync = useSyncStore()
+const zettel = useZettelStore()
 
 const editorRef = ref<InstanceType<typeof NoteEditor> | null>(null)
 const overlay = ref<Overlay>(null)
@@ -65,6 +68,22 @@ function insertLink(target: string): void {
   editorRef.value?.insertLink(target)
 }
 
+/**
+ * Both card edits rewrite the open note's file, and the editor still holds the body in its own DOM
+ * behind a 700ms debounce. Flushing first *and awaiting it* is the whole point: `flushSave` clears
+ * the timer and the pending value before it returns, so no later flush can write the pre-change text
+ * back over the metadata. Never fire-and-forget these.
+ */
+async function setCardType(path: string, type: CardType): Promise<void> {
+  await editorRef.value?.flushSave()
+  await zettel.setCardType(path, type)
+}
+
+async function addCardMeta(path: string, type: CardType): Promise<void> {
+  await editorRef.value?.flushSave()
+  await zettel.addCardMeta(path, type)
+}
+
 function onKeydown(event: KeyboardEvent): void {
   if (!(event.ctrlKey || event.metaKey) || event.altKey) return
   const key = event.key.toLowerCase()
@@ -99,6 +118,8 @@ onMounted(async () => {
 
   await vault.init()
   if (vault.fatal) return
+  // Deliberately not awaited: the card index builds itself in the background while the user reads.
+  void zettel.warmUp()
   await sync.init()
 })
 
@@ -166,7 +187,7 @@ onBeforeUnmount(() => {
         </main>
 
         <aside class="app__right" :class="{ 'app__right--open': rightOpen }">
-          <RightPanel @open="openNote" />
+          <RightPanel @open="openNote" @set-type="setCardType" @add-meta="addCardMeta" />
         </aside>
       </div>
     </template>

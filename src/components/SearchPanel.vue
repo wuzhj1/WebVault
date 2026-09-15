@@ -16,16 +16,6 @@ const busy = ref(false)
 let seq = 0
 let timer: ReturnType<typeof setTimeout> | null = null
 
-/**
- * Cheap stand-in for a content version counter: any save bumps a note's mtime, which
- * changes this sum and makes the search layer rebuild its index.
- */
-const revision = computed(() => {
-  let r = 0
-  for (const n of vault.notes) r = (r * 31 + n.mtime + n.path.length) % 2147483647
-  return r
-})
-
 const uncachedCount = computed(() => vault.uncached.length)
 
 async function run(): Promise<void> {
@@ -38,7 +28,7 @@ async function run(): Promise<void> {
   const mine = ++seq
   busy.value = true
   try {
-    const found = await search(q, revision.value)
+    const found = await search(q, vault.revision)
     if (mine !== seq) return
     hits.value = found
     cursor.value = 0
