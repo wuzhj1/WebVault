@@ -138,7 +138,7 @@ function meta(path: string) {
 
 .row--active {
   background: var(--accent-soft);
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .row--active:hover {

@@ -9,6 +9,7 @@
 - 中文全文搜索（自研 CJK 单字/双字分词 + MiniSearch），带命中摘要
 - 力导向关系图谱
 - Vditor 即时渲染编辑器，`[[` 触发链接补全，资源全部自托管、离线可用
+- 5 套主题（3 深 2 浅）× 8 种强调色，在设置的「外观」里点一下就换，编辑器、代码高亮、关系图谱一起跟着走
 - PWA：可安装、可离线，Safari 清空缓存后能自动从 Gitee 恢复
 - Gitee 单仓库同步：索引优先拉取、正文按需下载、批量提交、三方合并、冲突副本
 
@@ -26,7 +27,7 @@ npm run dev        # http://localhost:5173
 自检命令：
 
 ```bash
-npm run verify     # 5 个验证套件,92 条断言(解析 / 链接改写 / 三方合并 / 远端删除判定 / 搜索)
+npm run verify     # 7 个验证套件,337 条断言(配置 / 解析 / 链接改写 / 三方合并 / 远端删除判定 / 搜索 / 主题)
 npm run typecheck  # vue-tsc --noEmit
 npm run build      # 先重新生成 PWA 图标,再产出 dist/
 ```
@@ -99,6 +100,30 @@ Safari 的防跟踪策略（ITP）会在大约 7 天不使用后清空该站点�
 
 ---
 
+## 主题与外观
+
+设置（`Ctrl / ⌘ + ,`）→「外观」标签页，点主题卡片或强调色圆点**立即生效**，不用保存。
+
+| 主题 | id | 明暗 | 说明 |
+| --- | --- | --- | --- |
+| 夜阑 | `night` | 深 | 蓝灰深色，默认 |
+| 曜石 | `graphite` | 深 | 中性近黑，对比最强 |
+| 极地 | `nord` | 深 | 冷调蓝灰，最柔和 |
+| 白昼 | `day` | 浅 | 干净浅色 |
+| 纸墨 | `paper` | 浅 | 暖色护眼 |
+
+强调色八种：紫罗兰 `violet`（默认）、靛蓝 `indigo`、天青 `sky`、碧 `teal`、松绿 `pine`、橙 `orange`、蔷薇 `rose`、雾蓝 `mist`。用于链接、双链胶囊、选中态、任务复选框和关系图谱的节点。
+
+选择存在 `localStorage['webvault:appearance']` 里，**只属于这台设备的这个浏览器**：不进 Gitee 仓库，不影响笔记内容，换设备各自独立。`index.html` 里有一段内联脚本在首帧之前把它写到 `<html>` 的 `data-theme` / `data-mode` / `data-accent` 上，所以选了浅色主题也不会在启动时闪一下深色。被 Safari 的防跟踪策略清掉也无所谓，顶多回到默认主题。
+
+对比度是逐组手调的，不用公式：浅色主题会把强调色压深（例如紫罗兰 `#9182f6` → `#6a58e8`），落在强调色淡底上的文字再走一档 `--accent-text`，保证 10px 的角标也有 4.5:1。`npm run verify` 里的 `verify-theme` 会按 WCAG 把 5 主题 × 8 强调色的组合全算一遍。
+
+编辑器跟着一起换：明暗翻转时调用 Vditor 的 `setTheme()` 切换它自带的 dark / classic 皮肤、内容主题和代码高亮样式（`atom-one-dark` / `github`，两个都已放进 `public/vditor`，离线可用），其余颜色全部由 CSS 变量接管；关系图谱的画布读同一套令牌。
+
+要加一套自己的主题：在 `src/styles/themes.css` 里照抄一块 `html[data-theme='x'], [data-theme-preview='x'] { ... }`（令牌必须和现有的完全一致，`data-theme-preview` 那半句是给设置页的缩略图用的），再到 `src/core/theme/themes.ts` 的 `THEMES` 里登记一行。令牌缺项、对比度不够、组件里写死了颜色，`verify-theme` 都会报出来。
+
+---
+
 ## 快捷键
 
 | 键 | 作用 |
@@ -122,8 +147,9 @@ Safari 的防跟踪策略（ITP）会在大约 7 天不使用后清空该站点�
 | --- | --- | --- |
 | 笔记正文 | OPFS（源私有文件系统） | 明文 `.md`，目录结构和仓库里一致 |
 | 链接 / 标签索引、设置、同步日志 | IndexedDB（库名 `webvault`） | 可从正文随时重建，设置里有「重建链接与标签索引」按钮 |
+| 主题与强调色 | `localStorage` | 见「主题与外观」 |
 
-两者都只在这台设备上，不会发往 `gitee.com` 以外的任何服务器。
+这些都只在这台设备上，不会发往 `gitee.com` 以外的任何服务器。
 
 **你的 Gitee 仓库就是备份，也是导出格式**——里面是普通 `.md` 文件，可以直接用 Obsidian、VS Code 或任何编辑器打开。换设备时，新设备打开应用、填同一个仓库配置、同步即可。应用会主动申请持久化存储授权（设置里能看到是否已授权），降低被浏览器自动清理的概率。
 
@@ -183,9 +209,10 @@ src/
     parse/             Markdown 扫描:[[链接]]、#标签、标题锚点
     search/            CJK 分词 + MiniSearch 索引与摘要
     sync/              gitee API、同步引擎、三方合并、远端删除判定
-  stores/              Pinia:vault(笔记与索引) / sync(同步与通知) / settings
+    theme/             主题与强调色注册表、对比度计算
+  stores/              Pinia:vault(笔记与索引) / sync(同步与通知) / settings / appearance
   components/          TopBar、SideBar、FileTree、NoteEditor、RightPanel、
                        SearchPanel、LinkPicker、GraphView、SettingsDialog、Notices
-scripts/               图标生成 + 5 个 Node 验证套件(npm run verify)
+scripts/               图标生成 + 7 个 Node 验证套件(npm run verify)
 public/vditor/         自托管的编辑器资源,离线可用
 ```

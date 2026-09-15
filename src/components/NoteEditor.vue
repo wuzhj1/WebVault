@@ -10,6 +10,8 @@ import {
 } from '@/core/editor/wikilink-dom.ts'
 import { slashHint } from '@/core/editor/slash-commands.ts'
 import { isAttachmentTarget, resolveTarget } from '@/core/index/resolve.ts'
+import { codeThemeFor, type ThemeMode } from '@/core/theme/themes.ts'
+import { useAppearanceStore } from '@/stores/appearance.ts'
 import { useSyncStore } from '@/stores/sync.ts'
 import { useVaultStore } from '@/stores/vault.ts'
 
@@ -35,6 +37,7 @@ let loadedPath: string | null = null
 
 const vault = useVaultStore()
 const sync = useSyncStore()
+const appearance = useAppearanceStore()
 
 /** Vditor deletes from the `[[` trigger itself, so the inserted value must carry brackets. */
 function hintLinks(query: string): { html: string; value: string }[] {
@@ -255,7 +258,7 @@ onMounted(() => {
   if (!host.value) return
   editor = new Vditor(host.value, {
     mode: 'ir',
-    theme: 'dark',
+    theme: appearance.mode === 'dark' ? 'dark' : 'classic',
     icon: 'ant',
     lang: 'zh_CN',
     cdn: VDITOR_CDN,
@@ -275,8 +278,8 @@ onMounted(() => {
       ],
     },
     preview: {
-      hljs: { style: 'github', lineNumber: false },
-      theme: { current: 'dark' },
+      hljs: { style: codeThemeFor(appearance.mode), lineNumber: false },
+      theme: { current: appearance.mode === 'dark' ? 'dark' : 'light' },
     },
     after: () => {
       editorReady = true
@@ -310,6 +313,18 @@ watch(
   () => sync.available,
   (ok) => {
     if (ok && state.value === 'loading' && loadedPath) void sync.fetchBody(loadedPath)
+  },
+)
+
+/**
+ * Vditor 自带 dark/classic 两套皮肤和独立的代码高亮样式表,只有明暗翻转需要通知它;
+ * 同一种模式内换主题或换强调色,CSS 变量已经全部接管了。
+ */
+watch(
+  () => appearance.mode,
+  (mode: ThemeMode) => {
+    const dark = mode === 'dark'
+    editor?.setTheme(dark ? 'dark' : 'classic', dark ? 'dark' : 'light', codeThemeFor(mode))
   },
 )
 
@@ -411,7 +426,7 @@ defineExpose({ flushSave, insertLink })
 .editor__host :deep(.vditor-task input[type='checkbox']:checked) {
   border-color: var(--accent);
   background-color: var(--accent);
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath fill='none' stroke='%23fff' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round' d='M3.6 8.4 6.5 11.3 12.4 4.7'/%3E%3C/svg%3E");
+  background-image: var(--check-mark);
   background-repeat: no-repeat;
   background-position: center;
   background-size: 12px;
@@ -432,7 +447,7 @@ defineExpose({ flushSave, insertLink })
   margin: 0 -2px;
   border-radius: 5px;
   background: var(--accent-soft);
-  color: var(--accent);
+  color: var(--accent-text);
   cursor: pointer;
   box-decoration-break: clone;
 }
@@ -579,7 +594,7 @@ defineExpose({ flushSave, insertLink })
 .btn--primary {
   background: var(--accent-soft);
   border-color: var(--accent);
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .muted {

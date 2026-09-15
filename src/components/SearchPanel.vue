@@ -155,7 +155,7 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKeydown))
   align-items: flex-start;
   justify-content: center;
   padding: 10vh 16px 16px;
-  background: rgba(10, 10, 18, 0.62);
+  background: var(--scrim);
   backdrop-filter: blur(2px);
 }
 
@@ -168,7 +168,7 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKeydown))
   background: var(--bg-elevated);
   border: 1px solid var(--border);
   border-radius: 12px;
-  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.5);
+  box-shadow: 0 18px 50px var(--shadow-color);
   overflow: hidden;
 }
 
@@ -243,7 +243,7 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKeydown))
 }
 
 .result--on .result__title {
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .result__excerpt {

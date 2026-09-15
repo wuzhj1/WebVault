@@ -189,7 +189,7 @@ function onSync(): void {
   padding: 0 5px;
   border-radius: 8px;
   background: var(--accent-soft);
-  color: var(--accent);
+  color: var(--accent-text);
   font-size: 10.5px;
   line-height: 15px;
 }

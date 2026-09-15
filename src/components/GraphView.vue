@@ -1,12 +1,15 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { db } from '@/core/db.ts'
+import { cssColor } from '@/core/theme/apply.ts'
 import { titleOf } from '@/core/vault/paths.ts'
+import { useAppearanceStore } from '@/stores/appearance.ts'
 import { useVaultStore } from '@/stores/vault.ts'
 
 const emit = defineEmits<{ (e: 'open', path: string): void; (e: 'close'): void }>()
 
 const vault = useVaultStore()
+const appearance = useAppearanceStore()
 
 const canvas = ref<HTMLCanvasElement | null>(null)
 const wrap = ref<HTMLElement | null>(null)
@@ -47,6 +50,41 @@ let width = 0
 let height = 0
 let dpr = 1
 let observer: ResizeObserver | null = null
+
+interface Palette {
+  node: string
+  active: string
+  hovered: string
+  edgeIdle: string
+  labelBg: string
+  label: string
+}
+
+/**
+ * Canvas wants resolved color strings and the loop runs at 60fps, so the theme variables are
+ * read once and cached; changing theme or accent just drops the cache and the next frame
+ * re-reads them.
+ */
+let palette: Palette | null = null
+
+function colors(): Palette {
+  palette ??= {
+    node: cssColor('--accent'),
+    active: cssColor('--ok'),
+    hovered: cssColor('--warn'),
+    edgeIdle: cssColor('--text-muted'),
+    labelBg: cssColor('--bg'),
+    label: cssColor('--text'),
+  }
+  return palette
+}
+
+watch(
+  () => [appearance.theme, appearance.accent] as const,
+  () => {
+    palette = null
+  },
+)
 
 const hasActive = computed(() => vault.activePath !== null)
 
@@ -200,23 +238,24 @@ function draw(): void {
   ctx.scale(scale, scale)
 
   const activeIndex = vault.activePath ? byPath.get(vault.activePath) ?? null : null
+  const c = colors()
 
   ctx.lineWidth = 1 / scale
   for (const [a, b] of edges) {
     const touched = a === hovered || b === hovered || a === activeIndex || b === activeIndex
-    ctx.strokeStyle = touched ? 'rgba(139,124,246,0.55)' : 'rgba(138,138,163,0.18)'
+    ctx.globalAlpha = touched ? 0.55 : 0.18
+    ctx.strokeStyle = touched ? c.node : c.edgeIdle
     ctx.beginPath()
     ctx.moveTo(nodes[a].x, nodes[a].y)
     ctx.lineTo(nodes[b].x, nodes[b].y)
     ctx.stroke()
   }
+  ctx.globalAlpha = 1
 
   for (let i = 0; i < nodes.length; i++) {
     const n = nodes[i]
     const r = (2.6 + Math.sqrt(n.degree) * 1.5) / Math.max(scale, 0.35)
-    if (i === activeIndex) ctx.fillStyle = '#a6e3a1'
-    else if (i === hovered) ctx.fillStyle = '#f9e2af'
-    else ctx.fillStyle = '#8b7cf6'
+    ctx.fillStyle = i === activeIndex ? c.active : i === hovered ? c.hovered : c.node
     ctx.beginPath()
     ctx.arc(n.x, n.y, r, 0, Math.PI * 2)
     ctx.fill()
@@ -228,11 +267,13 @@ function draw(): void {
     const size = 11 / scale
     ctx.font = `${size}px system-ui, sans-serif`
     ctx.textAlign = 'center'
-    ctx.fillStyle = 'rgba(10,10,18,0.72)'
+    ctx.globalAlpha = 0.78
+    ctx.fillStyle = c.labelBg
     const w = ctx.measureText(n.title).width
     const r = (2.6 + Math.sqrt(n.degree) * 1.5) / Math.max(scale, 0.35)
     ctx.fillRect(n.x - w / 2 - 4 / scale, n.y - r - size - 5 / scale, w + 8 / scale, size + 6 / scale)
-    ctx.fillStyle = '#d9d9e8'
+    ctx.globalAlpha = 1
+    ctx.fillStyle = c.label
     ctx.fillText(n.title, n.x, n.y - r - 5 / scale)
   }
   labelFor(activeIndex)
@@ -421,7 +462,7 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: center;
   padding: 24px;
-  background: rgba(10, 10, 18, 0.62);
+  background: var(--scrim);
   backdrop-filter: blur(2px);
 }
 
@@ -435,7 +476,7 @@ onBeforeUnmount(() => {
   background: var(--bg-elevated);
   border: 1px solid var(--border);
   border-radius: 12px;
-  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.5);
+  box-shadow: 0 18px 50px var(--shadow-color);
   overflow: hidden;
 }
 
@@ -544,7 +585,7 @@ onBeforeUnmount(() => {
   bottom: 0;
   margin: 0;
   padding: 7px 12px;
-  background: linear-gradient(to top, rgba(30, 30, 46, 0.92), transparent);
+  background: linear-gradient(to top, color-mix(in srgb, var(--bg) 92%, transparent), transparent);
   font-size: 11.5px;
   color: var(--text-muted);
   pointer-events: none;

@@ -222,7 +222,7 @@ watch(
 
 .tabs__btn--on {
   background: var(--accent-soft);
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .panel__scroll {
@@ -303,7 +303,7 @@ watch(
   padding: 0 4px;
   border-radius: 4px;
   background: var(--accent-soft);
-  color: var(--accent);
+  color: var(--accent-text);
   font-size: 10px;
 }
 
@@ -343,7 +343,7 @@ watch(
 }
 
 .mono {
-  font-family: var(--font-mono, ui-monospace, monospace);
+  font-family: var(--font-mono);
   font-size: 11.5px;
 }
 
@@ -357,7 +357,7 @@ watch(
   padding: 1px 7px;
   border-radius: 9px;
   background: var(--accent-soft);
-  color: var(--accent);
+  color: var(--accent-text);
   font-size: 11.5px;
 }
 

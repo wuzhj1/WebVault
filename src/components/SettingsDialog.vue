@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import * as opfs from '@/core/vault/opfs.ts'
+import { ACCENTS, THEMES } from '@/core/theme/themes.ts'
+import { useAppearanceStore } from '@/stores/appearance.ts'
 import { useSettingsStore, type SyncSettings } from '@/stores/settings.ts'
 import { useSyncStore } from '@/stores/sync.ts'
 import { useVaultStore } from '@/stores/vault.ts'
@@ -11,8 +13,19 @@ const emit = defineEmits<{ (e: 'close'): void }>()
 const settings = useSettingsStore()
 const sync = useSyncStore()
 const vault = useVaultStore()
+const appearance = useAppearanceStore()
 
-const tab = ref<'sync' | 'data' | 'about'>('sync')
+const TABS = ['sync', 'appearance', 'data', 'about'] as const
+type Tab = (typeof TABS)[number]
+
+const TAB_LABELS: Record<Tab, string> = {
+  sync: 'Gitee 同步',
+  appearance: '外观',
+  data: '数据与日志',
+  about: '关于与快捷键',
+}
+
+const tab = ref<Tab>('sync')
 const draft = ref<SyncSettings>({ ...settings.settings })
 const showToken = ref(false)
 const saved = ref(false)
@@ -137,13 +150,13 @@ onMounted(() => {
   <Modal title="设置" wide @close="emit('close')">
     <nav class="tabs">
       <button
-        v-for="t in (['sync', 'data', 'about'] as const)"
+        v-for="t in TABS"
         :key="t"
         class="tabs__btn"
         :class="{ 'tabs__btn--on': tab === t }"
         @click="tab = t"
       >
-        {{ t === 'sync' ? 'Gitee 同步' : t === 'data' ? '数据与日志' : '关于与快捷键' }}
+        {{ TAB_LABELS[t] }}
       </button>
     </nav>
 
@@ -236,6 +249,55 @@ onMounted(() => {
         </button>
       </div>
       <p class="field__tip">同步中会显示进度;失败时具体原因会写在「数据与日志」标签页。</p>
+    </template>
+
+    <template v-else-if="tab === 'appearance'">
+      <p class="field__tip appearance__tip">
+        点了立即生效,不用保存。选择只写在这台设备的浏览器里,不会同步到 Gitee,也不会影响笔记内容。
+      </p>
+
+      <h4 class="sub sub--first">主题</h4>
+      <div class="themes">
+        <button
+          v-for="t in THEMES"
+          :key="t.id"
+          type="button"
+          class="theme"
+          :class="{ 'theme--on': appearance.theme === t.id }"
+          @click="appearance.setTheme(t.id)"
+        >
+          <span
+            class="theme__mini"
+            :data-theme-preview="t.id"
+            :data-mode="t.mode"
+            :data-accent="appearance.accent"
+          >
+            <span class="theme__side"></span>
+            <span class="theme__body"><i></i><i></i><i></i></span>
+          </span>
+          <span class="theme__name">{{ t.label }}</span>
+          <span class="theme__hint">{{ t.hint }}</span>
+        </button>
+      </div>
+
+      <h4 class="sub">强调色</h4>
+      <div class="accents">
+        <button
+          v-for="a in ACCENTS"
+          :key="a.id"
+          type="button"
+          class="accent"
+          :class="{ 'accent--on': appearance.accent === a.id }"
+          :title="a.label"
+          @click="appearance.setAccent(a.id)"
+        >
+          <span class="accent__chip" :data-accent-preview="a.id"></span>
+          <span class="accent__name">{{ a.label }}</span>
+        </button>
+      </div>
+      <p class="field__tip">
+        强调色用于链接、双链胶囊、选中态和关系图谱的节点。浅色主题会自动把强调色压深,保证小字号文本的对比度。
+      </p>
     </template>
 
     <template v-else-if="tab === 'data'">
@@ -376,7 +438,7 @@ onMounted(() => {
 
 .tabs__btn--on {
   background: var(--accent-soft);
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .callout {
@@ -545,11 +607,11 @@ onMounted(() => {
 .btn--primary {
   background: var(--accent-soft);
   border-color: var(--accent);
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .btn--danger {
-  background: rgba(243, 139, 168, 0.14);
+  background: var(--danger-soft);
   border-color: var(--danger);
   color: var(--danger);
 }
@@ -657,8 +719,8 @@ onMounted(() => {
   margin-top: 18px;
   padding: 12px;
   border-radius: 8px;
-  border: 1px solid rgba(243, 139, 168, 0.4);
-  background: rgba(243, 139, 168, 0.06);
+  border: 1px solid var(--danger-line);
+  background: var(--danger-soft);
 }
 
 .danger__title {
@@ -686,6 +748,145 @@ onMounted(() => {
   margin: 16px 0 6px;
   font-size: 13px;
   font-weight: 600;
+}
+
+.appearance__tip {
+  margin-top: 0;
+}
+
+.sub--first {
+  margin-top: 4px;
+}
+
+.themes {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(148px, 1fr));
+  gap: 10px;
+}
+
+.theme {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  text-align: left;
+}
+
+.theme:hover {
+  border-color: var(--border-strong);
+}
+
+.theme--on {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+/* 缩略图整块带着 data-theme-preview,里面每个颜色都取自被预览的那套主题。 */
+.theme__mini {
+  display: flex;
+  gap: 4px;
+  height: 62px;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg);
+}
+
+.theme__side {
+  flex: none;
+  width: 26px;
+  border-radius: 4px;
+  border-right: 1px solid var(--border);
+  background: var(--bg-elevated);
+}
+
+.theme__body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding-top: 3px;
+}
+
+.theme__body i {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--text-muted);
+  opacity: 0.55;
+}
+
+.theme__body i:first-child {
+  width: 62%;
+  background: var(--accent);
+  opacity: 1;
+}
+
+.theme__body i:nth-child(2) {
+  width: 88%;
+}
+
+.theme__body i:last-child {
+  width: 45%;
+}
+
+.theme__name {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.theme__hint {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+.accents {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.accent {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--bg);
+}
+
+.accent:hover {
+  border-color: var(--border-strong);
+}
+
+.accent--on {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.accent__chip {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: var(--accent-raw);
+  box-shadow: inset 0 0 0 1px var(--shadow-color);
+}
+
+.accent--on .accent__chip {
+  box-shadow:
+    0 0 0 2px var(--bg),
+    0 0 0 4px var(--accent-raw);
+}
+
+.accent__name {
+  font-size: 11px;
+  color: var(--text-muted);
 }
 
 .plain {

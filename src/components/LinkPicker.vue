@@ -128,7 +128,7 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKeydown))
   align-items: flex-start;
   justify-content: center;
   padding: 14vh 16px 16px;
-  background: rgba(10, 10, 18, 0.62);
+  background: var(--scrim);
   backdrop-filter: blur(2px);
 }
 
@@ -141,7 +141,7 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKeydown))
   background: var(--bg-elevated);
   border: 1px solid var(--border);
   border-radius: 12px;
-  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.5);
+  box-shadow: 0 18px 50px var(--shadow-color);
   overflow: hidden;
 }
 
@@ -226,14 +226,14 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKeydown))
 }
 
 .pick--on .pick__target {
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .pick__badge {
   margin-right: 5px;
   padding: 0 5px;
   border-radius: 4px;
-  background: rgba(249, 226, 175, 0.16);
+  background: var(--warn-soft);
   color: var(--warn);
   font-size: 10.5px;
 }

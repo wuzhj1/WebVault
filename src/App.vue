@@ -252,9 +252,9 @@ onBeforeUnmount(() => {
 
 .screen__box--error {
   padding: 20px 22px;
-  border: 1px solid rgba(243, 139, 168, 0.4);
+  border: 1px solid var(--danger-line);
   border-radius: 12px;
-  background: rgba(243, 139, 168, 0.06);
+  background: var(--danger-soft);
   text-align: left;
 }
 
@@ -265,8 +265,8 @@ onBeforeUnmount(() => {
 .banner {
   flex: none;
   padding: 8px 14px;
-  background: rgba(249, 226, 175, 0.12);
-  border-bottom: 1px solid rgba(249, 226, 175, 0.35);
+  background: var(--warn-soft);
+  border-bottom: 1px solid var(--warn-line);
   color: var(--warn);
   font-size: 12.5px;
   line-height: 1.6;
@@ -299,7 +299,7 @@ onBeforeUnmount(() => {
     bottom: 0;
     z-index: 50;
     width: min(var(--sidebar-w), 86vw);
-    box-shadow: 0 0 30px rgba(0, 0, 0, 0.45);
+    box-shadow: 0 0 30px var(--shadow-color);
     transition: transform 0.18s ease;
   }
 
@@ -324,7 +324,7 @@ onBeforeUnmount(() => {
     position: absolute;
     inset: 0;
     z-index: 40;
-    background: rgba(10, 10, 18, 0.5);
+    background: var(--scrim);
     opacity: 0;
     pointer-events: none;
     transition: opacity 0.18s ease;

@@ -272,7 +272,7 @@ onBeforeUnmount(closeMenu)
 
 .tabs__btn--on {
   background: var(--accent-soft);
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .icon-btn {
@@ -360,7 +360,7 @@ onBeforeUnmount(closeMenu)
   background: var(--bg-elevated);
   border: 1px solid var(--border);
   border-radius: 8px;
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+  box-shadow: 0 10px 30px var(--shadow-color);
 }
 
 .ctxmenu__item {
@@ -377,7 +377,7 @@ onBeforeUnmount(closeMenu)
 }
 
 .ctxmenu__item--danger:hover {
-  background: rgba(243, 139, 168, 0.16);
+  background: var(--danger-soft);
   color: var(--danger);
 }
 
@@ -439,11 +439,11 @@ onBeforeUnmount(closeMenu)
 .btn--primary {
   background: var(--accent-soft);
   border-color: var(--accent);
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .btn--danger {
-  background: rgba(243, 139, 168, 0.14);
+  background: var(--danger-soft);
   border-color: var(--danger);
   color: var(--danger);
 }

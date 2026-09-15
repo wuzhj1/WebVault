@@ -1,0 +1,284 @@
+/**
+ * 主题令牌契约 —— 组件只允许用这些变量,不要写死颜色。
+ *
+ *   表面    --bg            应用与编辑区底色
+ *           --bg-elevated   浮起的面:顶栏、侧栏、弹窗、菜单
+ *           --bg-hover      悬停填充、行内代码底
+ *           --code-bg       代码块底(介于 --bg 与 --bg-elevated 之间)
+ *   描边    --border        常规分隔线
+ *           --border-strong 需要更明确的线:滚动条、表头、引用竖线
+ *   文字    --text          正文
+ *           --text-muted    次要说明、图标
+ *   强调    --accent-raw    用户选的强调色原值
+ *           --accent        按明暗模式校正后的强调色(浅色主题会压深以保证对比度)
+ *           --accent-soft   强调色的淡底,用于选中态、胶囊、主按钮
+ *           --accent-text   淡底之上的强调色文字(比 --accent 再亮/再深一档,否则对比度不够)
+ *           --check-mark    任务复选框的对勾图标,笔画颜色要能压在 --accent 填充上
+ *   语义    --danger / --ok / --warn,以及各自的 *-soft 淡底与 *-line 描边
+ *   遮罩    --scrim         弹窗/抽屉背后的压暗层
+ *           --shadow-color  所有 box-shadow 的颜色
+ *           --selection     文字选区
+ *
+ * `data-theme-preview` 让设置里的主题卡片复用同一份调色板画缩略图,避免把色值再抄一份到 TS。
+ */
+
+:root,
+[data-theme-preview='night'] {
+  --bg: #15161b;
+  --bg-elevated: #1c1e25;
+  --bg-hover: #252833;
+  --code-bg: #1a1c23;
+  --border: #2c2f3a;
+  --border-strong: #3b3f4d;
+  --text: #e6e7ee;
+  --text-muted: #9498a8;
+  --danger: #f0798f;
+  --ok: #79d29b;
+  --warn: #e9c46a;
+  --scrim: rgba(8, 9, 12, 0.66);
+  --shadow-color: rgba(0, 0, 0, 0.55);
+  color-scheme: dark;
+}
+
+html[data-theme='graphite'],
+[data-theme-preview='graphite'] {
+  --bg: #121214;
+  --bg-elevated: #191a1d;
+  --bg-hover: #222327;
+  --code-bg: #16171a;
+  --border: #2a2b31;
+  --border-strong: #3a3b43;
+  --text: #e9e9ec;
+  --text-muted: #9b9ca5;
+  --danger: #ef6d78;
+  --ok: #6fcf97;
+  --warn: #e0b341;
+  --scrim: rgba(6, 6, 8, 0.68);
+  --shadow-color: rgba(0, 0, 0, 0.6);
+  color-scheme: dark;
+}
+
+html[data-theme='nord'],
+[data-theme-preview='nord'] {
+  --bg: #262b35;
+  --bg-elevated: #2e3440;
+  --bg-hover: #373e4c;
+  --code-bg: #2a303a;
+  --border: #414a5b;
+  --border-strong: #525c72;
+  --text: #e8ebf2;
+  --text-muted: #a2abbe;
+  --danger: #e58a9a;
+  --ok: #a3be8c;
+  --warn: #ebcb8b;
+  --scrim: rgba(24, 27, 33, 0.62);
+  --shadow-color: rgba(0, 0, 0, 0.45);
+  color-scheme: dark;
+}
+
+html[data-theme='day'],
+[data-theme-preview='day'] {
+  --bg: #ffffff;
+  --bg-elevated: #f7f8fa;
+  --bg-hover: #eceef3;
+  --code-bg: #f4f6f9;
+  --border: #e1e4ea;
+  --border-strong: #ccd1da;
+  --text: #1e2228;
+  --text-muted: #6a7180;
+  --danger: #cf3b4a;
+  --ok: #1c8348;
+  --warn: #96690b;
+  --scrim: rgba(20, 24, 31, 0.42);
+  --shadow-color: rgba(20, 24, 31, 0.16);
+  color-scheme: light;
+}
+
+html[data-theme='paper'],
+[data-theme-preview='paper'] {
+  --bg: #fbf7ef;
+  --bg-elevated: #f4eee2;
+  --bg-hover: #ece4d4;
+  --code-bg: #f4edde;
+  --border: #e0d6c3;
+  --border-strong: #cbbfa8;
+  --text: #33302a;
+  --text-muted: #756d60;
+  --danger: #b3453c;
+  --ok: #4f7a3a;
+  --warn: #8e6917;
+  --scrim: rgba(52, 44, 32, 0.38);
+  --shadow-color: rgba(70, 58, 40, 0.18);
+  color-scheme: light;
+}
+
+/* 强调色原值。都是中等明度,配白色对勾/文字在深浅两套主题下都成立。 */
+:root {
+  --accent-raw: #9182f6;
+  --accent: var(--accent-raw);
+}
+
+/* 紫罗兰是默认值,:root 里已经有一份;这里再写一遍是为了设置页的色板缩略 ——
+   缩略块自己带 data-accent-preview,不写就会继承 <html> 上当前选中的强调色。 */
+[data-accent='violet'],
+[data-accent-preview='violet'] {
+  --accent-raw: #9182f6;
+}
+
+[data-accent='indigo'],
+[data-accent-preview='indigo'] {
+  --accent-raw: #6291ee;
+}
+
+[data-accent='sky'],
+[data-accent-preview='sky'] {
+  --accent-raw: #38a8d8;
+}
+
+[data-accent='teal'],
+[data-accent-preview='teal'] {
+  --accent-raw: #2bb3a3;
+}
+
+[data-accent='pine'],
+[data-accent-preview='pine'] {
+  --accent-raw: #56b469;
+}
+
+[data-accent='orange'],
+[data-accent-preview='orange'] {
+  --accent-raw: #e8853a;
+}
+
+[data-accent='rose'],
+[data-accent-preview='rose'] {
+  --accent-raw: #e86fa0;
+}
+
+[data-accent='mist'],
+[data-accent-preview='mist'] {
+  --accent-raw: #94a0b4;
+}
+
+/* 浅色主题下强调色要压深,否则链接、胶囊这类小字号文本对比度不够。逐色手调,不用公式。 */
+[data-mode='light'][data-accent='violet'] {
+  --accent: #6a58e8;
+}
+
+[data-mode='light'][data-accent='indigo'] {
+  --accent: #3565d8;
+}
+
+[data-mode='light'][data-accent='sky'] {
+  --accent: #1a77a4;
+}
+
+[data-mode='light'][data-accent='teal'] {
+  --accent: #107d73;
+}
+
+[data-mode='light'][data-accent='pine'] {
+  --accent: #2a7f40;
+}
+
+[data-mode='light'][data-accent='orange'] {
+  --accent: #ae5716;
+}
+
+[data-mode='light'][data-accent='rose'] {
+  --accent: #c53a77;
+}
+
+[data-mode='light'][data-accent='mist'] {
+  --accent: #5d6a80;
+}
+
+/* 淡底一律从实色推导,换主题或换强调色时自动跟着走。 */
+:root {
+  --accent-soft: color-mix(in srgb, var(--accent) 20%, transparent);
+  --danger-soft: color-mix(in srgb, var(--danger) 14%, transparent);
+  --ok-soft: color-mix(in srgb, var(--ok) 14%, transparent);
+  --warn-soft: color-mix(in srgb, var(--warn) 16%, transparent);
+  --danger-line: color-mix(in srgb, var(--danger) 42%, transparent);
+  --warn-line: color-mix(in srgb, var(--warn) 38%, transparent);
+  --selection: color-mix(in srgb, var(--accent) 34%, transparent);
+  /* 强调色文字压在自己的淡底上只有 3.4:1,往白里提一档才够 4.5:1。24% 是八种强调色
+     在最浅的深色主题(nord)上都过关的最小提亮量。 */
+  --accent-text: color-mix(in srgb, #fff 24%, var(--accent));
+  /* 对勾笔画要压在 --accent 填充上,深色主题下强调色偏亮,所以用近黑而不是白。 */
+  --check-mark: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath fill='none' stroke='%23101116' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round' d='M3.6 8.4 6.5 11.3 12.4 4.7'/%3E%3C/svg%3E");
+  --sidebar-w: 268px;
+  --right-w: 300px;
+}
+
+[data-mode='light'] {
+  --accent-soft: color-mix(in srgb, var(--accent) 13%, transparent);
+  --danger-soft: color-mix(in srgb, var(--danger) 10%, transparent);
+  --ok-soft: color-mix(in srgb, var(--ok) 12%, transparent);
+  --warn-soft: color-mix(in srgb, var(--warn) 14%, transparent);
+  --danger-line: color-mix(in srgb, var(--danger) 34%, transparent);
+  --warn-line: color-mix(in srgb, var(--warn) 32%, transparent);
+  --selection: color-mix(in srgb, var(--accent) 26%, transparent);
+  --accent-text: color-mix(in srgb, #000 10%, var(--accent));
+  --check-mark: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath fill='none' stroke='%23ffffff' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round' d='M3.6 8.4 6.5 11.3 12.4 4.7'/%3E%3C/svg%3E");
+}
+
+/**
+ * Vditor 自带一套同名变量,不接管的话弹窗、计数器、行内代码、表格斑马纹会停在它自己的
+ * GitHub 配色上,和主题脱节。`html .vditor` 的特异度压过 `.vditor--dark`。
+ */
+html .vditor {
+  --border-color: var(--border);
+  --second-color: var(--text-muted);
+  --panel-background-color: var(--bg-elevated);
+  --panel-shadow: 0 12px 32px var(--shadow-color);
+  --toolbar-background-color: var(--bg-elevated);
+  --toolbar-icon-color: var(--text-muted);
+  --toolbar-icon-hover-color: var(--accent);
+  --textarea-background-color: var(--bg-hover);
+  --textarea-text-color: var(--text);
+  --count-background-color: transparent;
+  --heading-border-color: var(--border-strong);
+  --blockquote-color: var(--text-muted);
+  --ir-heading-color: var(--accent);
+  --ir-title-color: var(--text-muted);
+  --ir-bi-color: var(--warn);
+  --ir-link-color: var(--ok);
+  --ir-bracket-color: var(--text-muted);
+  --ir-paren-color: var(--text-muted);
+}
+
+/* 代码高亮样式(atom-one-dark / github)自带容器底色,盖掉才能跟主题一致。 */
+html .vditor-reset pre > code {
+  background-color: var(--code-bg);
+}
+
+html .vditor-reset code:not(.hljs):not(.highlight-chroma) {
+  background-color: var(--bg-hover);
+  color: var(--accent);
+}
+
+html .vditor-reset blockquote {
+  color: var(--text-muted);
+  border-left-color: var(--border-strong);
+}
+
+html .vditor-reset table tbody tr:nth-child(2n) {
+  background-color: var(--bg-hover);
+}
+
+html .vditor-reset table td,
+html .vditor-reset table th {
+  border-color: var(--border);
+}
+
+html .vditor-reset a,
+html .vditor-ir__link {
+  color: var(--accent);
+}
+
+html .vditor-reset kbd {
+  background-color: var(--bg-elevated);
+  border-color: var(--border-strong);
+  color: var(--text);
+}
