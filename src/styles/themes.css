@@ -19,9 +19,17 @@
  *           --shadow-color  所有 box-shadow 的颜色
  *           --selection     文字选区
  *
- * `data-theme-preview` 让设置里的主题卡片复用同一份调色板画缩略图,避免把色值再抄一份到 TS。
+ * 三根选择器轴,全部由 `core/theme/apply.ts` 写在 <html> 上,本文件只负责映射:
+ *   data-theme  主题名(night/graphite/nord/day/paper);不识别的值落回 :root 的 night 兜底。
+ *   data-mode   light|dark,决定强调色是否压深、淡底比例与对勾笔画色。
+ *   data-accent 强调色名,覆盖 --accent-raw;随后由上面的 data-mode 规则校正出 --accent。
+ *
+ * 两个 *-preview 变体是给设置页的:让缩略块脱离全局状态、复用同一份调色板画预览,
+ * 避免把色值再抄一份到 TS。
  */
 
+/* 默认主题 night:挂一份在 :root 保证「没有 data-theme 或值不识别」时也有完整令牌;
+   同一份调色板同时服务设置页的 night 缩略块。 */
 :root,
 [data-theme-preview='night'] {
   --bg: #15161b;
@@ -40,6 +48,7 @@
   color-scheme: dark;
 }
 
+/* graphite:近纯黑的深色主题。 */
 html[data-theme='graphite'],
 [data-theme-preview='graphite'] {
   --bg: #121214;
@@ -58,6 +67,7 @@ html[data-theme='graphite'],
   color-scheme: dark;
 }
 
+/* nord:偏蓝的深色主题;是最浅的深色底,--accent-text 的提亮量以它为最严苛的校验对象。 */
 html[data-theme='nord'],
 [data-theme-preview='nord'] {
   --bg: #262b35;
@@ -76,6 +86,7 @@ html[data-theme='nord'],
   color-scheme: dark;
 }
 
+/* day:标准浅色主题。 */
 html[data-theme='day'],
 [data-theme-preview='day'] {
   --bg: #ffffff;
@@ -94,6 +105,7 @@ html[data-theme='day'],
   color-scheme: light;
 }
 
+/* paper:暖白纸感的浅色主题。 */
 html[data-theme='paper'],
 [data-theme-preview='paper'] {
   --bg: #fbf7ef;
@@ -125,6 +137,7 @@ html[data-theme='paper'],
   --accent-raw: #9182f6;
 }
 
+/* 其余强调色同理:每个都必须同时带 data-accent 与 data-accent-preview 两个选择器。 */
 [data-accent='indigo'],
 [data-accent-preview='indigo'] {
   --accent-raw: #6291ee;
@@ -207,10 +220,14 @@ html[data-theme='paper'],
   --accent-text: color-mix(in srgb, #fff 24%, var(--accent));
   /* 对勾笔画要压在 --accent 填充上,深色主题下强调色偏亮,所以用近黑而不是白。 */
   --check-mark: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath fill='none' stroke='%23101116' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round' d='M3.6 8.4 6.5 11.3 12.4 4.7'/%3E%3C/svg%3E");
-  --sidebar-w: 268px;
+  /* 布局宽度常量:侧栏与右栏的固定宽度,布局组件统一引用,不在各自样式里再写一遍。
+     侧栏 300 = 44 活动栏 + 256 内容面板(268 的老宽度去掉活动栏后只剩 224,文件树缩进一深就不够看)。 */
+  --sidebar-w: 300px;
   --right-w: 300px;
 }
 
+/* 浅色模式的覆写:淡底比例整体调低(浅底上同浓度更刺眼)、选区收窄、accent-text 往黑里压,
+   并把对勾笔画换成白色以压住变深的强调色填充。 */
 [data-mode='light'] {
   --accent-soft: color-mix(in srgb, var(--accent) 13%, transparent);
   --danger-soft: color-mix(in srgb, var(--danger) 10%, transparent);
@@ -253,16 +270,19 @@ html .vditor-reset pre > code {
   background-color: var(--code-bg);
 }
 
+/* 行内代码:改用 --bg-hover 底 + 强调色文字,与代码块底区分开。 */
 html .vditor-reset code:not(.hljs):not(.highlight-chroma) {
   background-color: var(--bg-hover);
   color: var(--accent);
 }
 
+/* 引用:文字降为次要色,竖线用更明确的边框色。 */
 html .vditor-reset blockquote {
   color: var(--text-muted);
   border-left-color: var(--border-strong);
 }
 
+/* 表格斑马纹与边框并入主题色系。 */
 html .vditor-reset table tbody tr:nth-child(2n) {
   background-color: var(--bg-hover);
 }
@@ -272,11 +292,13 @@ html .vditor-reset table th {
   border-color: var(--border);
 }
 
+/* 正文链接与 IR 模式下 Lute 渲染的链接统一用校正后的强调色。 */
 html .vditor-reset a,
 html .vditor-ir__link {
   color: var(--accent);
 }
 
+/* 行内 <kbd>:抬升底色、加粗边框,像一颗实体键帽。 */
 html .vditor-reset kbd {
   background-color: var(--bg-elevated);
   border-color: var(--border-strong);

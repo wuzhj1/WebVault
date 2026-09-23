@@ -1,3 +1,9 @@
+/**
+ * 应用入口：装 Pinia、挂根组件。只做两件事，任何额外初始化都应放到各自的 store 里。
+ *
+ * 硬约束：只用相对导入（本文件是打包入口，不走 `@/` 别名解析链）；必须在 `mount` 之前完成外观落色，
+ * 否则首帧会闪一下默认主题。
+ */
 import { createPinia } from 'pinia'
 import { createApp } from 'vue'
 import App from './App.vue'

@@ -1,46 +1,69 @@
 <script setup lang="ts">
+/**
+ * 设置对话框:Gitee 同步、外观、数据与日志、关于四个标签页。
+ *
+ * emits `close` —— 焦点陷阱、ESC 关闭、遮罩点击都由外层 Modal.vue 负责，本组件只提供内容区。
+ * 依赖 settings(同步配置)、sync(连接/同步/日志)、vault(笔记索引)、appearance(主题与强调色)。
+ *
+ * 关键约束：表单改的是 draft 副本，点「保存」才落盘，dirty 用来决定按钮是否可点；
+ * 外观页是唯一例外——选项点击即写入本机存储、立刻生效，没有草稿也没有保存按钮。
+ * Gitee token 只写进本机 IndexedDB，不会随笔记上传，也不会同步到其他设备（故 sync tab 顶部有醒目警告）。
+ */
 import { computed, onMounted, ref, watch } from 'vue'
+// OPFS 读写在本组件里承担三件维护动作：探测持久化授权、重建索引时逐篇读正文、清空本机正文
 import * as opfs from '@/core/vault/opfs.ts'
 import { ACCENTS, THEMES } from '@/core/theme/themes.ts'
-import { CARD_TYPES, CARD_TYPE_LABELS } from '@/core/zettel/card.ts'
 import { useAppearanceStore } from '@/stores/appearance.ts'
 import { useSettingsStore, type SyncSettings } from '@/stores/settings.ts'
 import { useSyncStore } from '@/stores/sync.ts'
 import { useVaultStore } from '@/stores/vault.ts'
-import { useZettelStore } from '@/stores/zettel.ts'
-import type { ZettelSettings } from '@/core/zettel/settings.ts'
 import Modal from './Modal.vue'
 
+/** 唯一对外事件：由 Modal 的关闭按钮/遮罩/ESC 冒泡上来后转给父组件卸载本对话框。 */
 const emit = defineEmits<{ (e: 'close'): void }>()
+
+/** 打开时落位的页签；App 的 ? 快捷键直达「关于与快捷键」，不传则默认同步页。 */
+const props = defineProps<{ initialTab?: Tab }>()
 
 const settings = useSettingsStore()
 const sync = useSyncStore()
 const vault = useVaultStore()
 const appearance = useAppearanceStore()
-const zettel = useZettelStore()
 
-const TABS = ['sync', 'appearance', 'zettel', 'data', 'about'] as const
+/** 标签页 id，顺序即导航栏顺序；`Tab` 由数组字面量推导出联合类型，避免和模板里的 v-if 拼错。 */
+const TABS = ['sync', 'appearance', 'data', 'about'] as const
 type Tab = (typeof TABS)[number]
 
+/** 标签页显示名，只在导航按钮上用，正文各段自带小标题。 */
 const TAB_LABELS: Record<Tab, string> = {
   sync: 'Gitee 同步',
   appearance: '外观',
-  zettel: '卡片盒',
   data: '数据与日志',
   about: '关于与快捷键',
 }
 
-const tab = ref<Tab>('sync')
+/** 当前标签页，切换只影响渲染哪一段，不重置各段自己的草稿状态。初值来自 ? 快捷键的落位。 */
+const tab = ref<Tab>(props.initialTab ?? 'sync')
+/** 同步设置的编辑副本：只有点「保存」才写回 store，避免边打字边落盘。 */
 const draft = ref<SyncSettings>({ ...settings.settings })
+/** token 输入框是否在 text / password 之间切成明文，仅为当场核对粘贴对不对。 */
 const showToken = ref(false)
+/** 「已保存」提示的闪现开关，由 save() 里的定时器收回。 */
 const saved = ref(false)
+/** 保存或清空正文时抛出的错误文案；下次动作开始时会清掉，防止旧错误一直挂着。 */
 const error = ref<string | null>(null)
+/** 存储用量的一行人类可读文本，由 refreshUsage() 填充。 */
 const usage = ref<string>('')
+/** 持久化存储授权：null 表示还没测出来（navigator.storage.persisted 是异步的）。 */
 const persisted = ref<boolean | null>(null)
+/** 重建链接/标签索引进行中；按钮文案与 disabled 都靠它。 */
 const reindexing = ref(false)
+/** 重建索引完成后写入处理篇数；用 null 区分「还没跑过」和「跑了但 0 篇」。 */
 const reindexed = ref<number | null>(null)
+/** 清空本机正文的进行中标志：按钮文案与 disabled 都靠它。 */
 const wipeBusy = ref(false)
 
+/** 推送延迟的可选项；值用数字字面量分隔符写，方便和 setTimeout 的毫秒数对上。 */
 const DELAYS: { ms: number; label: string }[] = [
   { ms: 5_000, label: '5 秒' },
   { ms: 15_000, label: '15 秒' },
@@ -49,6 +72,7 @@ const DELAYS: { ms: number; label: string }[] = [
   { ms: 1_800_000, label: '30 分钟' },
 ]
 
+/** 数据页与危险区用的三计数：排除「本机已删除」的墓碑笔记，只算真正还在库里的。 */
 const stats = computed(() => {
   const all = vault.notes.filter((n) => !n.removedLocal)
   return {
@@ -58,19 +82,10 @@ const stats = computed(() => {
   }
 })
 
+/** 草稿是否偏离了 store：用序列化比较代替逐字段比对；脏的时候才允许保存，也用来阻止外部值覆盖。 */
 const dirty = computed(() => JSON.stringify(draft.value) !== JSON.stringify(settings.settings))
 
-const zettelDraft = ref<ZettelSettings>({ ...zettel.settings })
-const zettelSaved = ref(false)
-const rebuilding = ref(false)
-
-const zettelDirty = computed(
-  () => JSON.stringify(zettelDraft.value) !== JSON.stringify(zettel.settings),
-)
-
-/** Notes with no metadata block are not cards, so the card total is what is left over. */
-const cardTotal = computed(() => zettel.livePaths.length - zettel.counts.plain)
-
+/** 读取浏览器存储配额与持久化授权；API 缺失时给出说明文本而不是抛错（部分浏览器不实现 estimate）。 */
 async function refreshUsage(): Promise<void> {
   if (typeof navigator.storage?.estimate !== 'function') {
     usage.value = '当前浏览器不提供存储用量信息。'
@@ -85,17 +100,22 @@ async function refreshUsage(): Promise<void> {
   persisted.value = await opfs.persistedStorageGranted()
 }
 
+/** 把整份 draft 交给 store 落盘（owner/repo 的拆解与校验在 store 里做），成功后用规范化结果回填草稿。 */
 async function save(): Promise<void> {
   error.value = null
   saved.value = false
   const wasConfigured = settings.configured
   try {
     await settings.save({ ...draft.value })
+    // 重新取 store 的值而不是沿用 draft：store 可能改写过字段（如从完整地址拆出 owner/repo），
+    // 回填后 dirty 才会归位成 false，否则按钮一直亮着。
     draft.value = { ...settings.settings }
     saved.value = true
     setTimeout(() => {
       saved.value = false
     }, 2000)
+    // 第一次填完且已联网时顺手拉一次远端并预热正文缓存，省掉用户再点「立即同步」。
+    // syncNow 失败要冒出来显示错误，startPreheat 是后台填充，故意 fire-and-forget。
     if (!wasConfigured && settings.configured && sync.online) {
       await sync.syncNow()
       void sync.startPreheat()
@@ -105,30 +125,18 @@ async function save(): Promise<void> {
   }
 }
 
+/** 「测试连接」也是先保存再探活：Gitee API 需要凭据，不存下来就没法只测当前输入。 */
 async function test(): Promise<void> {
   await settings.save({ ...draft.value })
   draft.value = { ...settings.settings }
   await sync.checkConnection()
 }
 
-async function saveZettel(): Promise<void> {
-  await zettel.saveSettings({ ...zettelDraft.value })
-  zettelDraft.value = { ...zettel.settings }
-  zettelSaved.value = true
-  setTimeout(() => {
-    zettelSaved.value = false
-  }, 2000)
-}
-
-async function rebuildCards(): Promise<void> {
-  rebuilding.value = true
-  try {
-    await zettel.rebuildCards()
-  } finally {
-    rebuilding.value = false
-  }
-}
-
+/**
+ * 逐篇从 OPFS 读正文重算链接/标签，用于解析器升级或索引错乱后纠偏。
+ * 跳过 removedLocal 与未缓存的笔记：后者没有正文可读，按需下载留到打开时再做。
+ * 走 finally 复位标志，避免中途抛错让按钮永久 disabled。
+ */
 async function reindex(): Promise<void> {
   reindexing.value = true
   reindexed.value = null
@@ -149,9 +157,8 @@ async function reindex(): Promise<void> {
 }
 
 /**
- * Deleting the bodies and reloading reuses the startup wipe-recovery path: `reconcile()`
- * notices OPFS came back empty while the index still knows the notes, and the sync store
- * re-pulls every body with progress reporting.
+ * 删掉正文再刷新，是刻意复用启动时的「清空—恢复」路径：`reconcile()` 会发现 OPFS 空了而索引里仍认识
+ * 这些笔记，于是由 sync store 带着进度条把每一篇正文重新拉回来，不必在本组件另写一套批量下载逻辑。
  */
 async function wipeAndReload(): Promise<void> {
   wipeBusy.value = true
@@ -165,6 +172,7 @@ async function wipeAndReload(): Promise<void> {
   }
 }
 
+/** store 侧的值变了（导入配置、别处保存）就同步进草稿，但 dirty 时不覆盖，免得吞掉用户正在输入的内容。 */
 watch(
   () => settings.settings,
   (next) => {
@@ -173,20 +181,9 @@ watch(
   { deep: true },
 )
 
-// The store only reads its settings after the backfill finishes, so on a large vault this dialog
-// can open while the draft still holds the defaults. Adopting the loaded value keeps the user from
-// saving a preference they never saw.
-watch(
-  () => zettel.settings,
-  (next) => {
-    if (!zettelDirty.value) zettelDraft.value = { ...next }
-  },
-  { deep: true },
-)
-
+/** 打开时重取草稿（父组件每次都是新挂载，但要防 store 在挂载前刚被改过），并拉存储用量与同步日志。 */
 onMounted(() => {
   draft.value = { ...settings.settings }
-  zettelDraft.value = { ...zettel.settings }
   void refreshUsage()
   void sync.refreshLog()
 })
@@ -194,6 +191,7 @@ onMounted(() => {
 
 <template>
   <Modal title="设置" wide @close="emit('close')">
+    <!-- 四个标签页共用一个 tab 状态，切换不销毁已填的草稿 -->
     <nav class="tabs">
       <button
         v-for="t in TABS"
@@ -206,6 +204,7 @@ onMounted(() => {
       </button>
     </nav>
 
+    <!-- Gitee 同步：唯一会把凭据写进本机数据库的一页，所以顶部先给警告 -->
     <template v-if="tab === 'sync'">
       <div class="callout callout--warn">
         <strong>先看清楚:</strong> 私人令牌会明文保存在这台设备的浏览器数据库(IndexedDB)里,只会被发往
@@ -267,6 +266,7 @@ onMounted(() => {
         </label>
         <label class="check">
           <span class="check__label">推送延迟</span>
+          <!-- .number 必需：select 的值是字符串，落成数字后 debounce 才能直接参与毫秒运算 -->
           <select v-model.number="draft.pushDelayMs" class="field field--select">
             <option v-for="d in DELAYS" :key="d.ms" :value="d.ms">{{ d.label }}</option>
           </select>
@@ -297,6 +297,7 @@ onMounted(() => {
       <p class="field__tip">同步中会显示进度;失败时具体原因会写在「数据与日志」标签页。</p>
     </template>
 
+    <!-- 外观：点了就立即生效并直接写本机存储，没有草稿也没有保存按钮 -->
     <template v-else-if="tab === 'appearance'">
       <p class="field__tip appearance__tip">
         点了立即生效,不用保存。选择只写在这台设备的浏览器里,不会同步到 Gitee,也不会影响笔记内容。
@@ -346,74 +347,7 @@ onMounted(() => {
       </p>
     </template>
 
-    <template v-else-if="tab === 'zettel'">
-      <div class="callout callout--warn">
-        <strong>这一页只影响这台设备。</strong> 卡片自己的 <code>id</code>、<code>type</code>、
-        <code>created</code>、<code>tags</code>、<code>aliases</code> 写在 <code>.md</code>
-        文件开头的元数据块里,会跟着仓库同步到别的设备;而「新建卡片时怎么命名」存在本机浏览器里,不会同步。
-        没手动设置过时,应用会照着仓库里已有的命名习惯推断,所以第二台设备通常会自动跟第一台一致。
-      </div>
-
-      <h4 class="sub sub--first">新卡片文件名</h4>
-      <div class="row">
-        <label class="check">
-          <input v-model="zettelDraft.idPrefix" type="checkbox" />
-          <span>文件名带 ID 前缀</span>
-        </label>
-      </div>
-      <p class="field__tip">
-        开:<code>202609151423 卡片盒笔记法.md</code>;关:<code>卡片盒笔记法.md</code>。ID
-        始终写在文件开头的元数据块里,所以关掉之后 <code>[[202609151423]]</code>
-        照样能解析,已有的文件也不会被改名。
-      </p>
-
-      <h4 class="sub">新建卡片的默认类型</h4>
-      <div class="types">
-        <button
-          v-for="t in CARD_TYPES"
-          :key="t"
-          type="button"
-          class="types__btn"
-          :class="{ 'types__btn--on': zettelDraft.defaultType === t }"
-          @click="zettelDraft.defaultType = t"
-        >
-          {{ CARD_TYPE_LABELS[t] }}
-        </button>
-      </div>
-      <p class="field__tip">
-        闪念是还没想清楚的草稿,会留在侧栏「卡片 → 收件箱」里等你处理;文献记下别人的说法;永久是想清楚了的原子卡片;索引是一组卡片的目录。每次新建时都能在弹窗里临时改。
-      </p>
-
-      <p v-if="zettelSaved" class="field__ok">已保存。</p>
-      <div class="row row--end">
-        <button class="btn" type="button" :disabled="!zettelDirty" @click="saveZettel">保存</button>
-      </div>
-
-      <h4 class="sub">当前状况</h4>
-      <dl class="info">
-        <dt>笔记总数</dt>
-        <dd>{{ zettel.livePaths.length }} 篇</dd>
-        <dt>其中卡片</dt>
-        <dd>{{ cardTotal }} 篇(另有 {{ zettel.counts.plain }} 篇是没有元数据块的普通笔记)</dd>
-        <dt>闪念 / 文献 / 永久 / 索引</dt>
-        <dd>
-          {{ zettel.counts.fleeting }} / {{ zettel.counts.literature }} /
-          {{ zettel.counts.permanent }} / {{ zettel.counts.index }}
-        </dd>
-        <dt>孤儿卡片</dt>
-        <dd>{{ zettel.orphans.length }} 篇(没有任何能解析的双链)</dd>
-      </dl>
-
-      <div class="row">
-        <button class="btn" type="button" :disabled="rebuilding" @click="rebuildCards">
-          {{ rebuilding ? '重建中…' : '重建卡片索引' }}
-        </button>
-      </div>
-      <p class="field__tip">
-        卡片索引是从正文派生出来的,随时可以清掉重建。当收件箱、孤儿列表或相关卡片明显不对时用它。<strong>不会改动任何笔记内容</strong>,没有元数据块的旧笔记也永远不会被自动写入。
-      </p>
-    </template>
-
+    <!-- 数据与日志：只读统计 + 三个维护动作（重建索引、看同步日志、清空本机正文重来） -->
     <template v-else-if="tab === 'data'">
       <dl class="info">
         <dt>笔记总数</dt>
@@ -473,6 +407,7 @@ onMounted(() => {
           用于修复本机文件损坏,或把 Safari 清空的缓存补回来。会先删除本机所有笔记正文,再从 Gitee
           仓库完整拉取。<strong>未上传的本地修改会丢失</strong>,请先确认「待上传」为 0。
         </p>
+        <!-- 三个禁用条件缺一不可：未配置就没处可拉；还有待上传就等于删掉唯一一份未同步的修改；进行中防重复点 -->
         <button
           class="btn btn--danger"
           type="button"
@@ -485,6 +420,7 @@ onMounted(() => {
       </div>
     </template>
 
+    <!-- 关于与快捷键：纯静态文案，兜底分支，列出不支持项以免用户误以为丢数据 -->
     <template v-else>
       <p class="about">
         WebVault 是一个纯静态的单页应用:笔记是你的普通 <code>.md</code>
@@ -503,9 +439,10 @@ onMounted(() => {
 
       <h4 class="sub">快捷键</h4>
       <ul class="plain">
-        <li><code>Ctrl / ⌘ + K</code> — 链接选择器,跳转或在光标处插入 <code>[[双链]]</code></li>
-        <li><code>Ctrl / ⌘ + F</code> — 全库搜索</li>
+        <li><code>Ctrl / ⌘ + K</code> — 链接选择器,<code>Enter</code> 跳转,<code>Ctrl / ⌘ + Enter</code> 在光标处插入 <code>[[双链]]</code></li>
+        <li><code>Ctrl / ⌘ + F</code> — 全库搜索,<code>↑ ↓</code> 选择,<code>Enter</code> 打开</li>
         <li><code>Ctrl / ⌘ + ,</code> — 打开设置</li>
+        <li><code>?</code> — 打开本页(不在输入框、正文里时)</li>
         <li><code>Ctrl / ⌘ + 单击</code> 编辑器里的 <code>[[链接]]</code> — 跳转(不存在则创建)</li>
         <li>在正文里输入 <code>[[</code> — 触发链接补全</li>
         <li>行首输入 <code>/</code> — 斜杠命令:标题、列表、任务、引用、代码块、表格、分割线、日期</li>
@@ -530,6 +467,7 @@ onMounted(() => {
 </template>
 
 <style scoped>
+/* 负上 margin：抵掉 Modal 内容区的内边距，让导航条贴着弹窗顶部形成一条分隔线 */
 .tabs {
   display: flex;
   gap: 4px;
@@ -555,6 +493,7 @@ onMounted(() => {
   color: var(--accent-text);
 }
 
+/* —— 提示块与首次使用步骤 —— */
 .callout {
   margin: 0 0 14px;
   padding: 10px 12px;
@@ -610,6 +549,7 @@ onMounted(() => {
   color: var(--accent);
 }
 
+/* min-width:0 必需：网格子项默认最小宽度是内容宽度，粘贴一长串令牌会把对话框撑破 */
 .grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
@@ -634,6 +574,7 @@ onMounted(() => {
   gap: 6px;
 }
 
+/* —— 表单控件与行布局 —— */
 .field {
   width: 100%;
   min-width: 0;
@@ -699,32 +640,6 @@ onMounted(() => {
   color: var(--text);
 }
 
-.types {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.types__btn {
-  padding: 5px 13px;
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  background: var(--bg);
-  font-size: 12.5px;
-  color: var(--text-muted);
-}
-
-.types__btn:hover {
-  background: var(--bg-hover);
-  color: var(--text);
-}
-
-.types__btn--on {
-  border-color: var(--accent);
-  background: var(--accent-soft);
-  color: var(--accent-text);
-}
-
 .field__error {
   margin: 8px 0 0;
   font-size: 12.5px;
@@ -775,6 +690,7 @@ onMounted(() => {
   color: var(--text-muted);
 }
 
+/* —— 键值统计表（数据页统计） —— */
 .info {
   display: grid;
   grid-template-columns: max-content 1fr;
@@ -792,6 +708,7 @@ onMounted(() => {
   margin: 0;
 }
 
+/* —— 同步日志 —— */
 .logs {
   margin-top: 16px;
   padding-top: 12px;
@@ -813,6 +730,7 @@ onMounted(() => {
   gap: 6px;
 }
 
+/* 自己滚动而不是撑长弹窗：同步日志最多攒满一屏，超长 message 靠 word-break 换行 */
 .logs__list {
   margin: 8px 0 0;
   padding: 0;
@@ -866,6 +784,7 @@ onMounted(() => {
   word-break: break-all;
 }
 
+/* —— 危险区：清空本机正文 —— */
 .danger {
   margin-top: 18px;
   padding: 12px;
@@ -909,6 +828,7 @@ onMounted(() => {
   margin-top: 4px;
 }
 
+/* —— 外观页：主题缩略卡与强调色色块 —— */
 .themes {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(148px, 1fr));
@@ -1021,6 +941,8 @@ onMounted(() => {
   background: var(--accent-soft);
 }
 
+/* 色块取 --accent-raw，缩略块上的 data-accent-preview 会在 styles/themes.css 里就地重定义该变量，
+   于是每个选项都显示自己的颜色，而不是全部跟着当前选中的强调色走 */
 .accent__chip {
   width: 26px;
   height: 26px;
@@ -1029,6 +951,7 @@ onMounted(() => {
   box-shadow: inset 0 0 0 1px var(--shadow-color);
 }
 
+/* 两圈阴影叠出「外环 + 间隙」：内圈用页面底色隔开，避免选中环和卡片边框糊在一起 */
 .accent--on .accent__chip {
   box-shadow:
     0 0 0 2px var(--bg),

@@ -1,63 +1,47 @@
 /**
- * Card identity: the permanent id, the filename that carries it, and the row the index keeps.
+ * 卡片盒功能已彻底移除；本模块只保留链接层兼容所需的最小集合。
  *
- * A Zettelkasten rests on the address of a card never changing, so the id lives in the file's
- * frontmatter — the only place that travels to Gitee — and the filename is just appearance. A
- * user may rename `202609151423 卡片盒.md` to `卡片盒.md` and `[[202609151423]]` still resolves.
+ * 旧库里已有卡片 frontmatter（`id`/`type`/`created`），且正文里存在 `[[202609151423]]`
+ * 形式的永久 ID 双链。ID 双链的解析数据源是 `db.cards` 表（schema 冻结，只作派生索引），
+ * 而这张表的每一行由 `cardFromBody` 从文件派生——所以「从 frontmatter 读出 id/type/tags」
+ * 这条链路必须原样保留，否则老笔记的 `[[id]]` 链接会集体失联。
  *
- * Relative imports only: `scripts/verify-zettel.mts` runs this under plain node with no alias
- * resolver. `../db.ts` is imported for types only — at runtime it constructs Dexie at module
- * scope, which throws outside a browser.
+ * id 住在 frontmatter 里而不是文件名里，因此用户改文件名不影响 `[[id]]` 解析（文件名清洗
+ * 与路径拼接已迁至 `../vault/paths.ts`，那里也是本模块曾经的反向依赖方，循环导入就此消除）。
+ *
+ * 两条硬约束（违反即静默失效）：
+ * 1. 只用相对导入，`scripts/verify-frontmatter.mts` 以 plain node 直跑，没有别名解析器。
+ * 2. `../db.ts` 只做类型导入——它在模块作用域构造 Dexie，在浏览器之外会抛错。
  */
 import type { CardRow, TagRow } from '../db.ts'
 import { parseFrontmatter, readList, readScalar } from '../parse/frontmatter.ts'
 import { parseNote, type ParsedTag } from '../parse/links.ts'
-import { joinPath, normalizePath } from '../vault/paths.ts'
 
+/** 旧卡片的分类；`plain` 只出现在读取端，见 `CARD_TYPES`。 */
 export type CardType = 'plain' | 'fleeting' | 'literature' | 'permanent' | 'index'
 
 /**
- * What a user can choose. `plain` is not in the list: it is what a note with no usable metadata
- * reports, never a value written into a file.
+ * 可写进 frontmatter 的类型。列表里没有 `plain`：它是「一张没有任何可用元数据的笔记」
+ * 上报出来的值，从来不会被写进文件。
  */
 export const CARD_TYPES = ['fleeting', 'literature', 'permanent', 'index'] as const
 
-/** Chinese is UI only. Files, indexes and frontmatter stay English: they are the interchange. */
-export const CARD_TYPE_LABELS: Record<CardType, string> = {
-  plain: '普通',
-  fleeting: '闪念',
-  literature: '文献',
-  permanent: '永久',
-  index: '索引',
-}
-
+/** zid 的形状：12 位本地 `YYYYMMDDHHmm`，再跟至多 3 个字母后缀。 */
 const ZID = /^\d{12}[a-z]{0,3}$/
 
-/** `202609151423`, `202609151423a`. Not `202609151423-1`: a hyphen makes the id two words. */
+/** 接受 `202609151423`、`202609151423a`。不接受 `202609151423-1`：连字符会让 id 读起来像两个词。 */
 export function isZid(value: string): boolean {
   return ZID.test(value)
 }
 
+/** 判断字符串是否是可写入 frontmatter 的卡片类型（不含 `plain`）。 */
 export function isCardType(value: string): value is CardType {
   return (CARD_TYPES as readonly string[]).includes(value)
 }
 
-/** Local time, not UTC: this records when the author had the thought, not when the server did. */
-export function zidStamp(d: Date = new Date()): string {
-  const p = (n: number): string => String(n).padStart(2, '0')
-  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}${p(d.getHours())}${p(d.getMinutes())}`
-}
-
-/** `2026-09-15 14:23`. Bare on purpose — see `encodeScalar`, which leaves it unquoted. */
-export function createdStamp(d: Date = new Date()): string {
-  const p = (n: number): string => String(n).padStart(2, '0')
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
-}
-
 /**
- * Epoch ms for sorting, or 0 when absent or unparseable so the order stays deterministic.
- * A trailing `Z` or explicit offset means UTC; anything else is the local wall clock the stamp
- * was written against.
+ * 用于排序的 epoch 毫秒；缺失或解析不出来时返回 0，好让顺序保持确定。
+ * 尾部带 `Z` 或显式时区偏移的按 UTC 解析；其余一律按写入这个时间戳时的本地挂钟。
  */
 export function parseCreated(raw: string): number {
   const text = raw.trim()
@@ -66,6 +50,7 @@ export function parseCreated(raw: string): number {
     const utc = Date.parse(text)
     return Number.isNaN(utc) ? 0 : utc
   }
+  // 秒是可选的：手写或从别处拷来的 created 常常只精确到分钟，缺的分量一律按 0 补。
   const m = text.match(/^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2}))?)?/)
   if (!m) return 0
   const local = new Date(
@@ -80,104 +65,10 @@ export function parseCreated(raw: string): number {
 }
 
 /**
- * The first unused id derived from `base`, using letter suffixes.
+ * 一篇笔记正文对应的索引行。
  *
- * Letters rather than `-1`/`_2` because a hyphen or underscore reads as a word boundary to
- * `titleOf` and to the resolver, while a letter suffix sorts straight after the bare stamp under
- * `localeCompare(..., { numeric: true })`.
- */
-export function nextFreeZid(base: string, taken: ReadonlySet<string>): string {
-  if (!taken.has(base)) return base
-  for (let i = 0; i < 30; i++) {
-    const candidate = base + letterSuffix(i)
-    if (!taken.has(candidate)) return candidate
-  }
-  throw new Error(`一分钟内创建的卡片太多,无法为 ${base} 分配新的 ID`)
-}
-
-/** 0 -> a, 25 -> z, 26 -> aa, 27 -> ab. Three letters is far more room than 30 tries needs. */
-function letterSuffix(i: number): string {
-  let n = i
-  let out = ''
-  do {
-    out = String.fromCharCode(97 + (n % 26)) + out
-    n = Math.floor(n / 26) - 1
-  } while (n >= 0)
-  return out
-}
-
-/** The id a filename carries, whether or not the file has frontmatter. Null when it carries none. */
-export function zidFromPath(path: string): string | null {
-  const base = path.slice(path.lastIndexOf('/') + 1).replace(/\.md$/i, '')
-  const m = base.match(/^(\d{12}[a-z]{0,3})(?=$|[ _-])/)
-  return m ? m[1] : null
-}
-
-/** Characters that would let a title invent a subdirectory, or that no filesystem accepts. */
-const FORBIDDEN_TITLE = /[\\/:*?"<>|\u0000-\u001f]/g
-const TITLE_MAX_CHARS = 48
-
-/**
- * What the user typed into a tag field, as the list that goes into `tags: [...]`.
- *
- * Accepts both comma widths and plain spaces as separators because neither is obviously wrong to
- * type, and strips a leading `#` since that is how tags are written in prose. Lowercased and
- * deduped to match `mergeTags`, so a tag entered here is byte-identical to one read back later.
- */
-export function parseTagList(raw: string): string[] {
-  const out: string[] = []
-  for (const part of raw.split(/[,，\s]+/)) {
-    const tag = part.replace(/^#+/, '').trim().toLowerCase()
-    if (tag !== '' && !out.includes(tag)) out.push(tag)
-  }
-  return out
-}
-
-/**
- * A title safe to use as a filename.
- *
- * `/` and `\` must go: `normalizePath` only guards against `..` escapes, so without this a title
- * of `a/b` would silently create a folder. Truncation is by code point, never mid-surrogate.
- */
-export function sanitizeTitle(raw: string): string {
-  const collapsed = raw
-    .replace(FORBIDDEN_TITLE, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .replace(/^[.\s]+/, '')
-    .replace(/[.\s]+$/, '')
-  if (collapsed === '') throw new Error('标题不能为空,也不能只包含 / \\ : * ? " < > | 等字符')
-
-  const chars = [...collapsed]
-  const cut = chars.length > TITLE_MAX_CHARS ? chars.slice(0, TITLE_MAX_CHARS).join('') : collapsed
-  const trimmed = cut.replace(/[.\s]+$/, '')
-  if (trimmed === '') throw new Error('标题不能为空,也不能只包含 / \\ : * ? " < > | 等字符')
-  return trimmed
-}
-
-/**
- * `202609151423 卡片盒.md`, or `卡片盒.md` when the id prefix setting is off.
- *
- * The 48-code-point cap in `sanitizeTitle` bounds this at 163 UTF-8 bytes worst case (48 CJK
- * characters plus a 15-character id), comfortably under git's 255-byte path segment limit, so
- * there is no length branch here to test.
- */
-export function cardFilename(zid: string, title: string, opts: { idPrefix: boolean }): string {
-  const clean = sanitizeTitle(title)
-  return opts.idPrefix ? `${zid} ${clean}.md` : `${clean}.md`
-}
-
-/** Throws `UnsafePathError` when `dir` tries to escape the vault. */
-export function cardPath(dir: string, filename: string): string {
-  return normalizePath(joinPath(dir, filename))
-}
-
-/**
- * The index row for one note body.
- *
- * Every note gets a row, not just cards: `parsed` is how the resumable backfill knows what it has
- * already read, and "not a card" is only distinguishable from "not read yet" if both have a row.
- * `type: 'plain'` means the note is not a card.
+ * 每篇笔记都会有一行，不只是卡片：`parsed` 是可续跑的回填用来判断自己读到哪儿的依据，而「这不是一张
+ * 卡片」只有在和「还没读过」同样都有行的情况下才区分得出来。`type: 'plain'` 表示这篇不是卡片。
  */
 export function cardFromBody(path: string, content: string): CardRow {
   const fm = parseFrontmatter(content)
@@ -190,8 +81,7 @@ export function cardFromBody(path: string, content: string): CardRow {
 
   return {
     path,
-    // An id that is not a zid is somebody else's identifier. Keep it out of the index rather than
-    // let it collide with a real one in the by-zid lookup.
+    // 一个不成其为 zid 的 id 属于别人的标识符。把它挡在索引之外，好过让它在按 zid 查表时与真 id 相撞。
     zid: isZid(id) ? id : '',
     type: isCardType(type) ? type : 'plain',
     created: parseCreated(createdRaw),
@@ -203,11 +93,10 @@ export function cardFromBody(path: string, content: string): CardRow {
 }
 
 /**
- * Frontmatter tags that the body did not already supply, as extra rows at line 0.
+ * 正文没有提供的那些 frontmatter 标签，作为附加行落在 line 0 上。
  *
- * Deliberately a separate function rather than a change to `parseNote`: that contract is "scan the
- * prose, skip the frontmatter", and `verify-parse.mts` pins it. Line 0 is the marker for "this tag
- * came from the metadata block, it has no line to jump to".
+ * 有意做成独立函数，而不是去改 `parseNote`：后者的契约是「扫散文，跳过 frontmatter」，并且被
+ * `verify-parse.mts` 钉死了。line 0 是一个标记，意思是「这个标签来自元数据块，它没有可跳转的行」。
  */
 export function frontmatterTagRows(
   path: string,
@@ -219,8 +108,8 @@ export function frontmatterTagRows(
   const rows: TagRow[] = []
   const seen = new Set<string>()
   for (const raw of readList(fm, 'tags')) {
-    // Frontmatter is an explicit declaration, so `tags: [2024]` counts even though the prose
-    // scanner rejects `#2024` for having no non-digit.
+    // frontmatter 是一次显式声明，所以 `tags: [2024]` 算数——尽管散文扫描器会因为 `#2024` 里一个
+    // 非数字字符都没有而把它判成不是标签。
     const tag = raw.trim().toLowerCase()
     if (tag === '' || have.has(tag) || seen.has(tag)) continue
     seen.add(tag)
@@ -229,10 +118,11 @@ export function frontmatterTagRows(
   return rows
 }
 
-/** Body tags keep their order and win the line number; frontmatter tags are appended after. */
+/** 正文标签保持自身顺序并赢得行号；frontmatter 标签追加在后面。 */
 function mergeTags(bodyTags: readonly ParsedTag[], fmTags: readonly string[]): string[] {
   const out: string[] = []
   const seen = new Set<string>()
+  // 正文标签已由 `parseNote` 统一小写，这里只滤空并去重；frontmatter 那一轮才需要自己 trim + 转小写。
   for (const t of bodyTags) {
     if (t.tag === '' || seen.has(t.tag)) continue
     seen.add(t.tag)

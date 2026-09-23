@@ -1,60 +1,84 @@
 <script setup lang="ts">
+/**
+ * 关系图谱：以模态弹层展示笔记之间的双链关系，Canvas 绘制的简易力导向图。
+ *
+ * 数据来自 Dexie 的 links 表与 vault 笔记列表；requestAnimationFrame 循环每帧先做物理
+ * 模拟（tick）再绘制（draw），模拟温度 alpha 衰减到阈值后停止计算但保留最后一帧画面。
+ * 交互：拖动节点会固定它并唤醒模拟、拖空白平移、滚轮以光标为锚点缩放、点击节点请求打开
+ * 对应笔记。坐标全部使用"世界坐标"，屏幕坐标只在指针事件里临时换算。
+ *
+ * （孤儿卡筛选及其空心点画法已随卡片盒功能一并移除：图里现在只有「全局 / 只看邻居」一档。）
+ */
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { db } from '@/core/db.ts'
 import { cssColor } from '@/core/theme/apply.ts'
 import { titleOf } from '@/core/vault/paths.ts'
-import { buildDegrees, isOrphan } from '@/core/zettel/orphans.ts'
 import { useAppearanceStore } from '@/stores/appearance.ts'
 import { useVaultStore } from '@/stores/vault.ts'
 
+/** open：点击节点时请求打开对应笔记；close：请求关闭图谱弹层。 */
 const emit = defineEmits<{ (e: 'open', path: string): void; (e: 'close'): void }>()
 
 const vault = useVaultStore()
 const appearance = useAppearanceStore()
 
+/** Canvas 元素与其外层容器；容器负责提供 CSS 尺寸，Canvas 按 DPR 设置物理像素。 */
 const canvas = ref<HTMLCanvasElement | null>(null)
 const wrap = ref<HTMLElement | null>(null)
+/** 筛选：只看当前笔记的一跳邻居（无激活笔记时开关禁用）。 */
 const local = ref(false)
-const orphansOnly = ref(false)
+/** 头部统计：当前图里的节点数与去重后的边数。 */
 const stats = ref({ nodes: 0, edges: 0 })
 
+/** 力导向图中的一个节点；位置/速度为世界坐标，非响应式，只被 rAF 循环读写。 */
 interface GNode {
   path: string
   title: string
   degree: number
-  /** Nothing connects to it and it connects to nothing: drawn hollow. */
-  orphan: boolean
   x: number
   y: number
   vx: number
   vy: number
+  /** 被用户拖住时固定，模拟阶段跳过对它的积分。 */
   fixed: boolean
 }
 
+/** 边的平衡长度：弹簧力试图把两端拉到这个距离。 */
 const SPRING = 78
+/** 库仑式斥力强度：节点相距越近互相推开越猛。 */
 const REPULSE = 1400
+/** 斥力截断距离：超过它不算斥力，配合空间网格只需查 3×3 邻域。 */
 const CUTOFF = 190
+/** 空间网格边长；取值不小于 CUTOFF 才能保证截断范围被 3×3 邻域覆盖。 */
 const CELL = 190
 
+// —— 模拟与视图状态（普通变量，刻意不做成响应式，避免每帧触发 Vue 更新） ——
 let nodes: GNode[] = []
 let edges: [number, number][] = []
 let byPath = new Map<string, number>()
+/** 模拟温度：1 表示全力计算，每帧乘 0.985 衰减，低于 0.003 即停止模拟。 */
 let alpha = 1
+/** 视图变换：以画布中心为原点的缩放与平移。 */
 let scale = 1
 let tx = 0
 let ty = 0
+/** rAF 句柄，卸载时用于取消循环。 */
 let frame = 0
+// 指针交互状态：hovered/dragging 是节点下标，panning 表示正在平移画布。
 let hovered: number | null = null
 let dragging: number | null = null
 let panning = false
+// 按下起点与位移标记：移动超过 4px 才算拖动，否则视为点击。
 let downX = 0
 let downY = 0
 let moved = false
+// 画布 CSS 尺寸与设备像素比。
 let width = 0
 let height = 0
 let dpr = 1
 let observer: ResizeObserver | null = null
 
+/** 一帧绘制所需的已解析颜色集合。 */
 interface Palette {
   node: string
   active: string
@@ -62,14 +86,11 @@ interface Palette {
   edgeIdle: string
   labelBg: string
   label: string
-  /** Interior of an orphan dot: the page showing through, ringed in the idle edge colour. */
-  hollow: string
 }
 
 /**
- * Canvas wants resolved color strings and the loop runs at 60fps, so the theme variables are
- * read once and cached; changing theme or accent just drops the cache and the next frame
- * re-reads them.
+ * Canvas 只接受已解析的颜色字符串，而绘制循环跑在 60fps，因此主题变量只读一次并缓存；
+ * 切换主题或强调色时丢弃缓存，下一帧会重新读取。
  */
 let palette: Palette | null = null
 
@@ -81,11 +102,11 @@ function colors(): Palette {
     edgeIdle: cssColor('--text-muted'),
     labelBg: cssColor('--bg'),
     label: cssColor('--text'),
-    hollow: cssColor('--bg'),
   }
   return palette
 }
 
+// 主题或强调色变化 → 丢弃颜色缓存，下一帧重新读取 CSS 变量。
 watch(
   () => [appearance.theme, appearance.accent] as const,
   () => {
@@ -93,17 +114,17 @@ watch(
   },
 )
 
+/** 是否存在当前激活笔记，决定"只看邻居"开关是否可用。 */
 const hasActive = computed(() => vault.activePath !== null)
 
+/**
+ * 按当前筛选（全局 ↔ 只看邻居）重建节点与边。
+ * 复用上一版节点的坐标，使得在两种范围之间切换时布局不会重新炸开。
+ */
 async function load(): Promise<void> {
   const rows = await db.links.toArray()
   const active = vault.activePath
   const scope = vault.notes.filter((n) => !n.removedLocal)
-
-  // Graded from the rows just read, not from the store's debounced copy: the hollow dots and the
-  // sidebar's orphan list must never disagree about whether a card is alone.
-  const degrees = buildDegrees(rows.map((r) => ({ src: r.src, targetPath: r.targetPath })))
-  const alone = (path: string): boolean => isOrphan(path, degrees)
 
   let keep: Set<string> | null = null
   if (local.value && active) {
@@ -113,16 +134,12 @@ async function load(): Promise<void> {
       if (r.targetPath === active) keep.add(r.src)
     }
   }
-  if (orphansOnly.value) {
-    const lonely = new Set(scope.filter((n) => alone(n.path)).map((n) => n.path))
-    keep = keep ? new Set([...keep].filter((p) => lonely.has(p))) : lonely
-  }
 
   const chosen = keep ? scope.filter((n) => keep!.has(n.path)) : scope
   const index = new Map(chosen.map((n, i) => [n.path, i]))
   const prev = new Map(nodes.map((n) => [n.path, n]))
 
-  // Reuse existing coordinates so toggling between local and global does not re-explode.
+  // 复用已有坐标，避免在范围切换时布局重新炸开。
   nodes = chosen.map((n, i) => {
     const old = prev.get(n.path)
     const angle = (i / Math.max(chosen.length, 1)) * Math.PI * 2
@@ -131,7 +148,6 @@ async function load(): Promise<void> {
       path: n.path,
       title: n.title || titleOf(n.path),
       degree: 0,
-      orphan: alone(n.path),
       x: old?.x ?? Math.cos(angle) * radius + (Math.random() - 0.5) * 20,
       y: old?.y ?? Math.sin(angle) * radius + (Math.random() - 0.5) * 20,
       vx: 0,
@@ -160,9 +176,18 @@ async function load(): Promise<void> {
   alpha = 1
 }
 
+/**
+ * 单步力导向模拟，按顺序做四件事：
+ * 1) 把节点按位置撒进空间网格；
+ * 2) 斥力：只检查 3×3 邻域内的节点对，超出 CUTOFF 直接跳过（避免 O(n²)）；
+ * 3) 弹簧：每条边把两端往平衡长度 SPRING 拉；
+ * 4) 积分：向心引力 + 阻尼 + 限速后更新位置，最后让 alpha 衰减。
+ * alpha 低于阈值时整段直接返回，画面停在收敛后的布局上。
+ */
 function tick(): void {
   if (alpha < 0.003) return
 
+  // 1) 空间网格分桶
   const cells = new Map<string, number[]>()
   for (let i = 0; i < nodes.length; i++) {
     const key = cellKey(nodes[i].x, nodes[i].y)
@@ -171,6 +196,7 @@ function tick(): void {
     else cells.set(key, [i])
   }
 
+  // 2) 斥力：j <= i 保证每对节点只算一次；重合点给一个微小随机偏移避免除零。
   const cutoff2 = CUTOFF * CUTOFF
   for (let i = 0; i < nodes.length; i++) {
     const a = nodes[i]
@@ -205,6 +231,7 @@ function tick(): void {
     }
   }
 
+  // 3) 弹簧力：按与平衡长度的偏差把两端互相拉近/推离，力度随 alpha 一起衰减。
   for (const [a, b] of edges) {
     const na = nodes[a]
     const nb = nodes[b]
@@ -220,6 +247,7 @@ function tick(): void {
     nb.vy -= fy
   }
 
+  // 4) 积分：拖住的节点不动；其余受向心引力（防止整图漂走）、阻尼与限速后更新位置。
   for (const n of nodes) {
     if (n.fixed) {
       n.vx = 0
@@ -239,13 +267,20 @@ function tick(): void {
     n.y += n.vy
   }
 
+  // 温度衰减：布局逐渐收敛，模拟最终自行停止。
   alpha *= 0.985
 }
 
+/** 世界坐标 → 空间网格的分桶键。 */
 function cellKey(x: number, y: number): string {
   return `${Math.floor(x / CELL)},${Math.floor(y / CELL)}`
 }
 
+/**
+ * 绘制一帧：应用视图变换 → 边（悬停/当前相关的边高亮）→ 节点（当前/悬停高亮）
+ * → 最后给当前与悬停两个节点加标题。
+ * 线宽与字号都除以 scale，保证缩放时视觉粗细保持恒定。
+ */
 function draw(): void {
   const ctx = canvas.value?.getContext('2d')
   if (!ctx) return
@@ -274,18 +309,11 @@ function draw(): void {
     const r = (2.6 + Math.sqrt(n.degree) * 1.5) / Math.max(scale, 0.35)
     ctx.beginPath()
     ctx.arc(n.x, n.y, r, 0, Math.PI * 2)
-    if (n.orphan && i !== activeIndex && i !== hovered) {
-      ctx.fillStyle = c.hollow
-      ctx.fill()
-      ctx.lineWidth = 1.2 / scale
-      ctx.strokeStyle = c.edgeIdle
-      ctx.stroke()
-    } else {
-      ctx.fillStyle = i === activeIndex ? c.active : i === hovered ? c.hovered : c.node
-      ctx.fill()
-    }
+    ctx.fillStyle = i === activeIndex ? c.active : i === hovered ? c.hovered : c.node
+    ctx.fill()
   }
 
+  /** 在节点上方绘制带底色的标题，字体与底框都按 scale 归一，保证缩放后视觉尺寸不变。 */
   const labelFor = (i: number | null): void => {
     if (i === null) return
     const n = nodes[i]
@@ -305,12 +333,14 @@ function draw(): void {
   labelFor(hovered)
 }
 
+/** rAF 主循环：先模拟后绘制；句柄存进 frame，卸载时统一取消。 */
 function loop(): void {
   tick()
   draw()
   frame = requestAnimationFrame(loop)
 }
 
+/** 按容器的 CSS 尺寸与设备像素比重设画布物理像素，保证高分屏下不糊。 */
 function resize(): void {
   const el = wrap.value
   const c = canvas.value
@@ -324,6 +354,7 @@ function resize(): void {
   c.style.height = `${height}px`
 }
 
+/** 屏幕坐标（视口像素）→ 世界坐标：先减去画布原点与平移，再除以缩放。 */
 function toWorld(event: PointerEvent | WheelEvent): { x: number; y: number } {
   const rect = canvas.value!.getBoundingClientRect()
   const sx = event.clientX - rect.left - tx - width / 2
@@ -331,6 +362,10 @@ function toWorld(event: PointerEvent | WheelEvent): { x: number; y: number } {
   return { x: sx / scale, y: sy / scale }
 }
 
+/**
+ * 节点命中检测：返回可视半径内距离最近的节点下标，没有命中则返回 null。
+ * 半径在绘制半径基础上再放 6/scale 的容差，让小节点也点得中。
+ */
 function pick(event: PointerEvent): number | null {
   const p = toWorld(event)
   let best: number | null = null
@@ -347,6 +382,10 @@ function pick(event: PointerEvent): number | null {
   return best
 }
 
+/**
+ * 按下：命中节点 → 进入拖拽并固定该节点，同时把 alpha 抬到至少 0.35 唤醒模拟；
+ * 未命中 → 进入平移。位移阈值 4px 在 move 中判定，用于区分"点击"与"拖动"。
+ */
 function onPointerDown(event: PointerEvent): void {
   canvas.value?.setPointerCapture(event.pointerId)
   downX = event.clientX
@@ -362,6 +401,11 @@ function onPointerDown(event: PointerEvent): void {
   }
 }
 
+/**
+ * 移动：拖拽时把节点直接钉在指针的世界坐标上并抬 alpha；平移时改 tx/ty（增量取
+ * 上次记录的按下点，等于做差分）；空闲时只更新 hovered 供高亮与命中。
+ * 位移超过 4px 才算拖动，否则松开时仍视为点击。
+ */
 function onPointerMove(event: PointerEvent): void {
   if (Math.abs(event.clientX - downX) + Math.abs(event.clientY - downY) > 4) moved = true
 
@@ -382,6 +426,10 @@ function onPointerMove(event: PointerEvent): void {
   hovered = pick(event)
 }
 
+/**
+ * 抬起：若按下的是节点且没有发生位移，视为点击——请求打开笔记并关闭图谱；
+ * 若落在空白处且未移动过，命中悬停节点时同样打开。随后释放固定与指针捕获。
+ */
 function onPointerUp(event: PointerEvent): void {
   if (dragging !== null) {
     if (!moved) {
@@ -399,6 +447,10 @@ function onPointerUp(event: PointerEvent): void {
   canvas.value?.releasePointerCapture(event.pointerId)
 }
 
+/**
+ * 滚轮缩放：以光标下的世界坐标为锚点——缩放前后各取一次世界坐标，用差值补偿平移，
+ * 使光标所指的点在缩放过程中保持不动。缩放范围钳制在 0.15 ~ 4。
+ */
 function onWheel(event: WheelEvent): void {
   event.preventDefault()
   const before = toWorld(event)
@@ -409,6 +461,10 @@ function onWheel(event: WheelEvent): void {
   ty += (after.y - before.y) * scale
 }
 
+/**
+ * 恢复默认视图（1:1、居中），并把 alpha 抬到 0.5 让布局轻微回弹，
+ * 避免用户缩放平移后完全找不到中心。
+ */
 function recenter(): void {
   scale = 1
   tx = 0
@@ -416,6 +472,7 @@ function recenter(): void {
   alpha = Math.max(alpha, 0.5)
 }
 
+/** Esc 关闭图谱；stopPropagation 防止外层（如全局快捷键）再处理这次按键。 */
 function onKeydown(event: KeyboardEvent): void {
   if (event.key === 'Escape') {
     event.stopPropagation()
@@ -423,12 +480,14 @@ function onKeydown(event: KeyboardEvent): void {
   }
 }
 
-watch([local, orphansOnly], () => {
+// 「只看邻居」开关变化 → 重建图（load 会复用旧坐标，布局不至于重置）。
+watch(local, () => {
   void load()
 })
 
 onMounted(async () => {
   resize()
+  // 容器尺寸变化（含弹层放大缩小）时重设画布；wheel 用 passive:false 以便 preventDefault。
   observer = new ResizeObserver(resize)
   if (wrap.value) observer.observe(wrap.value)
   canvas.value?.addEventListener('pointerdown', onPointerDown)
@@ -441,6 +500,7 @@ onMounted(async () => {
   frame = requestAnimationFrame(loop)
 })
 
+/* 卸载：停掉动画帧、断开尺寸观察、移除 Esc 监听（指针监听随 canvas 一起回收）。 */
 onBeforeUnmount(() => {
   cancelAnimationFrame(frame)
   observer?.disconnect()
@@ -452,15 +512,12 @@ onBeforeUnmount(() => {
   <Teleport to="body">
     <div class="graph" @mousedown.self="emit('close')">
       <div class="graph__box" role="dialog" aria-label="关系图谱">
+        <!-- 工具条：范围筛选（互不排斥时取交集）、统计与视图操作 -->
         <header class="graph__head">
           <h3>关系图谱</h3>
           <label class="graph__toggle">
             <input v-model="local" type="checkbox" :disabled="!hasActive" />
             <span>只看当前笔记的邻居</span>
-          </label>
-          <label class="graph__toggle">
-            <input v-model="orphansOnly" type="checkbox" />
-            <span>只看孤儿卡</span>
           </label>
           <span class="graph__stats">{{ stats.nodes }} 篇 · {{ stats.edges }} 条链接</span>
           <div class="graph__gap"></div>
@@ -468,16 +525,14 @@ onBeforeUnmount(() => {
           <button class="graph__close" aria-label="关闭" @click="emit('close')">×</button>
         </header>
 
+        <!-- 画布容器：提供 CSS 尺寸，空态与图例浮在其上 -->
         <div ref="wrap" class="graph__canvas">
           <canvas ref="canvas"></canvas>
-          <p v-if="stats.nodes === 0" class="graph__empty">
-            {{ orphansOnly ? '没有孤儿卡片:每一篇都至少有一条能解析的链接。' : '还没有笔记可以绘制。' }}
-          </p>
+          <p v-if="stats.nodes === 0" class="graph__empty">还没有笔记可以绘制。</p>
           <p class="graph__legend">
             拖动节点可调整位置 · 滚轮缩放 · 拖动空白处平移 · 点击节点打开笔记
             <span class="dot dot--active"></span>当前笔记
             <span class="dot dot--hover"></span>鼠标所指
-            <span class="dot dot--orphan"></span>孤儿卡片
           </p>
         </div>
       </div>
@@ -486,6 +541,7 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+/* —— 遮罩层与弹层主体 —— */
 .graph {
   position: fixed;
   inset: 0;
@@ -512,6 +568,7 @@ onBeforeUnmount(() => {
   overflow: hidden;
 }
 
+/* —— 顶部标题与筛选开关 —— */
 .graph__head {
   display: flex;
   align-items: center;
@@ -583,6 +640,7 @@ onBeforeUnmount(() => {
   color: var(--text);
 }
 
+/* —— 画布区（含空态与底部图例） —— */
 .graph__canvas {
   position: relative;
   flex: 1;
@@ -611,6 +669,7 @@ onBeforeUnmount(() => {
   font-size: 13px;
 }
 
+/* —— 底部图例与节点状态色标 —— */
 .graph__legend {
   position: absolute;
   left: 0;
@@ -641,11 +700,7 @@ onBeforeUnmount(() => {
   background: var(--warn);
 }
 
-.dot--orphan {
-  background: var(--bg);
-  box-shadow: inset 0 0 0 1.5px var(--text-muted);
-}
-
+/* 窄屏（≤640px）：弹层全屏化，统计信息让位给操作按钮 */
 @media (max-width: 640px) {
   .graph {
     padding: 0;

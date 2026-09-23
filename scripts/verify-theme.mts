@@ -1,3 +1,11 @@
+/**
+ * 主题与配色验证：读 src/styles/themes.css，检查五套主题与各强调色的结构和派生令牌，
+ * 按 WCAG 公式逐项算对比度，并附带三项全局守卫——代码高亮主题必须已本地化（离线可用）、
+ * 组件里不许写死色值、用到的 CSS 变量必须有人声明。
+ *
+ * 运行：npm run verify（第 8 个套件；裸 node 直跑本文件，需在仓库根目录执行，
+ * 因为下面用的是相对路径）。全部通过输出 OK 且退出码 0，否则 1。
+ */
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { ACCENTS, DEFAULT_ACCENT, DEFAULT_THEME, THEMES, codeThemeFor } from '../src/core/theme/themes.ts'
@@ -5,6 +13,7 @@ import { ACCENTS, DEFAULT_ACCENT, DEFAULT_THEME, THEMES, codeThemeFor } from '..
 let pass = 0
 let fail = 0
 
+/** 断言入口：失败时打印名称与补充细节，便于直接定位是哪条契约破了。 */
 function ok(name: string, condition: boolean, detail = ''): void {
   if (condition) {
     pass++
@@ -14,6 +23,7 @@ function ok(name: string, condition: boolean, detail = ''): void {
   }
 }
 
+/** 递归收集目录下所有文件，供后面的源码扫描（写死色值、变量声明）复用。 */
 function walk(dir: string, out: string[] = []): string[] {
   for (const entry of readdirSync(dir)) {
     const full = join(dir, entry)
@@ -23,29 +33,35 @@ function walk(dir: string, out: string[] = []): string[] {
   return out
 }
 
-// 注释要一起去掉,否则它会混进紧随其后的选择器文本里。
+// 把整份 CSS 解析成 {选择器, 规则体} 列表——本套件不引 CSS 解析库，用正则够用，
+// 但必须先剥注释，否则注释内容会混进紧随其后的选择器文本里。
 const css = readFileSync('src/styles/themes.css', 'utf8').replace(/\/\*[\s\S]*?\*\//g, '')
 const rules = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)].map((m) => ({ sel: m[1].trim(), body: m[2] }))
 
+/** 按选择器精确查规则（支持逗号分组选择器，命中其中一支即算）。 */
 function rule(selector: string): { sel: string; body: string } | undefined {
   return rules.find((r) => r.sel.split(',').some((s) => s.trim() === selector))
 }
 
+/** 从规则体抽出 `--变量: 值;` 映射，后面的断言都基于这份令牌表。 */
 function tokens(body: string): Map<string, string> {
   const map = new Map<string, string>()
   for (const m of body.matchAll(/(--[\w-]+)\s*:\s*([^;]+);/g)) map.set(m[1], m[2].trim())
   return map
 }
 
+/** #rrggbb → [r, g, b]。 */
 function rgb(hex: string): number[] {
   const n = parseInt(hex.slice(1), 16)
   return [(n >> 16) & 0xff, (n >> 8) & 0xff, n & 0xff]
 }
 
+/** [r, g, b] → #rrggbb，四舍五入并夹到 0..255（插值结果可能越界）。 */
 function toHex([r, g, b]: number[]): string {
   return '#' + [r, g, b].map((v) => Math.round(Math.min(255, Math.max(0, v))).toString(16).padStart(2, '0')).join('')
 }
 
+/** WCAG 2.x 相对亮度：先做 sRGB 伽马展开，再按亮度系数加权。 */
 function luminance(hex: string): number {
   const channel = (v: number): number => {
     const s = v / 255
@@ -55,6 +71,7 @@ function luminance(hex: string): number {
   return 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
 }
 
+/** WCAG 对比度：(L1 + 0.05) / (L2 + 0.05)，结果 ≥ 1，越大越易读。 */
 function ratio(a: string, b: string): number {
   const la = luminance(a)
   const lb = luminance(b)
@@ -68,10 +85,12 @@ function mix(fg: string, bg: string, pct: number): string {
   return toHex(f.map((v, i) => v * pct + b[i] * (1 - pct)))
 }
 
+/** 6 位十六进制纯色——本套件要求所有可计算的色值都是这种形式，缩写与 rgb() 一概不认。 */
 const HEX = /^#[0-9a-f]{6}$/i
 
 const palettes = new Map<string, Map<string, string>>()
 
+// ---- 主题调色板：每套主题都要有预览块，选择器挂对位置，color-scheme 与 mode 一致 ----
 for (const theme of THEMES) {
   const preview = rule(`[data-theme-preview='${theme.id}']`)
   ok(`主题 ${theme.id} 有调色板块`, !!preview)
@@ -101,12 +120,14 @@ function accentRaw(id: string): string {
   return r ? (tokens(r.body).get('--accent-raw') ?? '') : ''
 }
 
+// 浅色模式的强调色写在 [data-mode='light'][data-accent='…'] 规则里，与深色原值分开收集
 const lightAccents = new Map<string, string>()
 for (const r of rules) {
   const m = /^\[data-mode='light'\]\[data-accent='([\w-]+)'\]$/.exec(r.sel)
   if (m) lightAccents.set(m[1], tokens(r.body).get('--accent') ?? '')
 }
 
+// ---- 强调色：预览块存在，原值与浅色版都必须是可解析的 6 位纯色 ----
 for (const accent of ACCENTS) {
   const preview = rule(`[data-accent-preview='${accent.id}']`)
   ok(`强调色 ${accent.id} 有预览块`, !!preview)
@@ -137,6 +158,7 @@ function checkStroke(vars: Map<string, string>): string {
   return /stroke='%23([0-9a-f]{6})'/i.exec(vars.get('--check-mark') ?? '')?.[1] ?? ''
 }
 
+// 深浅两种模式都必须给出 --accent-text 与 --check-mark，否则下面的派生对比度无从算起
 const modes = [
   { mode: 'dark' as const, derived: darkDerived },
   { mode: 'light' as const, derived: lightDerived },
@@ -192,6 +214,7 @@ for (const theme of THEMES) {
   }
 }
 
+// 注册表自检：默认主题与默认强调色必须真实存在于清单里，否则设置页打开即落空
 ok('默认主题在注册表里', THEMES.some((t) => t.id === DEFAULT_THEME))
 ok('默认强调色在注册表里', ACCENTS.some((a) => a.id === DEFAULT_ACCENT))
 
@@ -225,5 +248,6 @@ for (const file of walk('src').filter((f) => f.endsWith('.vue') || f.endsWith('.
 const missing = [...used].filter((name) => !declared.has(name)).sort()
 ok('用到的变量都已声明', missing.length === 0, missing.join(', '))
 
+// 汇总：任一断言失败即以非 0 退出，让 `npm run verify` 整条链失败
 console.log(`${fail === 0 ? 'OK  ' : 'FAIL'} verify-theme: ${pass} passed, ${fail} failed`)
 if (fail > 0) process.exit(1)

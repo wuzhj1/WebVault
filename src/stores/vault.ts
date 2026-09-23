@@ -1,6 +1,18 @@
+/**
+ * vault store（Pinia）：笔记元数据、派生索引（文件树/双链/标签/卡片）与 OPFS 正文读写的唯一入口。
+ *
+ * 职责边界：正文永远写 OPFS，索引永远写 Dexie，两者的最终一致由 reconcile 保证；
+ * links/tags/cards 等派生数据随时可清空重建，不承载用户唯一内容。
+ *
+ * 硬约束/注意事项：
+ * - NoteMeta 的 dirty/removedLocal 脏标记与墓碑语义直接被同步引擎（core/sync/engine.ts）消费，
+ *   改动须与那边对齐；墓碑只在「远端曾有该文件」时才立（needsRemoteDelete）。
+ * - 正文写入必须经过 saveBody 或 reindexContent 这条漏斗，否则链接/卡片索引会漂移。
+ * - 重命名会改写全库入链并为旧路径留下远端删除墓碑，不能只动文件名。
+ */
 import { defineStore } from 'pinia'
 import { computed, ref, shallowRef } from 'vue'
-import { db, type CardRow, type LinkRow, type NoteMeta, type TagRow } from '@/core/db.ts'
+import { db, putSetting, type CardRow, type LinkRow, type NoteMeta, type TagRow } from '@/core/db.ts'
 import { gitBlobSha } from '@/core/vault/hash.ts'
 import * as opfs from '@/core/vault/opfs.ts'
 import {
@@ -22,7 +34,9 @@ import {
 } from '@/core/index/resolve.ts'
 import { cardFromBody, frontmatterTagRows, isZid } from '@/core/zettel/card.ts'
 import { needsRemoteDelete } from '@/core/sync/remote-diff.ts'
+import { useUiStore } from '@/stores/ui.ts'
 
+/** 文件树的一层节点：目录或笔记。 */
 export interface TreeNode {
   name: string
   path: string
@@ -30,6 +44,7 @@ export interface TreeNode {
   children: TreeNode[]
 }
 
+/** 反链面板的一条：谁链到了当前笔记。 */
 export interface BacklinkEntry {
   path: string
   title: string
@@ -38,6 +53,7 @@ export interface BacklinkEntry {
   embed: boolean
 }
 
+/** 出链面板的一条：当前笔记链去了哪里。 */
 export interface OutgoingEntry {
   target: string
   targetPath: string | null
@@ -48,6 +64,7 @@ export interface OutgoingEntry {
   attachment: boolean
 }
 
+/** 生成一条全零的初始 NoteMeta，代表「从未同步过的新笔记」。 */
 function newMeta(path: string): NoteMeta {
   return {
     path,
@@ -64,30 +81,46 @@ function newMeta(path: string): NoteMeta {
   }
 }
 
+/** 「上次打开路径」落盘的防抖定时器，避免频繁写设置。 */
+let lastOpenTimer: ReturnType<typeof setTimeout> | null = null
+
+/** vault 主 store：元数据索引、派生状态与正文读写的集中入口。 */
 export const useVaultStore = defineStore('vault', () => {
+  /** 「最近打开」的记账人：ui store 只存本机书签，不反向依赖 vault，无循环引用。 */
+  const ui = useUiStore()
+  /** 元数据索引的内存镜像（Dexie notes 表全量）；shallowRef：整表替换而非逐项响应。 */
   const notes = shallowRef<NoteMeta[]>([])
+  /** 初始化（OPFS 探测 + reconcile）完成后置真。 */
   const ready = ref(false)
+  /** 当前打开笔记的路径；null = 没有打开。 */
   const activePath = ref<string | null>(null)
+  /** 致命错误（如浏览器不支持 OPFS）；非 null 时应用应展示全屏错误并不再初始化。 */
   const fatal = ref<string | null>(null)
-  /** Set when OPFS came back empty while the metadata index still knew about notes. */
+  /** OPFS 被清空、而元数据索引里仍有笔记时置位；sync store 据此触发从远端恢复正文。 */
   const storageWasWiped = ref(false)
+  /** 指向当前笔记的反链列表。 */
   const inbound = shallowRef<BacklinkEntry[]>([])
+  /** 当前笔记发出的出链列表。 */
   const outgoing = shallowRef<OutgoingEntry[]>([])
+  /** 尚无对应笔记的链接目标，按出现次数倒序（附件目标除外）。 */
   const unresolvedTargets = shallowRef<string[]>([])
+  /** 全库标签及计数，按次数倒序，供标签面板使用。 */
   const allTags = shallowRef<{ tag: string; count: number }[]>([])
-  /** Frontmatter mirrored into an index; derived data, rebuildable from OPFS at any time. */
+  /** 从 frontmatter 镜像出的卡片索引；纯派生数据，随时可从 OPFS 重建。 */
   const cards = shallowRef<CardRow[]>([])
-  /** Bumped when the sync engine rewrites the body of the note currently open. */
+  /** 同步引擎改写当前打开笔记的正文时自增，编辑器据此重新加载内容。 */
   const bodyRevision = ref(0)
 
+  /** path/标题/zid → 笔记的解析器，随 notes/cards 变化重建。 */
   const resolver = computed<Resolver>(() => buildResolver(notes.value, cards.value))
+  /** path → NoteMeta 查表。 */
   const byPath = computed(() => new Map(notes.value.map((n) => [n.path, n])))
+  /** path → CardRow 查表。 */
   const cardByPath = computed(() => new Map(cards.value.map((c) => [c.path, c])))
 
   /**
-   * Cheap stand-in for a content version counter: any save bumps a note's mtime, which changes this
-   * sum. Shared by the search index and the related-card ranking — two callers each computing their
-   * own would keep invalidating the module-level MiniSearch cache between them.
+   * 内容版本号的廉价替代：任何一次保存都会改笔记的 mtime，进而改变这个累加和。
+   * 搜索索引与相关卡片排序共用它——若各自算一份，会互相把模块级 MiniSearch 缓存打失效。
    */
   const revision = computed(() => {
     let r = 0
@@ -95,6 +128,10 @@ export const useVaultStore = defineStore('vault', () => {
     return r
   })
 
+  /**
+   * 侧边栏文件树：按路径推导，目录在前、同级按中文自然排序；已删（removedLocal）笔记不出现。
+   * 目录节点按需逐级创建，父目录缺失时向上递归补齐。
+   */
   const tree = computed<TreeNode[]>(() => {
     const root: TreeNode[] = []
     const dirs = new Map<string, TreeNode>()
@@ -135,13 +172,16 @@ export const useVaultStore = defineStore('vault', () => {
     return root
   })
 
+  /** 当前打开笔记的元数据；没有打开或路径已失效时为 null。 */
   const activeNote = computed(() =>
     activePath.value ? byPath.value.get(activePath.value) ?? null : null,
   )
+  /** 待上传条数（脏笔记 + 删除墓碑），驱动同步角标。 */
   const pendingUpload = computed(() => notes.value.filter((n) => n.dirty || n.removedLocal).length)
-  /** Notes we know exist remotely but have no local body yet. */
+  /** 已知存在于远端、但本地还没有正文（未缓存）的笔记，预取与按需下载都从这里取活。 */
   const uncached = computed(() => notes.value.filter((n) => !n.cached && !n.removedLocal))
 
+  /** 启动入口：探测 OPFS → 申请持久化存储 → reconcile；任何一步失败都写入 fatal。 */
   async function init(): Promise<void> {
     if (!opfs.isOpfsSupported()) {
       fatal.value =
@@ -158,16 +198,14 @@ export const useVaultStore = defineStore('vault', () => {
   }
 
   /**
-   * Bring OPFS and the metadata index back into agreement. Handles three real cases:
-   * files created outside the app, notes deleted outside the app, and Safari's ITP
-   * wiping OPFS while IndexedDB survives.
+   * 让 OPFS 与元数据索引重新对齐。覆盖三种真实场景：应用之外新建的文件、
+   * 应用之外删除的笔记，以及 Safari ITP 清空 OPFS 而 IndexedDB 幸存下来的情况。
    */
   async function reconcile(): Promise<void> {
     const onDisk = new Set(await opfs.listNotePaths())
     const stored = await db.notes.toArray()
 
-    // A tombstone for a file the remote never held can never be pushed; without this it
-    // would sit in the pending-upload count forever.
+    // 远端从未有过的文件的墓碑永远推不出去；不清理的话它会一直挂在待上传计数里。
     const stale = new Set(
       stored.filter((n) => n.removedLocal && n.remoteSha === null).map((n) => n.path),
     )
@@ -176,7 +214,7 @@ export const useVaultStore = defineStore('vault', () => {
 
     if (known.length > 0 && onDisk.size === 0) {
       storageWasWiped.value = true
-      // Keep the index: the sync store re-pulls bodies from Gitee using remoteSha.
+      // 保留索引：sync store 会用 remoteSha 从 Gitee 把正文重新拉回来。
       const reset = known.map((n) => ({ ...n, cached: 0 as const }))
       await db.notes.bulkPut(reset)
       notes.value = reset
@@ -195,14 +233,15 @@ export const useVaultStore = defineStore('vault', () => {
       meta.baseSha = meta.localSha
       meta.size = content.length
       meta.cached = 1
-      // Never pushed, so it has to ride along on the first sync.
+      // 从未推送过，因此要随第一次同步一起上传。
       meta.dirty = 1
       adopted.push(meta)
       await reindexContent(path, content)
     }
     if (adopted.length > 0) await db.notes.bulkPut(adopted)
 
-    // Notes the index says are cached but that are gone from disk.
+    // 索引说已缓存、磁盘上却不见了的笔记：把 cached 打回 0，等按需重新下载；
+    // 已是墓碑的不动（它本来就不该有正文）。
     const lost: NoteMeta[] = []
     for (const n of known) {
       if (n.removedLocal || onDisk.has(n.path)) continue
@@ -220,9 +259,13 @@ export const useVaultStore = defineStore('vault', () => {
     await refreshDerived()
   }
 
+  /**
+   * 刷新全部派生状态，顺序有讲究：先清理卡片表并重载 cards——下面的 resolver 要重新解析所有链接，
+   * 而 `[[id]]` 形式的链接只有在 id 索引到位后才能解析；随后修正链接 targetPath 漂移、
+   * 汇总未解析目标、统计标签计数，最后刷新当前笔记的双链面板。
+   */
   async function refreshDerived(): Promise<void> {
-    // Cards first: the resolver below re-resolves every link, and an `[[id]]` link only resolves
-    // once the id index is in hand.
+    // 必须先刷 cards：resolver 随后要重新解析所有链接，`[[id]]` 链接只有拿到 id 索引才解析得出。
     const cardRows = await db.cards.toArray()
     const live = new Set(notes.value.filter((n) => !n.removedLocal).map((n) => n.path))
     const staleCards = cardRows.filter((c) => !live.has(c.path))
@@ -262,6 +305,7 @@ export const useVaultStore = defineStore('vault', () => {
     await refreshActiveLinks()
   }
 
+  /** 重算当前笔记的入链/出链两个面板数据；没有激活笔记时清空两者。 */
   async function refreshActiveLinks(): Promise<void> {
     const path = activePath.value
     if (!path) {
@@ -296,11 +340,11 @@ export const useVaultStore = defineStore('vault', () => {
   }
 
   /**
-   * The funnel every body write goes through, which is why it is also the only place the card index
-   * needs maintaining.
+   * 所有正文写入都要经过的漏斗，因此卡片索引的维护也只需放在这一处：
+   * 事务内删旧建新地重建该笔记的链接/标签行，并写入卡片。
    *
-   * @returns true when the note's permanent id appeared, changed or disappeared — other notes'
-   * `[[id]]` links may resolve differently now, and only a full drift pass picks that up.
+   * @returns 该笔记的永久 id 出现、变化或消失时为 true——其他笔记的 `[[id]]` 链接可能因此改指，
+   * 只有全量漂移扫描（refreshDerived）能发现这种情况。
    */
   async function reindexContent(path: string, content: string): Promise<boolean> {
     const { links, tags } = parseNote(content)
@@ -335,39 +379,48 @@ export const useVaultStore = defineStore('vault', () => {
     return zidChanged
   }
 
+  /** 读正文；stub（cached 为 0）直接返回 null，由调用方触发按需下载。 */
   async function readBody(path: string): Promise<string | null> {
     const meta = byPath.value.get(path)
     if (meta && !meta.cached) return null
     return opfs.readNote(path)
   }
 
+  /** 打开笔记：切换 activePath、刷新双链，并防抖 400ms 落盘「上次打开路径」。 */
   async function openNote(path: string): Promise<void> {
     activePath.value = path
+    // 所有打开入口（侧栏/搜索/图谱/右栏/启动定位）都汇到这里，「最近打开」只在此记一次账。
+    ui.addRecent(path)
     await refreshActiveLinks()
+    if (lastOpenTimer) clearTimeout(lastOpenTimer)
+    lastOpenTimer = setTimeout(() => {
+      lastOpenTimer = null
+      void putSetting('last-open-path', path)
+    }, 400)
   }
 
-  /** Re-read the metadata index after the sync engine changed it behind our back. */
+  /** 同步引擎在我们背后改了元数据索引后，重新读取并刷新派生状态。 */
   async function reloadNotes(): Promise<void> {
     notes.value = await db.notes.toArray()
     await refreshDerived()
   }
 
   /**
-   * Pull the card index back in without re-resolving any link. The backfill writes rows straight
-   * into Dexie a chunk at a time, and `refreshDerived` per chunk would be a full link scan each time.
+   * 只把卡片索引拉回内存，不重新解析任何链接。回填任务是分块直写 Dexie 的，
+   * 若每块都跑一遍 refreshDerived，等于每次都全量扫描链接表，代价不可接受。
    */
   async function reloadCards(): Promise<void> {
     const live = new Set(notes.value.filter((n) => !n.removedLocal).map((n) => n.path))
     cards.value = (await db.cards.toArray()).filter((c) => live.has(c.path))
   }
 
-  /** Called by the sync engine after it writes a body from the network. */
+  /** 同步引擎从网络写入一篇正文后调用：重读索引，若改的正是当前打开的笔记则让编辑器重载。 */
   async function notifyBodyChanged(path: string): Promise<void> {
     await reloadNotes()
     if (activePath.value === path) bodyRevision.value++
   }
 
-  /** Write a body to OPFS and refresh everything derived from it. */
+  /** 把正文写入 OPFS 并刷新所有由它派生的状态（元数据、链接、标签、卡片）。 */
   async function saveBody(path: string, content: string, markDirty = true): Promise<NoteMeta> {
     await opfs.writeNote(path, content)
     const sha = await gitBlobSha(content)
@@ -386,13 +439,14 @@ export const useVaultStore = defineStore('vault', () => {
     await db.notes.put(meta)
     const zidChanged = await reindexContent(path, content)
     notes.value = await db.notes.toArray()
-    // An id that just appeared can make `[[id]]` links in other notes resolve for the first time,
-    // and only the full drift pass rewrites their targetPath.
+    // 刚出现的 id 会让其他笔记里的 `[[id]]` 链接首次解析成功，
+    // 而只有全量漂移扫描才会重写它们的 targetPath，故此时必须整套刷新。
     if (activePath.value === path && !zidChanged) await refreshActiveLinks()
     else await refreshDerived()
     return meta
   }
 
+  /** 新建笔记：路径归一化并补 .md 后缀；路径非 .md 抛错，已存在则原样返回该路径（幂等）。 */
   async function createNote(rawPath: string, content = ''): Promise<string> {
     const path = normalizePath(ensureMdExt(rawPath))
     if (!isNotePath(path)) throw new Error('只能创建 .md 笔记')
@@ -416,8 +470,8 @@ export const useVaultStore = defineStore('vault', () => {
   }
 
   /**
-   * Rename/move a note. Rewrites every inbound `[[link]]` across the vault so nothing
-   * silently becomes a dangling reference.
+   * 重命名/移动笔记：搬正文、迁元数据与派生索引，并改写全库所有入链 `[[link]]`，
+   * 避免静默变成悬空引用。目标已存在时抛错。
    */
   async function renameNote(from: string, rawTo: string): Promise<string> {
     const to = normalizePath(ensureMdExt(rawTo))
@@ -441,8 +495,8 @@ export const useVaultStore = defineStore('vault', () => {
     }
     await db.notes.put(meta)
 
-    // A delete followed by an add at a new path is how git records a move, so the old
-    // path must stay queued for deletion on the remote — but only if it ever got there.
+    // git 记录移动就是「旧路径删除 + 新路径新增」，所以旧路径必须留一条墓碑排队推删除——
+    // 但前提是它曾经上过远端（needsRemoteDelete），否则墓碑永远推不出去。
     if (needsRemoteDelete(prev)) {
       const tombstone: NoteMeta = {
         ...newMeta(from),
@@ -465,7 +519,7 @@ export const useVaultStore = defineStore('vault', () => {
       await db.cards.delete(from)
       if (ownLinks.length) await db.links.bulkAdd(ownLinks.map((l) => ({ ...l, src: to })))
       if (ownTags.length) await db.tags.bulkAdd(ownTags.map((t) => ({ ...t, path: to })))
-      // The id lives in the file, not the filename, so it travels with the card unchanged.
+      // id 存在文件里而非文件名里，因此随卡片原样迁移，zid 不变。
       if (ownCard) await db.cards.put({ ...ownCard, path: to })
     })
 
@@ -476,7 +530,7 @@ export const useVaultStore = defineStore('vault', () => {
     return to
   }
 
-  /** Rewrite `[[old]]` -> `[[new]]` in every other note, preserving alias/heading. */
+  /** 把每篇其他笔记里的 `[[旧]]` 改写为 `[[新]]`，保留别名/标题锚点；返回改动篇数。 */
   async function rewriteInboundLinks(oldPath: string, newPath: string): Promise<number> {
     const oldTitle = titleOf(oldPath)
     const inboundRows = await db.links.where('targetPath').equals(oldPath).toArray()
@@ -516,11 +570,12 @@ export const useVaultStore = defineStore('vault', () => {
     return touched
   }
 
+  /** 删除笔记：正文从 OPFS 移除，派生索引清理；远端知道的才留墓碑等推送。 */
   async function deleteNote(path: string): Promise<void> {
     await opfs.deleteNote(path)
     const meta = byPath.value.get(path)
     if (meta && needsRemoteDelete(meta)) {
-      // Known to the remote: keep a tombstone so the deletion gets pushed.
+      // 远端有这篇：留墓碑，让删除动作随后推送出去。
       await db.notes.put({ ...meta, cached: 0, removedLocal: 1, dirty: 0, localSha: null })
     } else {
       await db.notes.delete(path)
@@ -534,13 +589,14 @@ export const useVaultStore = defineStore('vault', () => {
     await refreshDerived()
   }
 
-  /** Where a brand-new note should live when created from an unresolved `[[link]]`. */
+  /** 从未解析的 `[[link]]` 创建新笔记时，新文件该落在哪里：带路径用其本身，否则放在当前笔记同目录。 */
   function pathForNewNote(target: string): string {
     const t = target.trim().replace(/^\.\//, '')
     const base = activePath.value ? dirOf(activePath.value) : ''
     return normalizePath(t.includes('/') ? ensureMdExt(t) : joinPath(base, ensureMdExt(t)))
   }
 
+  /** 点击未解析的链接时调用：已能解析就跳过去，附件类型抛错，否则按链接目标新建笔记。 */
   async function createFromLink(target: string): Promise<string> {
     if (isAttachmentTarget(target)) throw new Error('附件类型暂不支持创建')
     const resolved = resolveTarget(resolver.value, target)
@@ -548,7 +604,10 @@ export const useVaultStore = defineStore('vault', () => {
     return createNote(pathForNewNote(target))
   }
 
-  /** Link suggestions for the `[[` autocomplete popup. */
+  /**
+   * `[[` 自动补全弹层的链接建议：按 标题/id 前缀 > 标题/id 包含 > 路径包含 的打分排序，
+   * 取前 30 条；查询本身无法解析时额外插一条「创建」项。
+   */
   function suggestLinks(query: string): { html: string; value: string }[] {
     const q = query.trim().toLowerCase()
     const typed = query.trim()
@@ -569,8 +628,7 @@ export const useVaultStore = defineStore('vault', () => {
       .sort((a, b) => a.score - b.score || a.n.title.localeCompare(b.n.title, 'zh-Hans-CN'))
       .slice(0, 30)
 
-    // A complete id the user typed is the link they meant to write; substituting the title here
-    // would silently rewrite their intent.
+    // 用户完整敲出的 id 就是他想写的链接；这里若替换标题，等于悄悄改写用户意图。
     const idHit = isZid(typed) ? resolveTarget(resolver.value, typed) : null
     const items = scored.map(({ n }) => ({
       html: `<span class="hint-title">${escapeHtml(n.title)}</span><span class="hint-path">${escapeHtml(
@@ -627,10 +685,12 @@ export const useVaultStore = defineStore('vault', () => {
   }
 })
 
+/** 去掉 `.md` 后缀（比较链接目标时用，大小写不敏感）。 */
 function stripMd(p: string): string {
   return p.toLowerCase().endsWith('.md') ? p.slice(0, -3) : p
 }
 
+/** HTML 转义，供链接建议弹层拼 html 片段时防止标题里的标签被当真。 */
 function escapeHtml(s: string): string {
   return s
     .replace(/&/g, '&amp;')

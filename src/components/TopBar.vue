@@ -1,9 +1,21 @@
 <script setup lang="ts">
+/**
+ * 顶栏：应用标题、全局入口（搜索 / 图谱 / 设置）与同步状态指示。
+ *
+ * 本组件不自己改布局，面板的显隐全部通过 emits 上报给父级（App.vue）统一处理。
+ *
+ * emits：
+ * - 'toggle-sidebar' / 'toggle-right'：切换左右侧栏。
+ * - 'search' / 'graph' / 'settings'：打开对应的浮层。
+ *
+ * 依赖 store：sync（同步状态与手动触发）、vault（当前笔记）。
+ */
 import { computed } from 'vue'
 import { titleOf } from '@/core/vault/paths.ts'
 import { useSyncStore } from '@/stores/sync.ts'
 import { useVaultStore } from '@/stores/vault.ts'
 
+/** 只上报意图，具体开哪个浮层由父级决定。 */
 const emit = defineEmits<{
   (e: 'toggle-sidebar'): void
   (e: 'toggle-right'): void
@@ -15,11 +27,16 @@ const emit = defineEmits<{
 const sync = useSyncStore()
 const vault = useVaultStore()
 
+/** 标题行：无选中笔记时退回应用名，避免顶栏出现空白。 */
 const title = computed(() => (vault.activePath ? titleOf(vault.activePath) : 'WebVault'))
+/** 待上传篇数，>0 时在同步按钮上挂数字角标。 */
 const pending = computed(() => vault.pendingUpload)
+/** 同步进行中禁用按钮，防重入。 */
 const syncable = computed(() => !sync.syncing)
+/** 离线态：用高亮样式区分「已联网」，让用户一眼看出当前是否只能本地操作。 */
 const offline = computed(() => !sync.online)
 
+/** 手动同步；syncing 时静默忽略（按钮已 disabled，这里兜住键盘触发的情况）。 */
 function onSync(): void {
   if (sync.syncing) return
   void sync.syncNow()
@@ -34,6 +51,7 @@ function onSync(): void {
       </svg>
     </button>
 
+    <!-- 左区：侧栏开关 + 当前笔记标题（副行是完整路径）；与右区的全局动作之间靠 spacer 撑开 -->
     <div class="topbar__title">
       <span class="topbar__name">{{ title }}</span>
       <span v-if="vault.activePath" class="topbar__path">{{ vault.activePath }}</span>
@@ -59,6 +77,8 @@ function onSync(): void {
       <span class="tb__label">图谱</span>
     </button>
 
+    <!-- 同步：进行中用 spinner 替换图标，文案跟随 sync.statusText；角标只统计待上传篇数；
+         title 按 sync.available 在「立即同步 / 离线或未配置同步」间切换 -->
     <button
       class="tb"
       :class="{ 'tb--on': !offline }"
@@ -81,6 +101,7 @@ function onSync(): void {
       <span v-if="pending > 0 && !sync.syncing" class="pill" :title="`${pending} 篇待上传`">{{ pending }}</span>
     </button>
 
+    <!-- 右区尾部：反链面板与设置入口，均为不带文字标签的方形图标按钮 -->
     <button class="tb tb--square" aria-label="反链面板" title="反链面板" @click="emit('toggle-right')">
       <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
         <path
@@ -142,14 +163,17 @@ function onSync(): void {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  /* 借 rtl 让省略号出现在开头：长路径被截断时保住末尾的目录/文件名 */
   direction: rtl;
   text-align: left;
 }
 
 .topbar__gap {
+  /* 弹性占位：把标题挤向左、全局动作推向右，顶栏只剩左右两簇控件 */
   flex: 1;
 }
 
+/* 通用工具按钮（图标 + 可省略的文字）；tb--square 是不带文字的方形图标钮 */
 .tb {
   display: flex;
   align-items: center;
@@ -185,6 +209,7 @@ function onSync(): void {
   text-overflow: ellipsis;
 }
 
+/* 待上传篇数角标：同步进行中不显示，避免与 spinner 和状态文案重复报同一件事 */
 .pill {
   padding: 0 5px;
   border-radius: 8px;
@@ -210,6 +235,7 @@ function onSync(): void {
   }
 }
 
+/* 窄屏：隐藏按钮文字标签与副行完整路径，顶栏只留图标与笔记标题 */
 @media (max-width: 720px) {
   .tb__label {
     display: none;

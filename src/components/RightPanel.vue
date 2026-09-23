@@ -1,32 +1,47 @@
 <script setup lang="ts">
+/**
+ * 右侧面板：当前笔记的「链接」与「信息」两个分区。
+ * - 链接：反向链接、出链、待创建（unresolved wikilink）、附件。
+ * - 信息：路径 / 同步状态 / 字数 / 修改时间 / 标签。
+ *
+ * 数据源分工：链接结构来自 vault store；而标签、字数这类要从正文算的字段走本地
+ * loadDetails() 异步查 Dexie + readBody，因为未下载的笔记（cached=false）根本没有正文可读。
+ *
+ * emits：
+ * - 'open'(path)：跳转到某篇笔记（反链行、出链行、新建的待建笔记）。
+ *
+ * 依赖 store：vault（当前笔记与链接图）。卡片盒的类型/ID/别名/相关卡片与收集箱待整理
+ * 条目已随卡片盒功能一并移除；元数据块只在信息分区做重复键告警，不再读取展示卡片字段。
+ */
 import { computed, ref, watch } from 'vue'
 import { db } from '@/core/db.ts'
 import { parseFrontmatter } from '@/core/parse/frontmatter.ts'
-import { titleOf } from '@/core/vault/paths.ts'
-import { CARD_TYPES, CARD_TYPE_LABELS, type CardType } from '@/core/zettel/card.ts'
 import { useVaultStore } from '@/stores/vault.ts'
-import { useZettelStore } from '@/stores/zettel.ts'
 
 const emit = defineEmits<{
+  /** 跳转到某篇笔记:反链行、出链行、新建的待建笔记都会发这个事件。 */
   (e: 'open', path: string): void
-  /** Routed through App.vue: it owns the editor ref and must flush before the file is rewritten. */
-  (e: 'set-type', path: string, type: CardType): void
-  (e: 'add-meta', path: string, type: CardType): void
 }>()
 
 const vault = useVaultStore()
-const zettel = useZettelStore()
 
+/** 当前笔记的标签列表，带 `#` 前缀，仅用于展示。 */
 const tags = ref<string[]>([])
+/** null = 正文还没下载到本机，字数无从统计；0 才是「真的没内容」。 */
 const words = ref<number | null>(null)
-/** Whether the open note's file actually starts with a `---` block. */
-const hasMeta = ref(false)
+/** 元数据块里重复出现的键（同步合并可能造成），只提示不自动改。 */
 const duplicateKeys = ref<string[]>([])
+/** 当前分区:链接 / 信息;切换只决定渲染哪一段,不影响各分区的计算属性。 */
 const section = ref<'links' | 'info'>('links')
 
+/** 当前笔记元信息；为空表示没打开任何笔记，整个面板退化为提示文案。 */
 const meta = computed(() => vault.activeNote)
+/** 出链里能解析到真实文件的；targetPath === null 即待创建，另归一组。 */
 const resolved = computed(() => vault.outgoing.filter((l) => l.targetPath !== null))
-/** One row per missing target: `[[x]]` and `[[x|别名]]` are the same note to create. */
+/**
+ * 每个缺失目标只出一行：`[[x]]` 与 `[[x|别名]]` 指向的是同一篇待建笔记，
+ * 按 target 计数合并，否则用户会看到一串重复的「点击创建」。附件不算待创建。
+ */
 const unresolved = computed(() => {
   const counts = new Map<string, number>()
   for (const l of vault.outgoing) {
@@ -35,17 +50,10 @@ const unresolved = computed(() => {
   }
   return [...counts].map(([target, count]) => ({ target, count }))
 })
+/** 图片等非 .md 链接：不支持在线预览，只报个数。 */
 const attachments = computed(() => vault.outgoing.filter((l) => l.attachment))
 
-/**
- * Rendered only for the note it was actually ranked for. Ranking is debounced and asynchronous, so
- * without this the panel would show the previous note's relatives under the current one's title.
- */
-const relatedRows = computed(() => (zettel.relatedFor === vault.activePath ? zettel.related : []))
-
-const cardType = computed<CardType>(() => (meta.value ? zettel.typeOf(meta.value.path) : 'plain'))
-const aliases = computed(() => (meta.value ? zettel.aliasesOf(meta.value.path) : []))
-
+/** 同步状态文案,按优先级取第一个命中的:未下载 > 待上传 > 仅本地 > 已同步。 */
 const syncState = computed(() => {
   const m = meta.value
   if (!m) return ''
@@ -55,33 +63,17 @@ const syncState = computed(() => {
   return '已同步'
 })
 
+/** 行标题:写了别名就显示别名,否则显示链接目标原文。 */
 function labelOf(target: string, alias: string | null): string {
   return alias ?? target
 }
 
-/** Empty for ordinary notes, so a row without a card shows no badge at all. */
-function typeBadge(path: string): string {
-  const type = zettel.typeOf(path)
-  return type === 'plain' ? '' : CARD_TYPE_LABELS[type]
-}
-
-/**
- * One control, two outcomes. A note that already has a block gets its `type` line rewritten; a note
- * that has none is promoted to a card, which is what also gives it the id and creation stamp. The
- * second path matters: writing `type` on its own would create a card with no permanent address.
- */
-function chooseType(type: CardType): void {
-  if (!meta.value || !meta.value.cached) return
-  if (hasMeta.value) emit('set-type', meta.value.path, type)
-  else emit('add-meta', meta.value.path, type)
-}
-
+/** 从 Dexie + OPFS 异步补齐标签、字数、元数据块重复键等展示字段;正文未下载时 words 置 null。 */
 async function loadDetails(): Promise<void> {
   const path = vault.activePath
   if (!path) {
     tags.value = []
     words.value = null
-    hasMeta.value = false
     duplicateKeys.value = []
     return
   }
@@ -89,21 +81,23 @@ async function loadDetails(): Promise<void> {
   const body = await vault.readBody(path)
   words.value = body === null ? null : countWords(body)
   const frontmatter = body === null ? null : parseFrontmatter(body)
-  hasMeta.value = frontmatter?.exists ?? false
   duplicateKeys.value = frontmatter?.duplicates ?? []
 }
 
+/** 中日文按字计、西文按词计;先剔除 frontmatter 与代码块,免得语法符号和围栏被算成内容。 */
 function countWords(body: string): number {
   const stripped = body.replace(/^---\n[\s\S]*?\n---\n?/, '').replace(/```[\s\S]*?```/g, '')
-  const cjk = (stripped.match(/[\u4e00-\u9fff\u3040-\u30ff]/g) ?? []).length
+  const cjk = (stripped.match(/[一-鿿぀-ヿ]/g) ?? []).length
   const latin = (stripped.match(/[A-Za-z0-9_$'-]+/g) ?? []).length
   return cjk + latin
 }
 
+/** 点「待创建」行:按链接目标建出笔记,建成后直接打开。 */
 function createMissing(target: string): void {
   void vault.createFromLink(target).then((path) => emit('open', path))
 }
 
+/** 当前笔记换了、正文改了(mtime)或修订号变了(别处保存/同步拉取)都重算本地字段;immediate 保证首帧就有数据。 */
 watch(
   () => [vault.activePath, meta.value?.mtime, vault.bodyRevision] as const,
   () => {
@@ -135,12 +129,14 @@ watch(
     </div>
 
     <div class="panel__scroll">
+      <!-- 元数据块异常提示:置于两个分区之上,切换页签也始终可见 -->
       <p v-if="duplicateKeys.length > 0" class="warn">
         元数据块里有重复的键 <code>{{ duplicateKeys.join(', ') }}</code>(可能是同步合并造成的)。已保留第一处,请在编辑器里手动删掉多余的行。
       </p>
 
       <p v-if="!meta" class="hint">打开一篇笔记后,这里会显示它的反向链接与笔记信息。</p>
 
+      <!-- 链接分区:反向链接 → 出链 → 待创建 → 附件,后三组无内容时整组隐藏 -->
       <template v-else-if="section === 'links'">
         <section class="group">
           <h4 class="group__title">
@@ -154,7 +150,6 @@ watch(
             <li v-for="(l, i) in vault.inbound" :key="`${l.path}:${l.line}:${i}`">
               <button class="links__row" @click="emit('open', l.path)">
                 <span class="links__title">
-                  <span v-if="typeBadge(l.path)" class="links__badge">{{ typeBadge(l.path) }}</span>
                   <span v-if="l.embed" class="links__badge">嵌入</span>
                   {{ l.title }}
                 </span>
@@ -207,62 +202,11 @@ watch(
           </h4>
           <p class="hint">附件暂不支持在线预览,可在 Gitee 仓库中查看。</p>
         </section>
-
-        <section v-if="relatedRows.length > 0" class="group">
-          <h4 class="group__title">
-            相关卡片
-            <span class="group__count">{{ relatedRows.length }}</span>
-          </h4>
-          <ul class="links">
-            <li v-for="h in relatedRows" :key="h.path">
-              <button class="links__row" @click="emit('open', h.path)">
-                <span class="links__title">
-                  <span v-if="typeBadge(h.path)" class="links__badge">{{ typeBadge(h.path) }}</span>
-                  {{ titleOf(h.path) }}
-                </span>
-                <span class="links__ctx">{{ h.reasons.join(' · ') }}</span>
-              </button>
-            </li>
-          </ul>
-          <p class="hint">按共引、共同标签与文本相似度推测,不代表已有链接。</p>
-        </section>
       </template>
 
+      <!-- 信息分区:路径、同步状态与从正文算出来的字段(卡片元数据展示已随卡片盒移除) -->
       <template v-else>
         <dl class="info">
-          <dt>类型</dt>
-          <dd>
-            <nav class="picker">
-              <button
-                v-for="t in CARD_TYPES"
-                :key="t"
-                class="tabs__btn"
-                :class="{ 'tabs__btn--on': cardType === t }"
-                :disabled="!meta.cached"
-                @click="chooseType(t)"
-              >
-                {{ CARD_TYPE_LABELS[t] }}
-              </button>
-            </nav>
-            <p v-if="!hasMeta" class="hint">
-              这篇笔记还不是卡片。选一个类型会在文件头写入 <code>id</code> / <code>type</code> /
-              <code>created</code>,正文一个字节都不改。
-            </p>
-            <p v-else-if="!meta.cached" class="hint">内容还没下载到本机,联网同步后再改类型。</p>
-          </dd>
-
-          <template v-if="hasMeta">
-            <dt>ID</dt>
-            <dd class="mono">{{ zettel.zidOf(meta.path) || '无' }}</dd>
-            <dt>创建时间</dt>
-            <dd>{{ zettel.createdOf(meta.path) || '无' }}</dd>
-            <dt>别名</dt>
-            <dd>
-              <span v-if="aliases.length === 0" class="muted">无</span>
-              <span v-for="a in aliases" v-else :key="a" class="tag">{{ a }}</span>
-            </dd>
-          </template>
-
           <dt>路径</dt>
           <dd class="mono">{{ meta.path }}</dd>
           <dt>同步状态</dt>
@@ -280,8 +224,7 @@ watch(
           </dd>
         </dl>
         <p class="hint">
-          正文以 <code>.md</code> 明文保存在本机浏览器的 OPFS 中,并通过 Gitee 仓库在设备间同步。卡片信息写在文件头的
-          <code>---</code> 块里,所以它跟着仓库走,换设备也不会丢。
+          正文以 <code>.md</code> 明文保存在本机浏览器的 OPFS 中,并通过 Gitee 仓库在设备间同步。
         </p>
       </template>
     </div>
@@ -304,6 +247,7 @@ watch(
   border-bottom: 1px solid var(--border);
 }
 
+/* —— 顶部「链接 / 信息」页签 —— */
 .tabs {
   display: flex;
   gap: 2px;
@@ -325,17 +269,6 @@ watch(
 .tabs__btn--on {
   background: var(--accent-soft);
   color: var(--accent-text);
-}
-
-.picker {
-  display: flex;
-  gap: 2px;
-  margin-top: 2px;
-}
-
-.picker .tabs__btn:disabled {
-  opacity: 0.45;
-  cursor: default;
 }
 
 .warn {
@@ -389,6 +322,7 @@ watch(
   letter-spacing: 0;
 }
 
+/* —— 链接行列表（反链、出链、待创建共用一套行样式） —— */
 .links {
   margin: 0;
   padding: 0;
@@ -455,6 +389,7 @@ watch(
   color: var(--accent);
 }
 
+/* —— 信息分区的键值表 —— */
 .info {
   margin: 0;
   font-size: 12.5px;

@@ -1,5 +1,15 @@
+/**
+ * 外观应用层：读写「主题 × 强调色 × 深浅模式」偏好，并把结果落到 `<html>` 的 data-* 属性上供
+ * `styles/themes.css` 消费。
+ *
+ * 硬约束：
+ * 1. 只用相对导入——`main.ts` 在首帧之前就要调用它。
+ * 2. 只能跑在浏览器里：localStorage 与 DOM 在 Node 侧都不存在，所以没有验证脚本直跑本文件。
+ * 3. 存储键与 `index.html` 的内联启动脚本共用，两边必须保持一致，否则首帧会闪主题。
+ */
 import { DEFAULT_ACCENT, DEFAULT_THEME, isAccent, themeById, type ThemeMode } from './themes.ts'
 
+/** 一次完整外观：主题 id、强调色 id 与深浅模式。 */
 export interface Appearance {
   theme: string
   accent: string
@@ -13,6 +23,7 @@ export interface Appearance {
  */
 const KEY = 'webvault:appearance'
 
+/** 读 localStorage 并逐字段校验；损坏、缺失或不认识的值一律回退默认，绝不抛错。 */
 export function readStoredAppearance(): Appearance {
   const fallback: Appearance = { theme: DEFAULT_THEME, accent: DEFAULT_ACCENT, mode: themeById(DEFAULT_THEME).mode }
   let raw: string | null = null
@@ -39,6 +50,7 @@ export function readStoredAppearance(): Appearance {
   return { theme: info.id, accent, mode: info.mode }
 }
 
+/** 持久化当前外观，供下次启动的内联脚本恢复。 */
 export function storeAppearance(appearance: Appearance): void {
   try {
     localStorage.setItem(KEY, JSON.stringify(appearance))
@@ -47,6 +59,7 @@ export function storeAppearance(appearance: Appearance): void {
   }
 }
 
+/** 把外观写到 `<html>` 的 data-* 属性上，并同步移动端 / PWA 标题栏颜色。 */
 export function applyAppearance(appearance: Appearance): void {
   const root = document.documentElement
   root.dataset.theme = appearance.theme
@@ -58,6 +71,7 @@ export function applyAppearance(appearance: Appearance): void {
   if (meta) meta.setAttribute('content', cssColor('--bg'))
 }
 
+/** 复用的隐藏探针元素，只为让 CSS 把变量解析成真实颜色，见 `cssColor`。 */
 let probe: HTMLElement | null = null
 
 /**

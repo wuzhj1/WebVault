@@ -1,33 +1,37 @@
 /**
- * Turns `[[wikilink]]` text inside Vditor's IR DOM into styled, clickable chips.
+ * 把 Vditor IR DOM 里的 `[[双链]]` 文本装饰成可点击的样式胶囊（chip）。
  *
- * Every original character stays in the DOM — brackets and the `path|` half of an alias
- * are hidden with CSS, never removed. IR mode serializes the block's HTML back to
- * markdown on every keystroke, and Lute passes unknown inline spans through as their
- * text content, so `[[a/b|别名]]` round-trips byte for byte. Dropping characters here
- * would silently rewrite the user's note.
+ * 原文的每一个字符都留在 DOM 里——括号、别名里的 `path|` 半截只用 CSS 隐藏，绝不删除。
+ * IR 模式每敲一个键就把块的 HTML 序列化回 markdown，而 Lute 会把未知行内 span 的文本内容
+ * 原样透传，所以 `[[a/b|别名]]` 能逐字节往返。在这里丢字符就等于悄悄改写用户的笔记。
  *
- * The block that holds the caret is left alone entirely: decorating it would split the
- * text nodes under the selection and move the caret. Instead that block gets a class
- * that reveals the raw markdown via CSS, which is how Obsidian's live preview behaves.
+ * 光标所在的块完全不动：装饰它会拆掉选区下面的文本节点、把光标挤跑。取而代之的是给该块
+ * 加一个 class，用 CSS 显示原始 markdown——这正是 Obsidian live preview 的行为。
+ *
+ * 硬约束：只增删 class 与装饰 span，绝不删除、改写任何原文字符；
+ * 如需引入其他模块，一律用相对导入，且运行时不得导入 `db.ts`（`import type` 安全）。
  */
 
+/** 胶囊的三种解析状态：已解析的笔记 / 尚不存在的目标 / 附件。 */
 export type WikilinkKind = 'note' | 'new' | 'asset'
 
+/** 解析查询的结果，供胶囊决定配色与悬停提示。 */
 export interface WikilinkLookup {
   kind: WikilinkKind
-  /** resolved note path, null for `new` */
+  /** 已解析的笔记路径；`new` 状态为 null */
   path: string | null
 }
 
+/** 给定链接目标，返回它的解析状态；由 NoteEditor 注入，模块本身不碰索引/数据库。 */
 export type WikilinkResolver = (target: string) => WikilinkLookup
 
-/** Class put on the block currently holding the caret, so it renders as raw markdown. */
+/** 加在当前光标所在块上的 class，使其显示为原始 markdown。 */
 export const ACTIVE_BLOCK_CLASS = 'wl-active'
 
+/** 双链（含 `!` 前缀嵌入）；与 `parse/links.ts` 的正则保持同构，括号内不做嵌套匹配。 */
 const WIKILINK = /(!?)\[\[([^\[\]]+?)\]\]/g
 
-/** Decorates every wikilink outside the caret's block. Returns how many chips were built. */
+/** 装饰光标块之外的全部双链，返回构建的胶囊数量。 */
 export function decorateWikilinks(root: HTMLElement, resolve: WikilinkResolver): number {
   const caretBlock = blockWithCaret(root)
   const targets: Text[] = []
@@ -44,7 +48,7 @@ export function decorateWikilinks(root: HTMLElement, resolve: WikilinkResolver):
       return NodeFilter.FILTER_ACCEPT
     },
   })
-  // Collected before mutating: replacing a text node invalidates the walk.
+  // 先收集再动手：替换文本节点会让 TreeWalker 正在遍历的树失效。
   while (walker.nextNode()) targets.push(walker.currentNode as Text)
 
   let built = 0
@@ -53,8 +57,9 @@ export function decorateWikilinks(root: HTMLElement, resolve: WikilinkResolver):
 }
 
 /**
- * Vditor's IR root is itself a `<pre class="vditor-reset">`, so a bare `closest('pre')`
- * would match the whole editor. Only a `pre`/`code` *inside* the root is a code block.
+ * 元素是否位于代码块或已装饰的胶囊内——这两处的 `[[` 都不该再被装饰。
+ * Vditor 的 IR 根节点本身就是一个 `<pre class="vditor-reset">`，裸写 `closest('pre')`
+ * 会匹配到整个编辑器；只有根节点**内部**的 `pre`/`code` 才算代码块。
  */
 function inCodeOrChip(el: Element, root: HTMLElement): boolean {
   if (el.closest('.wl') !== null) return true
@@ -62,7 +67,7 @@ function inCodeOrChip(el: Element, root: HTMLElement): boolean {
   return host !== null && host !== root
 }
 
-/** Reveals raw markdown in the block being edited. Only toggles a class, never structure. */
+/** 在正在编辑的块上显示原始 markdown。只增删 class，绝不改结构。 */
 export function markActiveBlock(root: HTMLElement): HTMLElement | null {
   const active = blockWithCaret(root)
   for (const el of root.querySelectorAll<HTMLElement>(`.${ACTIVE_BLOCK_CLASS}`)) {
@@ -72,7 +77,7 @@ export function markActiveBlock(root: HTMLElement): HTMLElement | null {
   return active
 }
 
-/** The chip an event landed on, ignoring chips inside the block being edited. */
+/** 事件命中的胶囊；正在编辑的块里的胶囊不算数（那里显示的是原始 markdown）。 */
 export function chipFromEvent(target: EventTarget | null): HTMLElement | null {
   if (!(target instanceof Element)) return null
   const chip = target.closest<HTMLElement>('.wl')
@@ -80,12 +85,16 @@ export function chipFromEvent(target: EventTarget | null): HTMLElement | null {
   return chip.closest(`.${ACTIVE_BLOCK_CLASS}`) === null ? chip : null
 }
 
+/**
+ * 光标当前所在的顶层块；拿不到光标时退回「最后一个标记为 active 的块」，
+ * 这样单纯移动焦点（如勾选任务）不会导致展开状态闪烁。
+ */
 function blockWithCaret(root: HTMLElement): HTMLElement | null {
   const selection = document.getSelection()
   const anchor = selection && selection.rangeCount > 0 ? selection.anchorNode : null
   if (anchor && anchor !== root && root.contains(anchor)) {
-    // Focusing a checkbox leaves the selection anchored on the <li> with an offset pointing
-    // at the <input>; that is not a caret, so keep the unfold state as it is.
+    // 聚焦复选框时，选区锚在 <li> 上、偏移指向 <input>，那并不是光标，
+    // 因此保持现有展开状态不动。
     const pointed = anchor.nodeType === Node.ELEMENT_NODE
       ? (anchor as HTMLElement).childNodes[selection?.anchorOffset ?? 0] ?? anchor
       : anchor
@@ -96,18 +105,23 @@ function blockWithCaret(root: HTMLElement): HTMLElement | null {
   }
   const focused = document.activeElement
   if (!(focused instanceof HTMLElement) || focused === root || !root.contains(focused)) return null
-  // Toggling a task checkbox moves focus without moving the caret. Unfolding (or folding)
-  // the line for that would flash the link chips' colors, so keep the current unfold state.
+  // 勾选任务复选框会移动焦点但不移动光标。若因此展开（或折叠）该行，
+  // 链接胶囊的颜色会闪一下，所以维持当前展开状态。
   if (focused.tagName === 'INPUT') return root.querySelector<HTMLElement>(`.${ACTIVE_BLOCK_CLASS}`)
   return blockOf(root, focused)
 }
 
+/** 从节点沿父链上溯到 `root` 的直接子节点，即它所属的顶层块。 */
 function blockOf(root: HTMLElement, node: Node): HTMLElement | null {
   let current: Node = node
   while (current.parentNode && current.parentNode !== root) current = current.parentNode
   return current instanceof HTMLElement ? current : null
 }
 
+/**
+ * 把一个含双链的文本节点切成「普通文本 + 胶囊」的片段并整体替换。
+ * 普通文本原样搬过去，因此除双链自身外没有任何字节丢失。
+ */
 function decorateTextNode(node: Text, resolve: WikilinkResolver): number {
   const value = node.nodeValue ?? ''
   const matches = [...value.matchAll(WIKILINK)]
@@ -127,6 +141,10 @@ function decorateTextNode(node: Text, resolve: WikilinkResolver): number {
   return matches.length
 }
 
+/**
+ * 构建一颗胶囊：`!`、`[[`、路径、锚点标记、锚点、`|`、别名、`]]` 按原文顺序逐个落位，
+ * 只有括号和 `|` 带 `wl__bracket` class 交给 CSS 隐藏——原文字符一个都不能少。
+ */
 function buildChip(embed: boolean, inner: string, resolve: WikilinkResolver): HTMLElement {
   const pipe = inner.indexOf('|')
   const targetPart = pipe === -1 ? inner : inner.slice(0, pipe)
@@ -167,10 +185,12 @@ function buildChip(embed: boolean, inner: string, resolve: WikilinkResolver): HT
   return el
 }
 
+/** 用 `wl__bracket` class 包裹的原文字符（视觉隐藏但仍在序列化里）。 */
 function bracket(text: string): HTMLElement {
   return part(text, 'wl__bracket')
 }
 
+/** 把一段原文包成带指定 class 的行内 span。 */
 function part(text: string, className: string): HTMLElement {
   const el = document.createElement('span')
   el.className = className
@@ -178,6 +198,7 @@ function part(text: string, className: string): HTMLElement {
   return el
 }
 
+/** 目标里锚点（`#小节` 或 `^块`）的起始下标；两者都有取更早的那个，都没有返回 -1。 */
 function anchorCut(target: string): number {
   const hash = target.indexOf('#')
   const caret = target.indexOf('^')
