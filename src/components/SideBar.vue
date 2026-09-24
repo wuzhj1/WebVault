@@ -8,7 +8,7 @@ import { useVaultStore, type TreeNode } from '@/stores/vault.ts'
 
 /**
  * 两条出口：
- * - `open(path)`：打开某篇笔记（文件树、置顶/最近、待建行、新建/重命名后跳转）。
+ * - `open(path)`：打开某篇笔记（文件树、书签行、待建行、新建/重命名后跳转）。
  * - `search(query)`：点标签行时把 `#标签` 交给 App 打开全库搜索面板——标签的「结果列表」
  *   本来就是搜索的强项，比在侧栏里另造一个列表更省事，也复用了现成的命中摘要。
  */
@@ -30,7 +30,9 @@ const createError = ref<string | null>(null)
 const renameInput = ref<HTMLInputElement | null>(null)
 const createInput = ref<HTMLInputElement | null>(null)
 
-/** 三个分区；数组顺序即活动栏图标顺序，也是指示条按下标平移的依据。 */
+/**
+ * 三个分区；数组顺序即活动栏图标顺序，也是指示条按下标平移的依据。
+ */
 const SECTIONS = ['files', 'unresolved', 'tags'] as const
 type Section = (typeof SECTIONS)[number]
 
@@ -40,26 +42,55 @@ const SECTION_LABELS: Record<Section, string> = {
   tags: '标签',
 }
 
+/**
+ * 笔记分区内的三个视图标签：目录树 / 置顶 / 最近打开，一次只渲染一个。
+ *
+ * 放分区内而不是活动栏：置顶和最近打开本就是「笔记」这件事的三种看法，混排会互相挤占
+ * 视野（书签一多就把目录树挤出画面），单独占一个活动栏图标又太重——同级 tab 刚好：
+ * 一个入口、三种视图、互不遮挡。
+ */
+type FileTab = 'tree' | 'pinned' | 'recent'
+
 const section = ref<Section>('files')
+/** 当前标签；组件本地状态，不落盘——每次切回笔记区都从目录开始，符合「笔记区 = 找文件」的默认预期。 */
+const fileTab = ref<FileTab>('tree')
 
 /**
- * 分区内过滤：一个输入框管三个分区，只做「子串包含」匹配（文件名 / 目标 / 标签名）。
- * 放组件本地而不是 ui store：它是浏览时的临时线索，切分区就该清空，没有跨会话记住的价值。
+ * 分区内过滤：一个输入框管全部分区与标签，只做「子串包含」匹配（文件名 / 书签标题 /
+ * 目标 / 标签名）。放组件本地而不是 ui store：它是浏览时的临时线索，切分区就该清空，
+ * 没有跨会话记住的价值。
  */
 const filter = ref('')
 /** 当前过滤串的小写形态，所有匹配逻辑共用它，免得每处都 toLowerCase 一遍。 */
 const query = computed(() => filter.value.trim().toLowerCase())
-/** 切分区即清空：上一分区的过滤词留在这一分区只会让人以为「东西丢了」。 */
+/**
+ * 切分区即清空：上一分区的过滤词留在这一分区只会让人以为「东西丢了」。
+ * 标签也一并回目录——回到笔记区时若停在置顶/最近标签，会让人以为目录树没了。
+ */
 watch(section, () => {
   filter.value = ''
+  fileTab.value = 'tree'
 })
 
-/** 每个分区输入框的占位文案，跟着分区语义走。 */
-const FILTER_PLACEHOLDERS: Record<Section, string> = {
-  files: '过滤文件名…',
+/** 待建 / 标签分区的占位文案；笔记分区跟着当前标签走，见下方 FILE_TAB_PLACEHOLDERS。 */
+const FILTER_PLACEHOLDERS: Record<Exclude<Section, 'files'>, string> = {
   unresolved: '过滤待建目标…',
   tags: '过滤标签…',
 }
+
+/** 笔记分区内每个标签自己的占位文案：过滤词的语义随标签变化（找树 / 找置顶 / 找最近）。 */
+const FILE_TAB_PLACEHOLDERS: Record<FileTab, string> = {
+  tree: '过滤文件名…',
+  pinned: '过滤置顶…',
+  recent: '过滤最近打开…',
+}
+
+/** 实际渲染的占位文案：笔记分区看标签，其余分区看分区。aria-label 同源，读屏听到的与看到的一致。 */
+const filterPlaceholder = computed(() =>
+  section.value === 'files'
+    ? FILE_TAB_PLACEHOLDERS[fileTab.value]
+    : FILTER_PLACEHOLDERS[section.value],
+)
 
 /** 还存在的笔记路径集合：置顶/最近存的是路径快照，笔记删了行就不能再渲染出来。 */
 const notePathSet = computed(() => new Set(vault.notes.filter((n) => !n.removedLocal).map((n) => n.path)))
@@ -69,6 +100,20 @@ const pinnedRows = computed(() => ui.pinnedPaths.filter((p) => notePathSet.value
 
 /** 最近打开行：队首最新，同样剔除已删除的。 */
 const recentRows = computed(() => ui.recentPaths.filter((p) => notePathSet.value.has(p)))
+
+/**
+ * 置顶 / 最近两个标签内的过滤：各按「标题 / 路径子串」滤一遍。
+ * 与目录标签那份过滤共用同一个输入框和 filter 值，但各标签各滤各的列表——
+ * 切标签时 filter 会被清空（见上方 watch），不会把上一个标签的词带过来误伤。
+ */
+function filterBookmarks(rows: string[], q: string): string[] {
+  if (q === '') return rows
+  return rows.filter((p) => titleOf(p).toLowerCase().includes(q) || p.toLowerCase().includes(q))
+}
+
+/** 过滤后的两组书签行；各自的空态提示按「全量为空」与「过滤后为空」分开给。 */
+const pinnedFiltered = computed(() => filterBookmarks(pinnedRows.value, query.value))
+const recentFiltered = computed(() => filterBookmarks(recentRows.value, query.value))
 
 /** 活动栏指示条的位置：分区在 SECTIONS 里的下标，× CSS 里的 37px 节距就是位移量。 */
 const sectionIndex = computed(() => Math.max(0, SECTIONS.indexOf(section.value)))
@@ -344,13 +389,41 @@ onBeforeUnmount(closeMenu)
         </em>
       </div>
 
-      <!-- 分区内过滤：一个输入框管当前分区，× 一键清掉；空串时不参与任何匹配 -->
+      <!-- 笔记分区的视图标签：目录 / 置顶 / 最近，固定在过滤框上方不随列表滚动。
+           三者同级互斥，书签不再和目录树混排 -->
+      <div v-if="section === 'files'" class="sidebar__tabs">
+        <button
+          class="tabs__btn"
+          :class="{ 'tabs__btn--on': fileTab === 'tree' }"
+          @click="fileTab = 'tree'"
+        >
+          目录
+        </button>
+        <button
+          class="tabs__btn"
+          :class="{ 'tabs__btn--on': fileTab === 'pinned' }"
+          @click="fileTab = 'pinned'"
+        >
+          置顶
+          <em v-if="pinnedRows.length > 0" class="tabs__n">{{ pinnedRows.length }}</em>
+        </button>
+        <button
+          class="tabs__btn"
+          :class="{ 'tabs__btn--on': fileTab === 'recent' }"
+          @click="fileTab = 'recent'"
+        >
+          最近
+          <em v-if="recentRows.length > 0" class="tabs__n">{{ recentRows.length }}</em>
+        </button>
+      </div>
+
+      <!-- 分区内过滤：一个输入框管当前分区/标签，× 一键清掉；空串时不参与任何匹配 -->
       <div class="sidebar__filter">
         <input
           v-model="filter"
           class="sidebar__filter-input"
-          :placeholder="FILTER_PLACEHOLDERS[section]"
-          :aria-label="FILTER_PLACEHOLDERS[section]"
+          :placeholder="filterPlaceholder"
+          :aria-label="filterPlaceholder"
           spellcheck="false"
         />
         <button
@@ -368,23 +441,41 @@ onBeforeUnmount(closeMenu)
         <p v-if="vault.notes.length === 0" class="hint">
           还没有笔记。点击左侧活动栏底部的 ＋ 新建一篇,或在设置里连接 Gitee 仓库拉取已有笔记。
         </p>
-        <p v-else-if="filteredTree.length === 0 && filteredOut" class="hint">
-          没有匹配「{{ filter.trim() }}」的文件。
-        </p>
 
-        <!-- 置顶与最近：只在没过滤时出现——过滤的语义是「找文件」，结果必须以文件树为准，
-             两组书签留着反而会让人以为匹配没生效 -->
-        <div v-if="!filteredOut && pinnedRows.length > 0" class="group">
-          <div class="group__head"><span>置顶</span></div>
-          <ul class="list">
-            <li v-for="p in pinnedRows" :key="p">
+        <!-- 目录标签：纯文件树，不再有书签行混排 -->
+        <template v-else-if="fileTab === 'tree'">
+          <p v-if="filteredTree.length === 0 && filteredOut" class="hint">
+            没有匹配「{{ filter.trim() }}」的文件。
+          </p>
+          <!-- 过滤非空时传 expandAll：命中藏在收起的目录里等于没找到 -->
+          <FileTree
+            :nodes="filteredTree"
+            :expand-all="filteredOut"
+            @open="open"
+            @action="openMenu"
+          />
+          <p v-if="uncachedCount > 0 && !filteredOut" class="hint hint--foot">
+            另有 {{ uncachedCount }} 篇笔记仅建立了索引,点开时会按需下载。
+          </p>
+        </template>
+
+        <!-- 置顶标签：按用户置顶的顺序，右键行可取消置顶 -->
+        <template v-else-if="fileTab === 'pinned'">
+          <p v-if="pinnedRows.length === 0" class="hint">
+            还没有置顶。右键文件树或这里的书签行 →「置顶」,常看的笔记就会钉住。
+          </p>
+          <p v-else-if="pinnedFiltered.length === 0" class="hint">
+            没有匹配「{{ filter.trim() }}」的置顶。
+          </p>
+          <ul v-else class="list">
+            <li v-for="p in pinnedFiltered" :key="p">
               <button
                 class="list__row"
                 :class="{ 'list__row--active': vault.activePath === p }"
                 @click="open(p)"
                 @contextmenu.prevent="openMenu(p, $event)"
               >
-                <!-- 图钉标记：与文件树里的普通行拉开，一眼看出这行是书签 -->
+                <!-- 图钉标记：与「最近」标签里的普通行拉开，一眼看出这行是被你钉住的 -->
                 <svg class="row-pin" viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
                   <path
                     d="M6 2.2h4M8 2.2v4M4.8 6.2h6.4l.8 3H4zM8 9.2v4.6"
@@ -396,18 +487,23 @@ onBeforeUnmount(closeMenu)
                   />
                 </svg>
                 <span class="list__name">{{ titleOf(p) }}</span>
+                <!-- 所在目录：行脱离了树，不标路径就分不清同名笔记在哪个目录 -->
+                <span v-if="dirOf(p)" class="list__meta">{{ dirOf(p) }}</span>
               </button>
             </li>
           </ul>
-        </div>
+        </template>
 
-        <div v-if="!filteredOut && recentRows.length > 0" class="group">
-          <div class="group__head">
-            <span>最近打开</span>
-            <button class="group__act" @click="ui.clearRecents()">清空</button>
-          </div>
-          <ul class="list">
-            <li v-for="p in recentRows" :key="p">
+        <!-- 最近标签：时间倒序，列表末尾一键清空（原组头的「清空」挪到这里） -->
+        <template v-else>
+          <p v-if="recentRows.length === 0" class="hint">
+            还没有最近打开的笔记。打开过的会按时间倒序收在这里,最多 10 条。
+          </p>
+          <p v-else-if="recentFiltered.length === 0" class="hint">
+            没有匹配「{{ filter.trim() }}」的最近打开。
+          </p>
+          <ul v-else class="list">
+            <li v-for="p in recentFiltered" :key="p">
               <button
                 class="list__row"
                 :class="{ 'list__row--active': vault.activePath === p }"
@@ -415,21 +511,18 @@ onBeforeUnmount(closeMenu)
                 @contextmenu.prevent="openMenu(p, $event)"
               >
                 <span class="list__name">{{ titleOf(p) }}</span>
+                <span v-if="dirOf(p)" class="list__meta">{{ dirOf(p) }}</span>
               </button>
             </li>
           </ul>
-        </div>
-
-        <!-- 过滤非空时传 expandAll：命中藏在收起的目录里等于没找到 -->
-        <FileTree
-          :nodes="filteredTree"
-          :expand-all="filteredOut"
-          @open="open"
-          @action="openMenu"
-        />
-        <p v-if="uncachedCount > 0 && !filteredOut" class="hint hint--foot">
-          另有 {{ uncachedCount }} 篇笔记仅建立了索引,点开时会按需下载。
-        </p>
+          <button
+            v-if="recentFiltered.length > 0"
+            class="tabfoot"
+            @click="ui.clearRecents()"
+          >
+            清空最近打开
+          </button>
+        </template>
       </template>
 
       <template v-else-if="section === 'unresolved'">
@@ -770,35 +863,61 @@ onBeforeUnmount(closeMenu)
   background: var(--accent-soft);
 }
 
-/* —— 置顶 / 最近打开：笔记区顶部的两组书签 —— */
-.group {
-  margin-bottom: 6px;
-}
-
-.group__head {
+/* —— 笔记分区的视图标签：目录 / 置顶 / 最近。与右栏「链接 / 信息」共用同一套页签样式 —— */
+.sidebar__tabs {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 6px 10px 2px;
-  color: var(--text-muted);
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.5px;
-  text-transform: uppercase;
+  gap: 2px;
+  padding: 6px 8px 0;
 }
 
-.group__act {
-  padding: 0 4px;
-  border-radius: 4px;
+.tabs__btn {
+  flex: 1;
+  padding: 4px 6px;
+  border-radius: 6px;
+  font-size: 12.5px;
   color: var(--text-muted);
-  font-size: 11px;
-  font-weight: 400;
-  letter-spacing: 0;
-  text-transform: none;
   transition: background-color 0.12s ease, color 0.12s ease;
 }
 
-.group__act:hover {
+.tabs__btn:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+/* 选中态：accent 淡底 + accent 文字。hover 必须单独覆盖——否则悬停规则会用 --bg-hover
+   盖掉选中页签的淡底，切到「置顶」再移上去就像高亮丢了（与活动栏 rail__btn 同样的处理） */
+.tabs__btn--on {
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+
+.tabs__btn--on:hover {
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+
+/* 页签计数：置顶/最近各显各的条数；0 时模板里 v-if 不渲染，空页签不挂个 0 噪音 */
+.tabs__n {
+  margin-left: 2px;
+  font-size: 10.5px;
+  font-style: normal;
+  opacity: 0.75;
+}
+
+/* 「最近」列表末尾的清空入口：原组头按钮挪到列表尾，不占一行组头 */
+.tabfoot {
+  display: block;
+  width: 100%;
+  margin-top: 6px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  color: var(--text-muted);
+  font-size: 12px;
+  text-align: left;
+  transition: background-color 0.12s ease, color 0.12s ease;
+}
+
+.tabfoot:hover {
   background: var(--bg-hover);
   color: var(--text);
 }

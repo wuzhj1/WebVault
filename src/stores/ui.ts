@@ -7,8 +7,9 @@
  * - collapsedDirs：文件树里处于折叠态的目录路径集合，持久化 key 'ui-collapsed-dirs'。
  *   首次运行（库里没有这个 key）以空集合起步，不预置任何目录，也不回写——
  *   与「推断结果永不落盘」纪律保持一致。
- * - recentPaths / pinnedPaths：侧栏笔记区顶部的「最近打开」与「置顶」两组书签，
- *   记的是本机使用习惯，不同步；持久化 key 见下方常量，与折叠目录共用 400ms 防抖落盘。
+ * - recentPaths / pinnedPaths：侧栏笔记分区「置顶 / 最近」标签页里的「最近打开」与
+ *   「置顶」两组书签，记的是本机使用习惯，不同步；持久化 key 见下方常量，
+ *   与折叠目录共用 400ms 防抖落盘。
  *
  * 卡片盒移除时一并删掉了收集箱开关（inboxOpen/inboxCollapsed）与「光标落文末」请求
  * （requestCaretAtEnd）两组状态；Dexie settings 里可能残留的卡片盒旧键无人读取，无害。
