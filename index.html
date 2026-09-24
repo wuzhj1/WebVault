@@ -2,10 +2,9 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
-    <meta
-      name="viewport"
-      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
-    />
+    <!-- 不禁用缩放(user-scalable/maximum-scale)：WCAG 1.4.4 要求可放大到 200%，且系统级缩放是
+         无障碍用户的主要手段。代价是 iOS 上聚焦小字号输入框会触发页面放大（可用输入框 ≥16px 根治）。 -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <meta name="theme-color" content="#15161b" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="mobile-web-app-capable" content="yes" />
@@ -15,8 +14,9 @@
       name="description"
       content="本地优先的 Markdown 双链笔记,正文存在本机,通过你自己的 Gitee 仓库同步。"
     />
-    <link rel="icon" href="/icon.svg" type="image/svg+xml" />
-    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <!-- %BASE_URL% 让子路径部署(VAULT_BASE=/my-vault/)下的图标同样带前缀；写死 / 会在子路径下 404。 -->
+    <link rel="icon" href="%BASE_URL%icon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="%BASE_URL%apple-touch-icon.png" />
     <title>WebVault</title>
     <script>
       // 首帧之前把主题写到 <html>,否则浅色主题启动时会先闪一下深色。

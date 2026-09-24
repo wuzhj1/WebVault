@@ -4,11 +4,11 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "node scripts/copy-vditor.mjs && vite",
     "icons": "node scripts/make-icons.mjs",
-    "build": "node scripts/make-icons.mjs && vite build",
+    "build": "vue-tsc --noEmit && node scripts/make-icons.mjs && node scripts/copy-vditor.mjs && vite build",
     "typecheck": "vue-tsc --noEmit",
-    "verify": "node scripts/verify-config.mts && node scripts/verify-parse.mts && node scripts/verify-frontmatter.mts && node scripts/verify-rewrite.mts && node scripts/verify-merge.mts && node scripts/verify-remote-diff.mts && node scripts/verify-search.mts && node scripts/verify-theme.mts",
+    "verify": "node scripts/copy-vditor.mjs && node scripts/verify-config.mts && node scripts/verify-parse.mts && node scripts/verify-frontmatter.mts && node scripts/verify-rewrite.mts && node scripts/verify-merge.mts && node scripts/verify-remote-diff.mts && node scripts/verify-search.mts && node scripts/verify-theme.mts && node scripts/verify-paths.mts && node scripts/verify-hash.mts && node scripts/verify-resolve.mts",
     "preview": "vite preview"
   },
   "dependencies": {

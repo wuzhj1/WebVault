@@ -6,40 +6,90 @@
  * emits:只有 `close`,由三处触发 —— 点遮罩空白、点右上角 ×、按 ESC;父组件负责 `v-if` 挂载与卸载。
  * 不依赖任何 store,自身不持有状态,所以调用方切 v-if 即可,不需要传 visible。
  *
- * 已知约束(不是 bug 修不了,是设计上的取巧):
- * - 没有焦点陷阱,Tab 可以走到遮罩外的主界面;也不还原打开前的焦点。
- * - 不锁 body 滚动,长列表页面下滚轮会穿到背后。
- * - ESC 监听挂在 document 上且只在 key === 'Escape' 时 stopPropagation,所以遮罩内再嵌一层
- *   监听 document 的浮层(如 LinkPicker)时,z-order 更高的那个也会一并收到 ESC。
+ * 无障碍行为：打开时焦点移入卡片（读屏先听标题、再按 DOM 顺序进第一个控件），Tab / Shift+Tab
+ * 被限制在卡片内循环，关闭时焦点还原到打开前的元素；body 滚动同步加锁，滚轮不会穿到背后。
+ *
+ * 已知约束（设计上的取巧）：ESC 监听挂在 document 上且只在 key === 'Escape' 时 stopPropagation，
+ * 所以遮罩内再嵌一层监听 document 的浮层（如 LinkPicker）时，z-order 更高的那个也会一并收到 ESC。
  */
-import { onBeforeUnmount, onMounted } from 'vue'
+import { nextTick, onBeforeUnmount, onMounted, onUnmounted, ref } from 'vue'
 
 /** title 必填;wide 可选,default false(模板里只做 class 开关)。 */
 const props = defineProps<{ title: string; wide?: boolean }>()
 /** 唯一的关闭信号,不区分是遮罩、× 还是 ESC —— 关闭语义由调用方决定。 */
 const emit = defineEmits<{ (e: 'close'): void }>()
 
+/** 卡片元素；Tab 陷阱的活动范围与初始焦点都落在它身上（模板里的 ref）。 */
+const box = ref<HTMLElement | null>(null)
+/** 打开前持有焦点的元素，关闭时还原——否则键盘用户的焦点会掉回 body。 */
+let restoreFocus: HTMLElement | null = null
+
+/** 卡片内可被 Tab 到的元素；getClientRects 过滤掉隐藏的（如 display:none 的输入框）。 */
+const FOCUSABLE =
+  'a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])'
+
+function focusables(): HTMLElement[] {
+  if (!box.value) return []
+  return [...box.value.querySelectorAll<HTMLElement>(FOCUSABLE)].filter((el) => el.getClientRects().length > 0)
+}
+
 /**
- * ESC 即关。stopPropagation 是想挡住同层其它 document 级监听,但挡不住更晚注册的 listener,
+ * ESC 即关；Tab / Shift+Tab 循环限定在卡片内（焦点陷阱）。
+ * stopPropagation 是想挡住同层其它 document 级监听,但挡不住更晚注册的 listener,
  * 也压不住嵌套浮层自己的 ESC —— 真正的互斥要靠调用方只挂一个 overlay。
  */
 function onKeydown(event: KeyboardEvent): void {
   if (event.key === 'Escape') {
     event.stopPropagation()
     emit('close')
+    return
+  }
+  if (event.key !== 'Tab') return
+  const items = focusables()
+  if (items.length === 0) return
+  const active = document.activeElement
+  const inside = active instanceof HTMLElement && box.value !== null && box.value.contains(active)
+  const first = items[0]!
+  const last = items[items.length - 1]!
+  // 焦点在卡片内且没贴边时交给浏览器按 DOM 顺序走；贴边（或跑到外面）才由这里接管。
+  if (event.shiftKey) {
+    if (!inside || active === box.value || active === first) {
+      event.preventDefault()
+      last.focus()
+    }
+  } else if (!inside || active === box.value || active === last) {
+    event.preventDefault()
+    first.focus()
   }
 }
 
 // document 级监听而不是 @keydown.self:焦点常在输入框里,事件不会落在遮罩元素上。
-onMounted(() => document.addEventListener('keydown', onKeydown))
-onBeforeUnmount(() => document.removeEventListener('keydown', onKeydown))
+onMounted(() => {
+  restoreFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
+  document.addEventListener('keydown', onKeydown)
+  document.body.style.overflow = 'hidden'
+  // 初始焦点给卡片本体：读屏先听到标题，Tab 再进第一个可操作元素。
+  void nextTick(() => box.value?.focus())
+})
+
+onBeforeUnmount(() => {
+  document.removeEventListener('keydown', onKeydown)
+  // 先还原焦点再拆 DOM：顺序反了，焦点会先被浏览器打回 body，还原就失去了落点。
+  if (restoreFocus !== null && restoreFocus.isConnected) restoreFocus.focus()
+  restoreFocus = null
+})
+
+onUnmounted(() => {
+  // 此刻本组件的 DOM 已移除：还找得到 .modal 就说明另有对话框仍开着，滚动锁留给它释放。
+  if (document.querySelector('.modal') === null) document.body.style.overflow = ''
+})
 </script>
 
 <template>
   <Teleport to="body">
     <!-- 遮罩：.self 只有点在遮罩本体上才关闭，点卡片内部（含表单操作）不算 -->
     <div class="modal" @mousedown.self="emit('close')">
-      <div class="modal__box" :class="{ 'modal__box--wide': props.wide }" role="dialog">
+      <div ref="box" class="modal__box" :class="{ 'modal__box--wide': props.wide }" role="dialog" aria-modal="true" tabindex="-1">
         <header class="modal__head">
           <h3>{{ props.title }}</h3>
           <button class="modal__close" aria-label="关闭" @click="emit('close')">×</button>

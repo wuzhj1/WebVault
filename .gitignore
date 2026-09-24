@@ -5,3 +5,8 @@ dev-dist
 *.local
 .vite
 .idea
+# 包管理器以 pnpm-lock.yaml 为准(pnpm-workspace.yaml 也钉了 pnpm 配置);
+# npm 误装出来的 package-lock.json 不入库。
+package-lock.json
+# vditor 运行期静态资源由 scripts/copy-vditor.mjs 从 node_modules 拷出,不入库。
+public/vditor

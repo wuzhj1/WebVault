@@ -57,6 +57,8 @@ export const useSyncStore = defineStore('sync', () => {
   let running: Promise<SyncSummary> | null = null
   /** 预取单飞标志，防止多个触发源叠加下载。 */
   let preheating = false
+  /** init 幂等标志：监听器与 watcher 只挂一次，重复调用直接返回（见 init 的注释）。 */
+  let initialized = false
   /** 通知 id 自增器。 */
   let noticeSeq = 0
   /** info 通知自动消失的定时器，按通知 id 存放。 */
@@ -100,9 +102,15 @@ export const useSyncStore = defineStore('sync', () => {
 
   /**
    * 启动入口：装载设置与日志、挂网络/可见性监听；随后按条件触发首次同步、
-   * 缓存恢复或后台预取。可重复调用，监听器会重复注册（仅由应用启动调用一次）。
+   * 缓存恢复或后台预取。
+   *
+   * 幂等：重复调用直接返回——监听器与 activePath 的 watcher 只挂一次，
+   * 否则每多调一次就会多注册一组监听、多触发一轮首同步。与 ui.load 的约定一致：
+   * 首次调用尚未完成时的并发调用会提前返回，启动序列里应当只 await 一次（App.vue 的 onMounted）。
    */
   async function init(): Promise<void> {
+    if (initialized) return
+    initialized = true
     await useSettingsStore().load()
     await refreshLog()
 

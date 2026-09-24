@@ -1,0 +1,26 @@
+# 每次 push / PR 跑一遍本地同款自检:类型检查 → 11 个验证套件 → 构建(含 typecheck)。
+# 包管理器与仓库一致:pnpm-lock.yaml 为准(pnpm-workspace.yaml 也钉了 pnpm 配置),
+# package-lock.json 已从版本库移除并进 .gitignore。
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm verify
+      - run: pnpm build

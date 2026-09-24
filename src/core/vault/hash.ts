@@ -2,8 +2,9 @@
  * 用 git 的 blob object id 作为内容指纹，这样本地算出的 sha 能直接与 Gitee tree entry 的 sha 比对，
  * 无需任何自定义协议。
  *
- * 硬约束：只能在浏览器里跑 —— 依赖 `crypto.subtle`（安全上下文才可用）与 `TextEncoder`；
- * 只用相对导入，无 `@/` 别名。SHA-1 在此仅作内容标识、非安全用途，这正是 git 自己的选择。
+ * 硬约束：运行时依赖 `crypto.subtle` 与 `TextEncoder`（浏览器安全上下文与 Node ≥19 都提供，
+ * 因此 `scripts/verify-hash.mts` 能以裸 node 直跑并用 git 向量对照）；只用相对导入，无 `@/` 别名。
+ * SHA-1 在此仅作内容标识、非安全用途，这正是 git 自己的选择。
  */
 
 const encoder = new TextEncoder()

@@ -20,18 +20,20 @@
 ## 本地跑起来
 
 ```bash
-npm install
-npm run dev        # http://localhost:5173
+pnpm install
+pnpm dev           # http://localhost:5173
 ```
+
+> 包管理器以 `pnpm-lock.yaml` 为准（`package-lock.json` 已入库移除并在 .gitignore 中，npm 误装不会污染仓库）。
 
 不配置同步也能当纯本地笔记用，所有功能（双链、搜索、图谱）都在本机完成。
 
 自检命令：
 
 ```bash
-npm run verify     # 8 个验证套件,447 条断言(配置 / 解析 / frontmatter 与 ID 兼容 / 链接改写 / 三方合并 / 远端删除判定 / 搜索 / 主题)
-npm run typecheck  # vue-tsc --noEmit
-npm run build      # 先重新生成 PWA 图标,再产出 dist/
+pnpm verify        # 11 个验证套件,543 条断言(配置 / 解析 / frontmatter 与 ID 兼容 / 链接改写 / 三方合并 / 远端删除判定 / 搜索 / 主题 / 路径与标题 / 内容指纹 / 链接解析)
+pnpm typecheck     # vue-tsc --noEmit
+pnpm build         # 类型检查 → 生成 PWA 图标与 vditor 静态资源 → 产出 dist/
 ```
 
 浏览器要求：Chrome / Edge 86+、Firefox 111+、Safari 15.2+，且必须是 **HTTPS 或 localhost**（OPFS 与 Service Worker 只在安全上下文可用，用 `http://` 打开会直接提示不支持）。
@@ -40,7 +42,7 @@ npm run build      # 先重新生成 PWA 图标,再产出 dist/
 
 ## 部署
 
-`npm run build` 产出 `dist/`，丢到任意静态托管即可：Nginx、Vercel、Netlify、Cloudflare Pages、GitHub Pages、Gitee Pages。
+`pnpm build` 产出 `dist/`，丢到任意静态托管即可：Nginx、Vercel、Netlify、Cloudflare Pages、GitHub Pages、Gitee Pages。
 
 Service Worker 已配置 `navigateFallback`，深链接刷新能回到应用；托管侧最好也把未知路径重写到 `index.html`。`gitee.com` 的请求被强制设为 `NetworkOnly`，同步的正确性依赖每次拿到最新的 sha，绝不能吃缓存。
 
@@ -52,9 +54,9 @@ Service Worker 已配置 `navigateFallback`，深链接刷新能回到应用；�
 VAULT_BASE=/my-vault/
 ```
 
-然后正常 `npm run build`。`start_url`、`scope`、静态资源、Service Worker 回退路径、Vditor 的资源目录都会跟着加上这个前缀。
+然后正常 `pnpm build`。`start_url`、`scope`、静态资源、Service Worker 回退路径、Vditor 的资源目录都会跟着加上这个前缀；`index.html` 的图标链接用 `%BASE_URL%` 同样带前缀。
 
-> **Windows / Git Bash 注意**：不要用 `VAULT_BASE=/my-vault/ npm run build` 这种命令行写法。MSYS 会把以 `/` 开头的参数改写成 Windows 路径（`/my-vault/` 变成 `D:/soft/Git/my-vault/`），构建结果全错。写进 `.env.local` 最稳妥；确实要用命令行就加 `MSYS_NO_PATHCONV=1`。`.env.local` 已被 `.gitignore` 的 `*.local` 规则忽略。
+> **Windows / Git Bash 注意**：不要用 `VAULT_BASE=/my-vault/ pnpm build` 这种命令行写法。MSYS 会把以 `/` 开头的参数改写成 Windows 路径（`/my-vault/` 变成 `D:/soft/Git/my-vault/`），构建结果全错。写进 `.env.local` 最稳妥；确实要用命令行就加 `MSYS_NO_PATHCONV=1`。`.env.local` 已被 `.gitignore` 的 `*.local` 规则忽略。
 
 ### Gitee Pages 流程
 
@@ -127,7 +129,7 @@ Safari 的防跟踪策略（ITP）会在大约 7 天不使用后清空该站点�
 
 选择存在 `localStorage['webvault:appearance']` 里，**只属于这台设备的这个浏览器**：不进 Gitee 仓库，不影响笔记内容，换设备各自独立。`index.html` 里有一段内联脚本在首帧之前把它写到 `<html>` 的 `data-theme` / `data-mode` / `data-accent` 上，所以选了浅色主题也不会在启动时闪一下深色。被 Safari 的防跟踪策略清掉也无所谓，顶多回到默认主题。
 
-对比度是逐组手调的，不用公式：浅色主题会把强调色压深（例如紫罗兰 `#9182f6` → `#6a58e8`），落在强调色淡底上的文字再走一档 `--accent-text`，保证 10px 的角标也有 4.5:1。`npm run verify` 里的 `verify-theme` 会按 WCAG 把 5 主题 × 8 强调色的组合全算一遍。
+对比度是逐组手调的，不用公式：浅色主题会把强调色压深（例如紫罗兰 `#9182f6` → `#6a58e8`），落在强调色淡底上的文字再走一档 `--accent-text`，保证 10px 的角标也有 4.5:1。`pnpm verify` 里的 `verify-theme` 会按 WCAG 把 5 主题 × 8 强调色的组合全算一遍。
 
 编辑器跟着一起换：明暗翻转时调用 Vditor 的 `setTheme()` 切换它自带的 dark / classic 皮肤、内容主题和代码高亮样式（`atom-one-dark` / `github`，两个都已放进 `public/vditor`，离线可用），其余颜色全部由 CSS 变量接管；关系图谱的画布读同一套令牌。
 
@@ -233,8 +235,8 @@ src/
                        settings / appearance / ui(界面状态、最近/置顶与快捷键绑定持久化)
   components/          TopBar、SideBar、FileTree、NoteEditor、RightPanel、Modal、
                        SearchPanel、LinkPicker、GraphView、SettingsDialog、Notices
-scripts/               图标生成 + 8 个 Node 验证套件(npm run verify)
-public/vditor/         自托管的编辑器资源,离线可用
+scripts/               图标生成、vditor 资源拷贝 + 11 个 Node 验证套件(pnpm verify),CI 见 .github/workflows/
+public/vditor/         自托管的编辑器资源,由 scripts/copy-vditor.mjs 从 node_modules 拷出,不入库
 ```
 
 `core/parse/frontmatter.ts` 和 `core/zettel/*` 是纯函数模块，有两条硬约束：**只用相对导入**（验证脚本以 `node scripts/*.mts` 直跑，没有 `@/` 别名解析），且**不得在运行时导入 `db.ts`**（它在模块作用域就构造 Dexie，需要 IndexedDB）。用 `import type` 引类型是安全的，编译后会被擦除。违反任一条，验证脚本会静默失效或直接崩掉。

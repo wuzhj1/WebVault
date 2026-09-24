@@ -47,9 +47,13 @@ export default defineConfig(({ mode }) => {
           ],
         },
         workbox: {
-          // The editor's markdown engine and theme assets must be available offline, so they
-          // ride in the precache alongside the app shell.
+          // 应用外壳与主题/图标进 precache，装完即离线。
+          // vditor 的运行期资源（lute、公式、mermaid 等，全量 20MB+）**不进** precache：
+          // globIgnores 排除掉，安装包保持在几百 KB；首次打开编辑器时由下面的 CacheFirst
+          // 规则逐文件按需入缓存，之后同样离线可用——路径稳定且随 vditor 包版本变化，
+          // CacheFirst 对它是安全的。
           globPatterns: ['**/*.{js,css,html,svg,png,gif}'],
+          globIgnores: ['vditor/**'],
           navigateFallback: `${base}index.html`,
           maximumFileSizeToCacheInBytes: 8 * 1024 * 1024,
           runtimeCaching: [
@@ -58,6 +62,17 @@ export default defineConfig(({ mode }) => {
               // from cache.
               urlPattern: ({ url }) => url.hostname === 'gitee.com',
               handler: 'NetworkOnly',
+            },
+            {
+              // 任意 base 下的 vditor 资源（/vditor/ 或 /my-vault/vditor/）都走这里；
+              // 条目上限防止长期累积，一年过期兜底 vditor 升级后的旧文件。
+              urlPattern: ({ url }) => url.pathname.includes('/vditor/'),
+              handler: 'CacheFirst',
+              options: {
+                cacheName: 'vditor-assets',
+                cacheableResponse: { statuses: [0, 200] },
+                expiration: { maxEntries: 700, maxAgeSeconds: 60 * 60 * 24 * 365 },
+              },
             },
           ],
         },
