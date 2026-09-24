@@ -13,8 +13,9 @@ import Notices from './components/Notices.vue'
 import RightPanel from './components/RightPanel.vue'
 import SideBar from './components/SideBar.vue'
 import TopBar from './components/TopBar.vue'
+import { bindingOfEvent, hasMod, isTypingTarget } from './core/hotkeys.ts'
 import { useSyncStore } from './stores/sync.ts'
-import { useUiStore } from './stores/ui.ts'
+import { useUiStore, type ShortcutId } from './stores/ui.ts'
 import { useVaultStore } from './stores/vault.ts'
 
 /** 互斥的全屏浮层类型；null 表示当前没有浮层。 */
@@ -93,13 +94,13 @@ function closeDrawers(): void {
   syncDrawerState()
 }
 
-/** 设置对话框打开时落位的页签：'?' 直达「关于与快捷键」，常规入口始终回同步页。 */
-const settingsInitial = ref<'sync' | 'appearance' | 'data' | 'about'>('sync')
+/** 设置对话框打开时落位的页签：'?' 直达「快捷键」页，常规入口始终回同步页。 */
+const settingsInitial = ref<'sync' | 'appearance' | 'data' | 'shortcuts' | 'about'>('sync')
 
 /** 显示指定浮层；传 null 即关闭当前浮层。settingsTab 只在打开设置时生效，决定落位页签。 */
 function show(
   next: Overlay,
-  settingsTab: 'sync' | 'appearance' | 'data' | 'about' = 'sync',
+  settingsTab: 'sync' | 'appearance' | 'data' | 'shortcuts' | 'about' = 'sync',
 ): void {
   if (next === 'search') searchQuery.value = ''
   if (next === 'settings') settingsInitial.value = settingsTab
@@ -121,40 +122,33 @@ function insertLink(target: string): void {
 }
 
 /**
- * 全局快捷键：
- * - Esc 与各浮层/对话框的关闭不再经手这里：Modal 在 document 层 stopPropagation，
- *   浮层组件各自处理自己的 Esc，走到本函数时已经没有需要收口的面板。
- * - Ctrl/Cmd+Shift+组合一律放行：曾经的 +Shift+O 收集箱开关已随卡片盒移除，
- *   保留这道 early-return 是为了不抢浏览器/输入法对 +Shift 系组合的默认绑定。
- * - +K 链接选择器；+F 搜索；+, 设置；无修饰的 ? 直达快捷键页。
- * 带 Alt 的组合不接管，避免撞上浏览器/输入法的默认行为。
+ * 可改快捷键的命令 id → 动作分发。这里不认识任何具体按键：具体组合存在 ui.bindings
+ * 里（设置 → 快捷键 页可改），新增命令时与 ui.SHORTCUT_COMMANDS 各加一行即可。
+ */
+const ACTIONS: Record<ShortcutId, () => void> = {
+  picker: () => show('picker'),
+  search: () => show('search'),
+  settings: () => show('settings'),
+  cheatsheet: () => show('settings', 'shortcuts'),
+  graph: () => show('graph'),
+}
+
+/**
+ * 全局快捷键：一次 keydown 折算成规范串（core/hotkeys.ts），到 ui.bindings 反查命令再分发。
+ * - 不带主键的绑定（出厂的 `?`）在输入框/正文里一律放行；输入法合成中整段不拦——
+ *   中文输入法选词时的按键不该弹出设置。
+ * - Esc 不在此列：Modal 在 document 层 stopPropagation，各浮层自己关自己，走到这里时
+ *   已经没有需要收口的面板；录制新键时设置页在捕获阶段截走事件，同样走不到这里。
+ * - 具体哪些组合可用、哪个组合被谁占用，都在 ui 与设置页里裁决，这里只管执行。
  */
 function onKeydown(event: KeyboardEvent): void {
-  // '?' 直达「关于与快捷键」页：输入框/正文（内容可编辑区）里打问号一律放行，
-  // 输入法合成中也不拦——中文输入法选词时的按键不该弹出设置。
-  if (event.key === '?' && !event.ctrlKey && !event.metaKey && !event.altKey && !event.isComposing) {
-    const t = event.target as HTMLElement | null
-    const typing = !!t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)
-    if (!typing) {
-      event.preventDefault()
-      show('settings', 'about')
-    }
-    return
-  }
-  if (!(event.ctrlKey || event.metaKey)) return
-  const key = event.key.toLowerCase()
-  if (event.shiftKey) return
-  if (event.altKey) return
-  if (key === 'k') {
-    event.preventDefault()
-    show('picker')
-  } else if (key === 'f') {
-    event.preventDefault()
-    show('search')
-  } else if (key === ',' || event.code === 'Comma') {
-    event.preventDefault()
-    show('settings')
-  }
+  const binding = bindingOfEvent(event)
+  if (binding === null) return
+  const id = ui.commandOf(binding)
+  if (id === null) return
+  if (!hasMod(binding) && isTypingTarget(event.target)) return
+  event.preventDefault()
+  ACTIONS[id]()
 }
 
 /** 立即把编辑器里待写的内容落盘（发后不理，适用于卸载/隐藏等无法 await 的时机）。 */

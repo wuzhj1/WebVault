@@ -137,12 +137,15 @@ Safari 的防跟踪策略（ITP）会在大约 7 天不使用后清空该站点�
 
 ## 快捷键
 
+下面表格里的全局键（选择器 / 搜索 / 设置 / 速查表 / 图谱）都是**出厂绑定**，可以在 设置 → 快捷键 里改绑或解绑（点「修改」按下新组合键，`Backspace` 解绑，`Esc` 取消；撞上别的命令会被当场拦下）——改动只存这台设备，不进同步。`Esc`、鼠标交互和编辑器内建按键是固定行为，改不了。
+
 | 键 | 作用 |
 | --- | --- |
 | `Ctrl / ⌘ + K` | 链接选择器：`Enter` 跳转到笔记，`Ctrl/⌘ + Enter` 在光标处插入 `[[双链]]` |
 | `Ctrl / ⌘ + F` | 全库搜索：`↑ ↓` 选择，`Enter` 打开 |
 | `Ctrl / ⌘ + ,` | 打开设置 |
-| `?` | 打开设置里的「关于与快捷键」页（不在输入框、正文里时） |
+| `?` | 打开「快捷键速查表」（设置 → 快捷键；不在输入框、正文里时） |
+| `Ctrl / ⌘ + G` | 关系图谱（出厂绑定，可在设置里改） |
 | 单击链接 | 编辑器里的双链胶囊：跳转到目标笔记，目标不存在则直接创建 |
 | `Ctrl / ⌘ + 单击` | 光标所在行（该行展开为原始 markdown）里的 `[[链接]]`：跳转或创建 |
 | 输入 `[[` | 触发链接补全 |
@@ -150,6 +153,8 @@ Safari 的防跟踪策略（ITP）会在大约 7 天不使用后清空该站点�
 | `Esc` | 关闭搜索 / 图谱 / 设置 / 各类弹窗 |
 
 工具栏已移除，界面只留正文。格式操作的三个入口：行首 `/` 斜杠命令、行首 markdown 输入规则（`# `、`- `、`1. `、`> `、`- [ ] `、` ``` `）、键盘快捷键（`Ctrl/⌘ + B` 加粗、`Ctrl/⌘ + I` 斜体、`Ctrl/⌘ + Z` 撤销等）。
+
+编辑器内建（Vditor 原生）的其余按键——重做、标题升降级、表格插删行列与列对齐——没有另造快捷键，全部收进应用内**快捷键速查表**（按 `?` 打开「设置 → 快捷键」），那才是完整清单；改动速查表数据（`SettingsDialog.vue` 的 `FIXED_SHORTCUTS`）或出厂绑定（`stores/ui.ts` 的 `SHORTCUT_COMMANDS`）时记得同步本节。
 
 ---
 
@@ -225,7 +230,7 @@ src/
     theme/             主题与强调色注册表、对比度计算
     zettel/            卡片元数据的 frontmatter 行解析与链接层永久 ID 兼容(card.ts)
   stores/              Pinia:vault(笔记与索引) / sync(同步与通知) /
-                       settings / appearance / ui(界面状态与最近/置顶持久化)
+                       settings / appearance / ui(界面状态、最近/置顶与快捷键绑定持久化)
   components/          TopBar、SideBar、FileTree、NoteEditor、RightPanel、Modal、
                        SearchPanel、LinkPicker、GraphView、SettingsDialog、Notices
 scripts/               图标生成 + 8 个 Node 验证套件(npm run verify)

@@ -1,37 +1,41 @@
 <script setup lang="ts">
 /**
- * 设置对话框:Gitee 同步、外观、数据与日志、关于四个标签页。
+ * 设置对话框:Gitee 同步、外观、数据与日志、快捷键、关于五个标签页。
  *
  * emits `close` —— 焦点陷阱、ESC 关闭、遮罩点击都由外层 Modal.vue 负责，本组件只提供内容区。
- * 依赖 settings(同步配置)、sync(连接/同步/日志)、vault(笔记索引)、appearance(主题与强调色)。
+ * 依赖 settings(同步配置)、sync(连接/同步/日志)、vault(笔记索引)、appearance(主题与强调色)、
+ * ui(快捷键绑定:可改的全局键存在 ui.bindings,本组件负责录键、冲突提示与恢复默认)。
  *
  * 关键约束：表单改的是 draft 副本，点「保存」才落盘，dirty 用来决定按钮是否可点；
  * 外观页是唯一例外——选项点击即写入本机存储、立刻生效，没有草稿也没有保存按钮。
  * Gitee token 只写进本机 IndexedDB，不会随笔记上传，也不会同步到其他设备（故 sync tab 顶部有醒目警告）。
  */
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { bindingOfEvent, displayOfBinding } from '@/core/hotkeys.ts'
 // OPFS 读写在本组件里承担三件维护动作：探测持久化授权、重建索引时逐篇读正文、清空本机正文
 import * as opfs from '@/core/vault/opfs.ts'
 import { ACCENTS, THEMES } from '@/core/theme/themes.ts'
 import { useAppearanceStore } from '@/stores/appearance.ts'
 import { useSettingsStore, type SyncSettings } from '@/stores/settings.ts'
 import { useSyncStore } from '@/stores/sync.ts'
+import { SHORTCUT_COMMANDS, useUiStore, type ShortcutId } from '@/stores/ui.ts'
 import { useVaultStore } from '@/stores/vault.ts'
 import Modal from './Modal.vue'
 
 /** 唯一对外事件：由 Modal 的关闭按钮/遮罩/ESC 冒泡上来后转给父组件卸载本对话框。 */
 const emit = defineEmits<{ (e: 'close'): void }>()
 
-/** 打开时落位的页签；App 的 ? 快捷键直达「关于与快捷键」，不传则默认同步页。 */
+/** 打开时落位的页签；App 的 ? 快捷键直达「快捷键」页，不传则默认同步页。 */
 const props = defineProps<{ initialTab?: Tab }>()
 
 const settings = useSettingsStore()
 const sync = useSyncStore()
 const vault = useVaultStore()
 const appearance = useAppearanceStore()
+const ui = useUiStore()
 
 /** 标签页 id，顺序即导航栏顺序；`Tab` 由数组字面量推导出联合类型，避免和模板里的 v-if 拼错。 */
-const TABS = ['sync', 'appearance', 'data', 'about'] as const
+const TABS = ['sync', 'appearance', 'data', 'shortcuts', 'about'] as const
 type Tab = (typeof TABS)[number]
 
 /** 标签页显示名，只在导航按钮上用，正文各段自带小标题。 */
@@ -39,7 +43,8 @@ const TAB_LABELS: Record<Tab, string> = {
   sync: 'Gitee 同步',
   appearance: '外观',
   data: '数据与日志',
-  about: '关于与快捷键',
+  shortcuts: '快捷键',
+  about: '关于',
 }
 
 /** 当前标签页，切换只影响渲染哪一段，不重置各段自己的草稿状态。初值来自 ? 快捷键的落位。 */
@@ -71,6 +76,131 @@ const DELAYS: { ms: number; label: string }[] = [
   { ms: 300_000, label: '5 分钟' },
   { ms: 1_800_000, label: '30 分钟' },
 ]
+
+/**
+ * 快捷键速查表数据：分组 → (键帽序列, 说明)，模板渲染成左键帽右说明的两列。
+ *
+ * - 键帽写平台无关形态（`Ctrl / ⌘`），模板用 `+` 串起来；说明只写纯文本，不嵌 HTML。
+ * - 「编辑」「表格」两组是 Vditor 内建按键，照抄 `node_modules/vditor` 的
+ *   `fixBrowserBehavior.ts`(表格) 与 `processKeydown.ts`(标题)——应用不再另造按键，
+ *   只负责把它们写清楚；同一按键在不同上下文含义不同（如 `Ctrl/⌘ + =`），靠分组区分。
+ * - 改这里须同步 README 的「快捷键」小节：两处都是用户会查的文档，漏一处就有人按不出来。
+ */
+const FIXED_SHORTCUTS: { group: string; rows: { keys: string[]; desc: string }[] }[] = [
+  {
+    group: '固定',
+    rows: [{ keys: ['Esc'], desc: '关闭搜索 / 图谱 / 设置 / 各类弹窗' }],
+  },
+  {
+    group: '链接与输入',
+    rows: [
+      { keys: ['单击'], desc: '编辑器里的双链胶囊:跳转,目标不存在则直接创建' },
+      { keys: ['Ctrl / ⌘', '单击'], desc: '光标所在行展开为原始 markdown 后,点该行里的链接:跳转或创建' },
+      { keys: ['[', '['], desc: '连续输入两个 [ 触发链接补全' },
+      { keys: ['/'], desc: '行首输入斜杠:标题、列表、任务、引用、代码块、表格、分割线、日期' },
+    ],
+  },
+  {
+    group: '编辑(Vditor 内建)',
+    rows: [
+      { keys: ['Ctrl / ⌘', 'B'], desc: '加粗' },
+      { keys: ['Ctrl / ⌘', 'I'], desc: '斜体' },
+      { keys: ['Ctrl / ⌘', 'Z'], desc: '撤销' },
+      { keys: ['Ctrl / ⌘', 'Y'], desc: '重做' },
+      { keys: ['Ctrl / ⌘', '='], desc: '光标在标题里:升一级(少一个 #)' },
+      { keys: ['Ctrl / ⌘', '-'], desc: '光标在标题里:降一级(多一个 #)' },
+    ],
+  },
+  {
+    group: '表格(光标在单元格内,Vditor 内建)',
+    rows: [
+      { keys: ['Tab'], desc: '跳到下一格' },
+      { keys: ['Shift', 'Tab'], desc: '跳回上一格' },
+      { keys: ['Ctrl / ⌘', 'Shift', 'F'], desc: '上方插一行' },
+      { keys: ['Ctrl / ⌘', '='], desc: '下方插一行' },
+      { keys: ['Ctrl / ⌘', 'Shift', 'G'], desc: '左侧插一列' },
+      { keys: ['Ctrl / ⌘', 'Shift', '='], desc: '右侧插一列(部分键盘需按 Shift 才能出 =)' },
+      { keys: ['Ctrl / ⌘', '-'], desc: '删除当前行' },
+      { keys: ['Ctrl / ⌘', 'Shift', '-'], desc: '删除当前列' },
+      { keys: ['Ctrl / ⌘', 'Shift', 'L / C / R'], desc: '当前列 左 / 中 / 右 对齐' },
+    ],
+  },
+]
+
+/** 录制中的命令 id;null = 没在录。录制期间按键由 onRecordKey 在捕获阶段截走,绕开全局快捷键。 */
+const recording = ref<ShortcutId | null>(null)
+/** 录制失败的原因(如组合被别的命令占用),成功或取消时清掉。 */
+const recordError = ref<string | null>(null)
+
+/** 出厂绑定查询;列表按 SHORTCUT_COMMANDS 渲染,id 必然存在,查不到只是不显示「恢复默认」。 */
+function defaultOf(id: ShortcutId): string {
+  return SHORTCUT_COMMANDS.find((c) => c.id === id)?.default ?? ''
+}
+
+/** 当前绑定是否已偏离出厂值:决定「恢复默认」按钮与「默认 xxx」注记显不显示。 */
+function isChanged(id: ShortcutId): boolean {
+  return ui.bindings[id] !== defaultOf(id)
+}
+
+/** 命令显示名;冲突提示里指名道姓说是哪条占了这个组合。 */
+function labelOf(id: ShortcutId): string {
+  return SHORTCUT_COMMANDS.find((c) => c.id === id)?.label ?? id
+}
+
+/** 点「修改」开始录键;再点一次取消。换一行录会直接改 recording,监听器是同一个函数不会重复挂。 */
+function toggleRecord(id: ShortcutId): void {
+  if (recording.value === id) {
+    stopRecord()
+    return
+  }
+  recordError.value = null
+  recording.value = id
+  window.addEventListener('keydown', onRecordKey, true)
+}
+
+/** 退出录制:清状态并摘掉捕获监听,否则弹窗关了按键还在被吞。 */
+function stopRecord(): void {
+  recording.value = null
+  recordError.value = null
+  window.removeEventListener('keydown', onRecordKey, true)
+}
+
+/**
+ * 录键:捕获阶段截走按键,既拿到原始组合,也顺手挡住 App 的全局快捷键与浏览器默认行为
+ * (录制时按 Ctrl+F 不会弹搜索)。Esc 只做取消——它保留给关闭弹窗,永远不可被绑定;
+ * Backspace / Delete 解绑。
+ */
+function onRecordKey(event: KeyboardEvent): void {
+  event.preventDefault()
+  event.stopPropagation()
+  const id = recording.value
+  if (id === null) {
+    stopRecord()
+    return
+  }
+  if (event.key === 'Escape') {
+    stopRecord()
+    return
+  }
+  if (event.key === 'Backspace' || event.key === 'Delete') {
+    ui.setBinding(id, '')
+    stopRecord()
+    return
+  }
+  const binding = bindingOfEvent(event)
+  if (binding === null) return // 输入法合成中 / 只按了修饰键:继续等下一个键
+  const owner = ui.commandOf(binding)
+  if (owner !== null && owner !== id) {
+    recordError.value = `${displayOfBinding(binding)} 已被「${labelOf(owner)}」占用,先改掉那一条或换个组合`
+    return
+  }
+  ui.setBinding(id, binding)
+  stopRecord()
+}
+
+// 录制中切页 / 关弹窗都要摘监听:不然界面上看不见,按键却一直被吞。
+watch(tab, stopRecord)
+onBeforeUnmount(stopRecord)
 
 /** 数据页与危险区用的三计数：排除「本机已删除」的墓碑笔记，只算真正还在库里的。 */
 const stats = computed(() => {
@@ -191,7 +321,7 @@ onMounted(() => {
 
 <template>
   <Modal title="设置" wide @close="emit('close')">
-    <!-- 四个标签页共用一个 tab 状态，切换不销毁已填的草稿 -->
+    <!-- 五个标签页共用一个 tab 状态，切换不销毁已填的草稿 -->
     <nav class="tabs">
       <button
         v-for="t in TABS"
@@ -420,7 +550,65 @@ onMounted(() => {
       </div>
     </template>
 
-    <!-- 关于与快捷键：纯静态文案，兜底分支，列出不支持项以免用户误以为丢数据 -->
+    <!-- 快捷键:上半截可改绑(录键),下半截是改不了的固定键与编辑器内建键 -->
+    <template v-else-if="tab === 'shortcuts'">
+      <p class="field__tip">
+        点「修改」后直接按下新的组合键;<code>Backspace</code> 解绑,<code>Esc</code> 取消录制。
+        改动只存这台设备,不进同步。不带主键的裸键(如 <code>?</code>)在输入框与正文里不会触发;
+        <code>Ctrl + N / T / W</code> 这类组合被浏览器占用,页面根本收不到。
+      </p>
+
+      <h4 class="sub sub--first">可修改</h4>
+      <ul class="binds">
+        <li v-for="c in SHORTCUT_COMMANDS" :key="c.id" class="binds__row">
+          <span class="binds__name">
+            {{ c.label }}
+            <em v-if="isChanged(c.id)" class="binds__def">默认 {{ displayOfBinding(c.default) }}</em>
+          </span>
+          <span class="binds__keys">
+            <span v-if="recording === c.id" class="binds__rec">按下新组合键…</span>
+            <kbd v-else-if="ui.bindings[c.id] !== ''" class="keys__cap">{{
+              displayOfBinding(ui.bindings[c.id])
+            }}</kbd>
+            <span v-else class="binds__none">未绑定</span>
+          </span>
+          <button class="btn btn--ghost" type="button" @click="toggleRecord(c.id)">
+            {{ recording === c.id ? '取消' : '修改' }}
+          </button>
+          <button
+            v-if="isChanged(c.id)"
+            class="btn btn--ghost"
+            type="button"
+            @click="ui.resetBinding(c.id)"
+          >恢复默认</button>
+        </li>
+      </ul>
+      <p v-if="recordError" class="field__error">{{ recordError }}</p>
+
+      <h4 class="sub">改不了的按键</h4>
+      <p class="field__tip">
+        这些是应用交互与编辑器内核(Vditor)的内置行为,不参与改绑;标题、表格两组只在光标落进对应块时生效。
+        若把上面的快捷键设成同样的组合,两者会同时触发。
+      </p>
+
+      <!-- 每组一个区块:左列键帽右对齐成一栏,右列说明——从上往下扫,不用来回找键 -->
+      <section v-for="g in FIXED_SHORTCUTS" :key="g.group" class="keys">
+        <h5 class="keys__group">{{ g.group }}</h5>
+        <ul class="keys__list">
+          <li v-for="(row, i) in g.rows" :key="i" class="keys__row">
+            <span class="keys__caps">
+              <template v-for="(cap, j) in row.keys" :key="j">
+                <span v-if="j > 0" class="keys__plus">+</span>
+                <kbd class="keys__cap">{{ cap }}</kbd>
+              </template>
+            </span>
+            <span class="keys__desc">{{ row.desc }}</span>
+          </li>
+        </ul>
+      </section>
+    </template>
+
+    <!-- 关于:纯静态文案,兜底分支,列出不支持项以免用户误以为丢数据 -->
     <template v-else>
       <p class="about">
         WebVault 是一个纯静态的单页应用:笔记是你的普通 <code>.md</code>
@@ -435,18 +623,6 @@ onMounted(() => {
           <strong>iOS Safari:</strong>分享按钮 →「添加到主屏幕」。<em>必须这样做</em>,否则 Safari
           的防跟踪策略会在约 7 天不用之后清空本机笔记缓存。装到主屏幕后仍可能被清,应用会在启动时检测并自动从 Gitee 恢复。
         </li>
-      </ul>
-
-      <h4 class="sub">快捷键</h4>
-      <ul class="plain">
-        <li><code>Ctrl / ⌘ + K</code> — 链接选择器,<code>Enter</code> 跳转,<code>Ctrl / ⌘ + Enter</code> 在光标处插入 <code>[[双链]]</code></li>
-        <li><code>Ctrl / ⌘ + F</code> — 全库搜索,<code>↑ ↓</code> 选择,<code>Enter</code> 打开</li>
-        <li><code>Ctrl / ⌘ + ,</code> — 打开设置</li>
-        <li><code>?</code> — 打开本页(不在输入框、正文里时)</li>
-        <li><code>Ctrl / ⌘ + 单击</code> 编辑器里的 <code>[[链接]]</code> — 跳转(不存在则创建)</li>
-        <li>在正文里输入 <code>[[</code> — 触发链接补全</li>
-        <li>行首输入 <code>/</code> — 斜杠命令:标题、列表、任务、引用、代码块、表格、分割线、日期</li>
-        <li><code>Esc</code> — 关闭弹窗</li>
       </ul>
 
       <h4 class="sub">已知限制</h4>
@@ -981,6 +1157,127 @@ onMounted(() => {
 .plain strong,
 .plain em {
   color: var(--text);
+}
+
+/* —— 快捷键页:可改绑的命令行(名称 | 键帽 | 修改/恢复默认) —— */
+.binds {
+  margin: 0 0 4px;
+  padding: 0;
+  list-style: none;
+}
+
+.binds__row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 0;
+  font-size: 12.5px;
+  border-bottom: 1px dashed var(--border);
+}
+
+.binds__row:last-child {
+  border-bottom: none;
+}
+
+.binds__name {
+  flex: 1;
+  min-width: 0;
+  color: var(--text);
+}
+
+/* 偏离出厂值时的小注记:告诉用户这一条已经改过了 */
+.binds__def {
+  margin-left: 6px;
+  font-size: 11px;
+  font-style: normal;
+  color: var(--text-muted);
+}
+
+.binds__keys {
+  flex: none;
+  min-width: 112px;
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 4px;
+}
+
+/* 录制中的高亮提示:占键帽那个位,行宽不跳 */
+.binds__rec {
+  padding: 1px 8px;
+  border-radius: 5px;
+  font-size: 12px;
+  color: var(--accent-text);
+  background: var(--accent-soft);
+}
+
+.binds__none {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+/* —— 固定速查表:左列键帽右对齐成一栏,右列说明,两列结构便于从上往下扫 —— */
+.keys {
+  margin: 0 0 4px;
+}
+
+.keys__group {
+  margin: 14px 0 4px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.keys__list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* 窄屏下允许整行换行:键帽折到上一行,说明跟在下面,不撑破弹窗 */
+.keys__row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 12px;
+  padding: 3px 0;
+  font-size: 12.5px;
+  line-height: 1.7;
+}
+
+.keys__caps {
+  flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 3px;
+  min-width: 170px;
+}
+
+/* 键帽:下边框加厚到 2px 模拟物理键的侧面;--bg 让它从弹窗底色里浮出来 */
+.keys__cap {
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  border-radius: 5px;
+  background: var(--bg);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+
+.keys__plus {
+  align-self: center;
+  padding: 0 1px;
+  color: var(--text-muted);
+  font-size: 11.5px;
+}
+
+.keys__desc {
+  flex: 1 1 200px;
+  min-width: 0;
+  color: var(--text-muted);
 }
 
 .spacer {
