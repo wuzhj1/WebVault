@@ -193,7 +193,12 @@ export async function pullIndex(cfg: GiteeConfig, summary: SyncSummary, sink: Pr
 /**
  * 按需下载单篇正文。成功返回文本；无 meta、无远端 sha 或远端不存在时返回 null。
  */
-export async function ensureCached(cfg: GiteeConfig, path: string, sink: ProgressSink = noop): Promise<string | null> {
+export async function ensureCached(
+  cfg: GiteeConfig,
+  path: string,
+  sink: ProgressSink = noop,
+  opts: { reload?: boolean } = {},
+): Promise<string | null> {
   const meta = await db.notes.get(path)
   if (!meta) return null
   if (meta.cached) return opfs.readNote(path)
@@ -216,8 +221,10 @@ export async function ensureCached(cfg: GiteeConfig, path: string, sink: Progres
     dirty: 0,
     mtime: Date.now(),
   })
-  await useVaultStore().reindexContent(path, file.text)
-  await useVaultStore().reloadNotes()
+  // reload: false 供批量下载（preheat）使用：每篇一次 reloadNotes 就是每篇一次全表读 +
+  // 全量派生刷新，25 篇的预取会变成 25 次全库扫描；批量方在循环结束统一 reload 一次。
+  await useVaultStore().reindexContent(path, file.text, { deferCards: opts.reload === false })
+  if (opts.reload !== false) await useVaultStore().reloadNotes()
   return file.text
 }
 
@@ -230,7 +237,7 @@ export async function preheat(cfg: GiteeConfig, limit: number, sink: ProgressSin
   let done = 0
   for (const note of pending) {
     try {
-      const text = await ensureCached(cfg, note.path, sink)
+      const text = await ensureCached(cfg, note.path, sink, { reload: false })
       if (text !== null) done++
       sink({ phase: 'bodies', message: `后台预取 ${done}/${pending.length}`, current: done, total: pending.length })
     } catch (err) {
@@ -238,6 +245,7 @@ export async function preheat(cfg: GiteeConfig, limit: number, sink: ProgressSin
       break // 多半是被限流了；就此停下，别继续烧配额
     }
   }
+  // 整批下载完只收口一次：这一次 reload 同时把上面 defer 掉的内存 cards 一起补齐。
   if (done > 0) await useVaultStore().reloadNotes()
   return done
 }
@@ -323,7 +331,8 @@ export async function push(cfg: GiteeConfig, summary: SyncSummary, sink: Progres
     if (outcome.status === 'merged') {
       summary.autoMerged++
       await opfs.writeNote(meta.path, outcome.text)
-      await useVaultStore().reindexContent(meta.path, outcome.text)
+      // 合并阶段是逐篇循环、结尾统一 reloadNotes：循环内不刷内存 cards（O(N²)）。
+      await useVaultStore().reindexContent(meta.path, outcome.text, { deferCards: true })
       jobs.push({
         action: { action: 'update', path: meta.path, content: outcome.text },
         path: meta.path,
@@ -335,7 +344,7 @@ export async function push(cfg: GiteeConfig, summary: SyncSummary, sink: Progres
       // 无须上传：远端版本直接成为本地版本，三方 sha 对齐、清脏。
       summary.pulled++
       await opfs.writeNote(meta.path, outcome.text)
-      await useVaultStore().reindexContent(meta.path, outcome.text)
+      await useVaultStore().reindexContent(meta.path, outcome.text, { deferCards: true })
       const sha = await gitBlobSha(outcome.text)
       await db.notes.put({
         ...meta,
@@ -566,7 +575,7 @@ async function writeConflictCopy(path: string, remoteText: string): Promise<stri
     removedLocal: 0,
     removedRemote: 0,
   })
-  await useVaultStore().reindexContent(candidate, remoteText)
+  await useVaultStore().reindexContent(candidate, remoteText, { deferCards: true })
   await logSync('warn', `冲突: ${path} 的远端版本已另存为 ${candidate}`)
   return candidate
 }

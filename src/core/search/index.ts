@@ -4,6 +4,7 @@
  * 硬约束：只能在浏览器里跑（依赖 `@/core/db.ts` 的 IndexedDB 与 OPFS）；索引是纯派生数据，
  * 任何时候都可从「元数据索引 + OPFS 正文」整体重建，因此不持久化。
  * 索引对象放在模块作用域而非 store 里，好让多个调用方共用同一份，不必各自持一份副本。
+ * 增量维护（按 localSha 跳过未变笔记）的状态也一并放在模块作用域，与索引同生命周期。
  */
 import MiniSearch, { type SearchResult } from 'minisearch'
 import { db } from '@/core/db.ts'
@@ -35,6 +36,11 @@ interface Doc {
 let index: MiniSearch<Doc> | null = null
 /** 已建索引对应的 revision；-1 表示尚未建立或已被作废。 */
 let indexedRevision = -1
+/**
+ * 每条已索引文档对应的 `localSha`。增量刷新靠它断定「这篇正文没动过」，从而跳过重读 OPFS ——
+ * 没有它，保存一篇就要重扫全库正文（见 ensureIndex）。
+ */
+const indexedSha = new Map<string, string>()
 
 function createIndex(): MiniSearch<Doc> {
   return new MiniSearch<Doc>({
@@ -53,39 +59,69 @@ function createIndex(): MiniSearch<Doc> {
 }
 
 /**
- * vault 有变动就整体重建。`revision` 让调用方传一个廉价的单调递增量，而不必逐篇比对内容。
- * 注：这里是全量重建而非增量 add/remove —— 保存一篇也要重扫所有缓存正文，靠 revision 相等来短路。
+ * 让索引跟上 vault：`revision` 是调用方传来的廉价单调递增量（vault.revision），相等直接短路。
+ *
+ * revision 变了也只做**增量**更新——先摘掉已删/失效的 id，再只为 `localSha` 变过的笔记重读
+ * OPFS，其余文档原样沿用；`localSha` 为空（无从断言内容没变）时才退化为重读。
+ * 只有 `invalidateIndex()` 作废后才会整库重建。
  */
 export async function ensureIndex(revision: number): Promise<MiniSearch<Doc>> {
   if (index && revision === indexedRevision) return index
 
-  const fresh = createIndex()
   const notes = await db.notes.toArray()
-  const docs: Doc[] = []
-  for (const n of notes) {
-    // 墓碑与未下载的 stub 都没有正文可读，只能排除在索引之外（UI 另有「尚未下载」计数提示）。
-    if (n.removedLocal || !n.cached) continue
-    const body = (await opfs.readNote(n.path)) ?? ''
-    const tags = (await db.tags.where('path').equals(n.path).toArray()).map((t) => t.tag)
-    docs.push({ id: n.path, title: n.title, body, tags: tags.join(' ') })
+  // 整张标签表只读一次再按 path 分组：原先每篇一次 where('path').equals()，N 篇就是 N+1 次 IDB 往返。
+  const tagsByPath = new Map<string, string[]>()
+  for (const t of await db.tags.toArray()) {
+    const list = tagsByPath.get(t.path)
+    if (list) list.push(t.tag)
+    else tagsByPath.set(t.path, [t.tag])
   }
-  fresh.addAll(docs)
+
+  // 墓碑与未下载的 stub 都没有正文可读，只能排除在索引之外（UI 另有「尚未下载」计数提示）。
+  const live = notes.filter((n) => n.cached && !n.removedLocal)
+  const liveIds = new Set(live.map((n) => n.path))
+
+  const fresh = index ?? createIndex()
+  if (index) {
+    // 旧文档里已经不存在的（删除、转 stub、墓碑）先摘掉，否则会留下查得到却打不开的幽灵命中。
+    for (const id of indexedSha.keys()) {
+      if (liveIds.has(id)) continue
+      fresh.discard(id)
+      indexedSha.delete(id)
+    }
+  }
+
+  const docs: Doc[] = []
+  for (const n of live) {
+    if (index && n.localSha && indexedSha.get(n.path) === n.localSha) continue
+    const body = (await opfs.readNote(n.path)) ?? ''
+    docs.push({ id: n.path, title: n.title, body, tags: (tagsByPath.get(n.path) ?? []).join(' ') })
+    if (n.localSha) indexedSha.set(n.path, n.localSha)
+    else indexedSha.delete(n.path)
+    // 增量更新：同 id 的旧文档先摘再加，replace 不会静默丢掉旧词条。
+    if (fresh.has(n.path)) fresh.discard(n.path)
+  }
+  if (docs.length > 0) fresh.addAll(docs)
+
   // 先换引用再记 revision：两者之间若有并发读，最坏情况只是多建一次，不会读到半新半旧。
   index = fresh
   indexedRevision = revision
   return fresh
 }
 
-/** 强制下次 `ensureIndex` 重建，用于外部改动未被 revision 变化反映出来的场合。 */
+/** 作废索引，用于强制下次重建（外部改动未被 revision 变化反映出来的场合）。 */
 export function invalidateIndex(): void {
+  index = null
   indexedRevision = -1
+  indexedSha.clear()
 }
 
 /**
  * 索引是否已经恰好建在这个 revision 上。
  *
- * 只要一个排序信号的调用方用它来避免触发 `ensureIndex` —— 后者会把每篇缓存正文从 OPFS 读一遍。
- * 用户已经搜过时很廉价；否则就跳过文本信号，这正是「在笔记间来回切换不会变成全库扫描」的原因。
+ * 只要一个排序信号的调用方用它来避免触发 `ensureIndex` —— 后者至少要把元数据与标签表读一遍
+ * （增量后已不再全量重读正文）。用户已经搜过时很廉价；否则就跳过文本信号，
+ * 这正是「在笔记间来回切换不会变成全库扫描」的原因。
  */
 export function hasIndex(revision: number): boolean {
   return index !== null && indexedRevision === revision

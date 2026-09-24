@@ -3,7 +3,8 @@
  * 关系图谱：以模态弹层展示笔记之间的双链关系，Canvas 绘制的简易力导向图。
  *
  * 数据来自 Dexie 的 links 表与 vault 笔记列表；requestAnimationFrame 循环每帧先做物理
- * 模拟（tick）再绘制（draw），模拟温度 alpha 衰减到阈值后停止计算但保留最后一帧画面。
+ * 模拟（tick）再绘制（draw），温度 alpha 衰减到阈值后**整个循环停表**、画面保留最后一帧；
+ * 指针移动 / 拖拽 / 缩放平移 / 主题切换 / 图重建各自调 wake() 续排，静止时零 CPU 开销。
  * 交互：拖动节点会固定它并唤醒模拟、拖空白平移、滚轮以光标为锚点缩放、点击节点请求打开
  * 对应笔记。坐标全部使用"世界坐标"，屏幕坐标只在指针事件里临时换算。
  *
@@ -56,14 +57,16 @@ const CELL = 190
 let nodes: GNode[] = []
 let edges: [number, number][] = []
 let byPath = new Map<string, number>()
-/** 模拟温度：1 表示全力计算，每帧乘 0.985 衰减，低于 0.003 即停止模拟。 */
+/** 模拟温度：1 表示全力计算，每帧乘 0.985 衰减，低于 ALPHA_STOP 即停止模拟。 */
 let alpha = 1
+/** 收敛阈值：tick 停算、主循环停表用的是同一个数，两处判定必须一致。 */
+const ALPHA_STOP = 0.003
 /** 视图变换：以画布中心为原点的缩放与平移。 */
 let scale = 1
 let tx = 0
 let ty = 0
-/** rAF 句柄，卸载时用于取消循环。 */
-let frame = 0
+/** rAF 句柄；null = 当前没有排程中的一帧。停表后交互靠 wake() 按需补帧。 */
+let frame: number | null = null
 // 指针交互状态：hovered/dragging 是节点下标，panning 表示正在平移画布。
 let hovered: number | null = null
 let dragging: number | null = null
@@ -106,11 +109,12 @@ function colors(): Palette {
   return palette
 }
 
-// 主题或强调色变化 → 丢弃颜色缓存，下一帧重新读取 CSS 变量。
+// 主题或强调色变化 → 丢弃颜色缓存并补一帧重绘（图谱静止时循环已停表，不 wake 就要等下次交互才换色）。
 watch(
   () => [appearance.theme, appearance.accent] as const,
   () => {
     palette = null
+    wake()
   },
 )
 
@@ -174,6 +178,8 @@ async function load(): Promise<void> {
 
   stats.value = { nodes: nodes.length, edges: edges.length }
   alpha = 1
+  // 重建后必须重新排帧：图谱此前可能已经收敛停表，光把 alpha 抬起来没人执行 tick。
+  wake()
 }
 
 /**
@@ -185,7 +191,7 @@ async function load(): Promise<void> {
  * alpha 低于阈值时整段直接返回，画面停在收敛后的布局上。
  */
 function tick(): void {
-  if (alpha < 0.003) return
+  if (alpha < ALPHA_STOP) return
 
   // 1) 空间网格分桶
   const cells = new Map<string, number[]>()
@@ -333,11 +339,22 @@ function draw(): void {
   labelFor(hovered)
 }
 
-/** rAF 主循环：先模拟后绘制；句柄存进 frame，卸载时统一取消。 */
+/**
+ * rAF 主循环：先模拟后绘制，句柄归一到 frame（卸载时统一取消）。
+ * 布局收敛且没有拖拽在进行时**主动停表**——此前这里无条件重排，图谱开着就一直全量重绘
+ * （清屏 + 遍历所有边和节点），静止时也在烧 CPU/GPU。停表后画面保留最后一帧，
+ * 后续的指针移动、缩放平移、主题切换、图重建各自调 wake() 补一帧或续排。
+ */
 function loop(): void {
+  frame = null
   tick()
   draw()
-  frame = requestAnimationFrame(loop)
+  if (alpha >= ALPHA_STOP || dragging !== null) frame = requestAnimationFrame(loop)
+}
+
+/** 排一帧（幂等）：已在排程中则什么都不做，静止时不会退化成常驻循环。 */
+function wake(): void {
+  if (frame === null) frame = requestAnimationFrame(loop)
 }
 
 /** 按容器的 CSS 尺寸与设备像素比重设画布物理像素，保证高分屏下不糊。 */
@@ -352,6 +369,8 @@ function resize(): void {
   c.height = Math.round(height * dpr)
   c.style.width = `${width}px`
   c.style.height = `${height}px`
+  // 重设画布物理像素会清空画布，必须立刻补一帧，否则停表期间会留一块空白。
+  wake()
 }
 
 /** 屏幕坐标（视口像素）→ 世界坐标：先减去画布原点与平移，再除以缩放。 */
@@ -396,6 +415,7 @@ function onPointerDown(event: PointerEvent): void {
     dragging = hit
     nodes[hit].fixed = true
     alpha = Math.max(alpha, 0.35)
+    wake()
   } else {
     panning = true
   }
@@ -414,6 +434,7 @@ function onPointerMove(event: PointerEvent): void {
     nodes[dragging].x = p.x
     nodes[dragging].y = p.y
     alpha = Math.max(alpha, 0.25)
+    wake()
     return
   }
   if (panning) {
@@ -421,9 +442,15 @@ function onPointerMove(event: PointerEvent): void {
     ty += event.clientY - downY
     downX = event.clientX
     downY = event.clientY
+    wake()
     return
   }
-  hovered = pick(event)
+  const hit = pick(event)
+  // 高亮真的换了才补一帧：鼠标在静止的图上空扫不该持续重绘。
+  if (hit !== hovered) {
+    hovered = hit
+    wake()
+  }
 }
 
 /**
@@ -459,6 +486,7 @@ function onWheel(event: WheelEvent): void {
   const after = toWorld(event)
   tx += (after.x - before.x) * scale
   ty += (after.y - before.y) * scale
+  wake()
 }
 
 /**
@@ -470,6 +498,7 @@ function recenter(): void {
   tx = 0
   ty = 0
   alpha = Math.max(alpha, 0.5)
+  wake()
 }
 
 /** Esc 关闭图谱；stopPropagation 防止外层（如全局快捷键）再处理这次按键。 */
@@ -496,13 +525,13 @@ onMounted(async () => {
   canvas.value?.addEventListener('pointercancel', onPointerUp)
   canvas.value?.addEventListener('wheel', onWheel, { passive: false })
   document.addEventListener('keydown', onKeydown)
-  await load()
-  frame = requestAnimationFrame(loop)
+  await load() // load 内部已经 wake，这里不必再排一次
 })
 
 /* 卸载：停掉动画帧、断开尺寸观察、移除 Esc 监听（指针监听随 canvas 一起回收）。 */
 onBeforeUnmount(() => {
-  cancelAnimationFrame(frame)
+  if (frame !== null) cancelAnimationFrame(frame)
+  frame = null
   observer?.disconnect()
   document.removeEventListener('keydown', onKeydown)
 })

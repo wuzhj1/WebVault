@@ -23,6 +23,7 @@ import {
   normalizePath,
   titleOf,
 } from '@/core/vault/paths.ts'
+import { parseFrontmatter } from '@/core/parse/frontmatter.ts'
 import { parseNote } from '@/core/parse/links.ts'
 import { rewriteWikilinks } from '@/core/parse/rewrite.ts'
 import {
@@ -83,6 +84,18 @@ function newMeta(path: string): NoteMeta {
 
 /** 「上次打开路径」落盘的防抖定时器，避免频繁写设置。 */
 let lastOpenTimer: ReturnType<typeof setTimeout> | null = null
+
+/**
+ * 把一条元数据换进内存列表（不存在则追加），避免每次保存都 `db.notes.toArray()` 全表重读。
+ * 单条写入必然对应单条内存更新——DB 里那行就是刚 put 的 `meta`，两边不会不同步。
+ */
+function replaceMeta(list: readonly NoteMeta[], meta: NoteMeta): NoteMeta[] {
+  const i = list.findIndex((n) => n.path === meta.path)
+  if (i === -1) return [...list, meta]
+  const next = list.slice()
+  next[i] = meta
+  return next
+}
 
 /** vault 主 store：元数据索引、派生状态与正文读写的集中入口。 */
 export const useVaultStore = defineStore('vault', () => {
@@ -236,7 +249,8 @@ export const useVaultStore = defineStore('vault', () => {
       // 从未推送过，因此要随第一次同步一起上传。
       meta.dirty = 1
       adopted.push(meta)
-      await reindexContent(path, content)
+      // 批量收养：循环里不刷内存 cards（每篇一次 = O(N²)），下面统一 refreshDerived 收口。
+      await reindexContent(path, content, { deferCards: true })
     }
     if (adopted.length > 0) await db.notes.bulkPut(adopted)
 
@@ -345,9 +359,19 @@ export const useVaultStore = defineStore('vault', () => {
    *
    * @returns 该笔记的永久 id 出现、变化或消失时为 true——其他笔记的 `[[id]]` 链接可能因此改指，
    * 只有全量漂移扫描（refreshDerived）能发现这种情况。
+   *
+   * @param opts.deferCards 批量重建（reconcile 收养外部文件、设置页重索引、后台预取）时置真：
+   *   循环内不回写内存 cards —— cards 一变，由它派生的 resolver 就重建一次，N 篇笔记循环
+   *   就是 O(N²)；Dexie 侧照常写入，调用方收尾时统一 refreshDerived 一次性收口。
    */
-  async function reindexContent(path: string, content: string): Promise<boolean> {
+  async function reindexContent(
+    path: string,
+    content: string,
+    opts?: { deferCards?: boolean },
+  ): Promise<boolean> {
+    // 三个解析结果在这一次算齐、往下传：此前每保存一篇要 2×parseNote + 2×parseFrontmatter。
     const { links, tags } = parseNote(content)
+    const fm = parseFrontmatter(content)
     const r = resolver.value
 
     const linkRows: LinkRow[] = links.map((l) => ({
@@ -363,9 +387,9 @@ export const useVaultStore = defineStore('vault', () => {
     }))
     const tagRows: TagRow[] = [
       ...tags.map((t) => ({ tag: t.tag, path, line: t.line })),
-      ...frontmatterTagRows(path, content, tags),
+      ...frontmatterTagRows(path, content, tags, fm),
     ]
-    const card = cardFromBody(path, content)
+    const card = cardFromBody(path, content, fm, tags)
     const zidChanged = (cardByPath.value.get(path)?.zid ?? '') !== card.zid
 
     await db.transaction('rw', db.links, db.tags, db.cards, async () => {
@@ -375,7 +399,7 @@ export const useVaultStore = defineStore('vault', () => {
       if (tagRows.length) await db.tags.bulkAdd(tagRows)
       await db.cards.put(card)
     })
-    cards.value = [...cards.value.filter((c) => c.path !== path), card]
+    if (!opts?.deferCards) cards.value = [...cards.value.filter((c) => c.path !== path), card]
     return zidChanged
   }
 
@@ -438,7 +462,8 @@ export const useVaultStore = defineStore('vault', () => {
     }
     await db.notes.put(meta)
     const zidChanged = await reindexContent(path, content)
-    notes.value = await db.notes.toArray()
+    // 只把这一条换进内存：原先每次保存都 db.notes.toArray() 全表重读，是一次多余的 O(n) IDB 往返。
+    notes.value = replaceMeta(notes.value, meta)
     // 刚出现的 id 会让其他笔记里的 `[[id]]` 链接首次解析成功，
     // 而只有全量漂移扫描才会重写它们的 targetPath，故此时必须整套刷新。
     if (activePath.value === path && !zidChanged) await refreshActiveLinks()
@@ -464,7 +489,7 @@ export const useVaultStore = defineStore('vault', () => {
     }
     await db.notes.put(meta)
     await reindexContent(path, content)
-    notes.value = await db.notes.toArray()
+    notes.value = replaceMeta(notes.value, meta)
     await refreshDerived()
     return path
   }
@@ -564,7 +589,8 @@ export const useVaultStore = defineStore('vault', () => {
       if (meta) {
         await db.notes.put({ ...meta, localSha: sha, size: text.length, mtime: Date.now(), dirty: 1 })
       }
-      await reindexContent(src, text)
+      // 批量改链：renameNote 收尾会统一 refreshDerived，循环里不必每篇刷一次内存 cards。
+      await reindexContent(src, text, { deferCards: true })
       touched++
     }
     return touched

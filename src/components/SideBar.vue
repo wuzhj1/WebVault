@@ -61,15 +61,43 @@ const fileTab = ref<FileTab>('tree')
  * 没有跨会话记住的价值。
  */
 const filter = ref('')
-/** 当前过滤串的小写形态，所有匹配逻辑共用它，免得每处都 toLowerCase 一遍。 */
-const query = computed(() => filter.value.trim().toLowerCase())
+/**
+ * 防抖后的过滤串（已 trim + 小写），所有匹配逻辑挂在它上面而不是 `filter`：
+ * 过滤文件树要整棵重排、再让 FileTree 整棵重渲染，逐字触发在大库上会卡住输入，
+ * 停 150ms 后一次性生效。输入框本身仍即时回显（它绑的是 `filter`）。
+ */
+const query = ref('')
+/** 防抖句柄；null 表示当前没有待生效的过滤改动。 */
+let filterTimer: ReturnType<typeof setTimeout> | null = null
+
+watch(filter, (value) => {
+  const next = value.trim().toLowerCase()
+  if (next === query.value) return
+  if (filterTimer) clearTimeout(filterTimer)
+  filterTimer = setTimeout(() => {
+    filterTimer = null
+    query.value = next
+  }, 150)
+})
+
 /**
  * 切分区即清空：上一分区的过滤词留在这一分区只会让人以为「东西丢了」。
  * 标签也一并回目录——回到笔记区时若停在置顶/最近标签，会让人以为目录树没了。
  */
 watch(section, () => {
   filter.value = ''
+  // 立即生效而不是等防抖：切分区后不该还让上一个分区的过滤词多留 150ms。
+  query.value = ''
+  if (filterTimer) {
+    clearTimeout(filterTimer)
+    filterTimer = null
+  }
   fileTab.value = 'tree'
+})
+
+// 卸载前撤掉防抖：setTimeout 挂到已销毁组件的 ref 上没有意义。
+onBeforeUnmount(() => {
+  if (filterTimer) clearTimeout(filterTimer)
 })
 
 /** 待建 / 标签分区的占位文案；笔记分区跟着当前标签走，见下方 FILE_TAB_PLACEHOLDERS。 */
@@ -169,8 +197,12 @@ function filterTree(nodes: TreeNode[], q: string): TreeNode[] {
 /** 过滤后的文件树；过滤非空时 FileTree 会无视折叠状态展开（expandAll），否则命中藏在收起的目录里。 */
 const filteredTree = computed(() => filterTree(vault.tree, query.value))
 
-/** 某分区「过滤后一条不剩、但全量其实有」时的补充说明，避免被误读成数据没了。 */
-const filteredOut = computed(() => filter.value.trim() !== '')
+/**
+ * 某分区「过滤后一条不剩、但全量其实有」时的补充说明，避免被误读成数据没了。
+ * 跟 `query`（防抖后的值）而非 `filter` 走：它同时驱动 expandAll 与行过滤，
+ * 两者必须在同一时刻切换，否则会出现「目录全展开了、词却还没生效」的一帧。
+ */
+const filteredOut = computed(() => query.value !== '')
 
 const uncachedCount = computed(() => vault.uncached.length)
 

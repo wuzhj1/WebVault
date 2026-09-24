@@ -276,7 +276,8 @@ async function reindex(): Promise<void> {
       if (n.removedLocal || !n.cached) continue
       const body = await opfs.readNote(n.path)
       if (body === null) continue
-      await vault.reindexContent(n.path, body)
+      // deferCards：循环里每篇刷一次内存 cards/resolver 是 O(N²)，收尾的 refreshDerived 统一收口。
+      await vault.reindexContent(n.path, body, { deferCards: true })
       count++
     }
     await vault.refreshDerived()

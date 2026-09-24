@@ -14,7 +14,7 @@
  * 2. `../db.ts` 只做类型导入——它在模块作用域构造 Dexie，在浏览器之外会抛错。
  */
 import type { CardRow, TagRow } from '../db.ts'
-import { parseFrontmatter, readList, readScalar } from '../parse/frontmatter.ts'
+import { parseFrontmatter, readList, readScalar, type Frontmatter } from '../parse/frontmatter.ts'
 import { parseNote, type ParsedTag } from '../parse/links.ts'
 
 /** 旧卡片的分类；`plain` 只出现在读取端，见 `CARD_TYPES`。 */
@@ -69,14 +69,20 @@ export function parseCreated(raw: string): number {
  *
  * 每篇笔记都会有一行，不只是卡片：`parsed` 是可续跑的回填用来判断自己读到哪儿的依据，而「这不是一张
  * 卡片」只有在和「还没读过」同样都有行的情况下才区分得出来。`type: 'plain'` 表示这篇不是卡片。
+ *
+ * `fm` / `bodyTags` 是可选的复用位：`reindexContent` 保存一篇正文时本来就要解析 frontmatter 与
+ * `parseNote`，把结果传进来即可，同一篇不再解析两遍；不传则各自现算，老调用方行为不变。
  */
-export function cardFromBody(path: string, content: string): CardRow {
-  const fm = parseFrontmatter(content)
+export function cardFromBody(
+  path: string,
+  content: string,
+  fm: Frontmatter = parseFrontmatter(content),
+  bodyTags: readonly ParsedTag[] = parseNote(content).tags,
+): CardRow {
   const id = readScalar(fm, 'id') ?? ''
   const type = readScalar(fm, 'type') ?? ''
   const createdRaw = readScalar(fm, 'created') ?? ''
 
-  const bodyTags = parseNote(content).tags
   const merged = mergeTags(bodyTags, readList(fm, 'tags'))
 
   return {
@@ -102,8 +108,9 @@ export function frontmatterTagRows(
   path: string,
   content: string,
   bodyTags: readonly ParsedTag[],
+  /** 复用调用方已解析的 frontmatter（reindexContent 每次保存都要解析一遍，见 cardFromBody）。 */
+  fm: Frontmatter = parseFrontmatter(content),
 ): TagRow[] {
-  const fm = parseFrontmatter(content)
   const have = new Set(bodyTags.map((t) => t.tag.toLowerCase()))
   const rows: TagRow[] = []
   const seen = new Set<string>()
