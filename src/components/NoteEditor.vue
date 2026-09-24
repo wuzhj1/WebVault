@@ -28,6 +28,7 @@ import {
   type WikilinkLookup,
 } from '@/core/editor/wikilink-dom.ts'
 import { slashHint } from '@/core/editor/slash-commands.ts'
+import { clearPendingSave, snapshotPendingSave } from '@/core/editor/pending-save.ts'
 import { splitFrontmatter } from '@/core/parse/frontmatter.ts'
 import { isAttachmentTarget, resolveTarget } from '@/core/index/resolve.ts'
 import { codeThemeFor, type ThemeMode } from '@/core/theme/themes.ts'
@@ -93,6 +94,8 @@ function hintLinks(query: string): { html: string; value: string }[] {
  * 强制落盘:先撤掉挂起的防抖 timer,再把编辑器当前正文与 `loadedFm` 拼回完整文件内容写入 OPFS,
  * 最后排队一次同步推送。换文、组件卸载前都必须 `await` 它,
  * 否则迟到的自动保存会把刚写进去的内容盖回去。
+ * 两条自保:写 OPFS 之前先同步落一份 localStorage 快照(`beforeunload` 不等 Promise);
+ * 写失败时把正文放回 pendingValue 留待下次重试 —— 两条都为了一件事:不丢用户最后的输入。
  */
 async function flushSave(): Promise<void> {
   if (saveTimer) {
@@ -103,16 +106,29 @@ async function flushSave(): Promise<void> {
   // 先把 path/body 取成局部值再 await:期间可能已经换文,不能等回来后再读一次全局状态。
   const path = loadedPath
   const body = editor?.getValue() ?? pendingValue
-  pendingValue = null
   const value = loadedFm + body
   // 自检:`loadedFm` 必须是拼好结果的严格前缀,否则说明这块前言已经和编辑器脱钩了,
-  // 与其写坏文件不如回滚到上次渲染的正文并报警。
+  // 与其写坏文件不如回滚到上次渲染的正文并报警(这次待写内容随 pendingValue 一起丢弃)。
   if (loadedFm !== '' && !value.startsWith(loadedFm)) {
+    pendingValue = null
     sync.notify('warn', '元数据块偏移计算异常，已拒绝保存以防止正文损坏')
     setContent(renderedBody ?? '', true)
     return
   }
-  await vault.saveBody(path, value)
+  pendingValue = null
+  // 快照必须写在 await 之前:beforeunload 不等任何 Promise,这是唯一能留住这次编辑的时机。
+  // 写成功后由 clearPendingSave 按内容比对清掉(见 core/editor/pending-save.ts)。
+  snapshotPendingSave(path, value)
+  try {
+    await vault.saveBody(path, value)
+  } catch (err) {
+    // 落盘失败:把正文放回 pendingValue,下一次输入/换文/页面隐藏都会重试;
+    // 快照也留着,即便这一轮再没机会重试,下次启动仍能回灌。
+    pendingValue = body
+    sync.notify('error', `保存失败: ${err instanceof Error ? err.message : String(err)}`)
+    return
+  }
+  clearPendingSave(path, value)
   sync.schedulePush()
 }
 

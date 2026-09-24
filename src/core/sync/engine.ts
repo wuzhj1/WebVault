@@ -528,16 +528,28 @@ async function settle(batch: PushJob[]): Promise<void> {
 /**
  * 把无法合并的远端文本另存为 `<标题>.conflict-<时间戳>.md` 同目录副本，并登记为一篇
  * 全新的脏笔记（dirty: 1），随本轮推送一起上传，保证远端版本在仓库里留痕。
- * 时间戳按秒递增最多试 50 次以避开重名（OPFS 与索引双查重）。
+ * 时间戳按秒递增最多试 50 次以避开重名（OPFS 与索引双查重）；50 次全撞上时退回
+ * `-2`、`-3`… 序号后缀继续找 —— 无论如何都不覆盖已有的冲突副本。
  */
 async function writeConflictCopy(path: string, remoteText: string): Promise<string> {
   const dir = dirOf(path)
   const title = titleOf(path)
+  /** 已确认空闲的候选路径；保持空串即还没找到，两条查找循环都以它为终止条件。 */
   let candidate = ''
-  for (let i = 0; i < 50; i++) {
+  const taken = async (p: string): Promise<boolean> =>
+    (await opfs.existsNote(p)) || (await db.notes.get(p)) !== undefined
+
+  for (let i = 0; i < 50 && candidate === ''; i++) {
     const name = `${title}.conflict-${conflictStamp(new Date(Date.now() + i * 1000))}.md`
-    candidate = normalizePath(dir === '' ? name : `${dir}/${name}`)
-    if (!(await opfs.existsNote(candidate)) && !(await db.notes.get(candidate))) break
+    const p = normalizePath(dir === '' ? name : `${dir}/${name}`)
+    if (!(await taken(p))) candidate = p
+  }
+  // 兜底：50 个秒级时间戳都被占用（同一秒内堆出 50 个副本才可能发生）。序号后缀与时间戳
+  // 后缀的形状互不相交，名字空间不会撞，一直试到真空闲为止。
+  for (let n = 2; candidate === ''; n++) {
+    const name = `${title}.conflict-${conflictStamp()}-${n}.md`
+    const p = normalizePath(dir === '' ? name : `${dir}/${name}`)
+    if (!(await taken(p))) candidate = p
   }
   await opfs.writeNote(candidate, remoteText)
   const sha = await gitBlobSha(remoteText)

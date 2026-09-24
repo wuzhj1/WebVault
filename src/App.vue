@@ -2,7 +2,7 @@
 /**
  * 根组件：应用骨架与全局协调。
  *
- * 职责：启动时按序初始化各 Pinia store（vault → 索引 → UI 设置 → 同步）；管理左右侧栏在
+ * 职责：启动时按序初始化各 Pinia store（vault → 回灌未落盘编辑 → 启动定位 → UI 设置 → 同步）；管理左右侧栏在
  * 宽屏（折叠面板）与窄屏（互斥抽屉）下的显隐；用单一 overlay 状态保证同一时刻只挂载一个
  * 全屏浮层（搜索 / 图谱 / 设置 / 链接选择）；注册全局快捷键，并在页面隐藏或关闭前强制
  * 编辑器落盘，避免防抖窗口内的输入丢失。所有"打开笔记"的请求也统一经由这里分发。
@@ -13,7 +13,10 @@ import Notices from './components/Notices.vue'
 import RightPanel from './components/RightPanel.vue'
 import SideBar from './components/SideBar.vue'
 import TopBar from './components/TopBar.vue'
+import { getSetting } from './core/db.ts'
+import { dropPendingSave, readPendingSave } from './core/editor/pending-save.ts'
 import { bindingOfEvent, hasMod, isTypingTarget } from './core/hotkeys.ts'
+import { titleOf } from './core/vault/paths.ts'
 import { useSyncStore } from './stores/sync.ts'
 import { useUiStore, type ShortcutId } from './stores/ui.ts'
 import { useVaultStore } from './stores/vault.ts'
@@ -161,6 +164,41 @@ function onVisibility(): void {
   if (document.visibilityState === 'hidden') flush()
 }
 
+/**
+ * 回灌上次没来得及写进 OPFS 的编辑：`beforeunload` 不等异步 Promise，防抖窗口内直接关标签页
+ * 只能靠 localStorage 快照兜底（见 core/editor/pending-save.ts）。
+ * 必须赶在启动定位之前 —— 定位一改 activePath，编辑器就按库里的正文渲染了。
+ * 不用 schedulePush：settings 还没 load，schedulePush 会直接 no-op；
+ * 随后 sync.init() 的首轮静默 syncNow 会把这条 dirty 一起带走。
+ */
+async function recoverPendingSave(): Promise<void> {
+  const pending = readPendingSave()
+  if (!pending) return
+  // 先丢快照再回灌：坏路径或写失败时，不能让它每轮启动都重试同一条。
+  dropPendingSave()
+  const meta = vault.byPath.get(pending.path)
+  // 笔记已删或只剩墓碑时没有合法写入目标，直接丢弃这次恢复。
+  if (!meta || meta.removedLocal) return
+  try {
+    await vault.saveBody(pending.path, pending.value)
+    sync.notify('info', `已恢复上次未保存的编辑「${titleOf(pending.path)}」`)
+  } catch (err) {
+    sync.notify('error', `恢复未保存的编辑失败: ${err instanceof Error ? err.message : String(err)}`)
+  }
+}
+
+/**
+ * 启动定位：回到上次打开的那篇（`last-open-path` 由 openNote 防抖写入）。
+ * 路径已失效（笔记被删 / 只剩墓碑）就停在空态页，不报错也不清键。
+ */
+async function locateLastNote(): Promise<void> {
+  const path = await getSetting<string | null>('last-open-path', null)
+  if (!path) return
+  const meta = vault.byPath.get(path)
+  if (!meta || meta.removedLocal) return
+  await openNote(path)
+}
+
 onMounted(async () => {
   if (window.innerWidth < 1200) rightOpen.value = false
   syncDrawerState()
@@ -170,9 +208,12 @@ onMounted(async () => {
   document.addEventListener('visibilitychange', onVisibility)
 
   // 启动顺序有意为之：vault 初始化失败时置 fatal 并短路整个界面；
-  // 索引在后台预热（不 await），用户先看到界面，随后才做启动定位与同步。
+  // 索引在后台预热（不 await），用户先看到界面，随后才做回灌、启动定位与同步。
+  // 回灌与定位都排在 ui.load() 之前：openNote 会 addRecent，load 那边已按「合并」处理。
   await vault.init()
   if (vault.fatal) return
+  await recoverPendingSave()
+  await locateLastNote()
   await ui.load()
   await sync.init()
   startupDone.value = true
