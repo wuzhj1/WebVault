@@ -1,30 +1,33 @@
 <script setup lang="ts">
 /**
- * 递归文件树:一列 TreeNode 渲染成「目录行 + 嵌套子树」或「笔记行」。
+ * 虚拟滚动文件树：把节点列先展平成「可见行」，再按滚动位置只渲染视口内的那一段。
  *
- * props:`nodes` 是本层节点数组;`depth` 从 0 起,只用来算缩进(px 值随层数线性增长),不参与逻辑。
- * emits:`open(path)` 请求打开某篇笔记;`action(path, event)` 请求弹出该笔记的 ⋯ 操作菜单,
- *       把原始 MouseEvent 一起抛出去,是因为菜单位置要由调用方按点击点来定。
+ * 相比旧的递归渲染（每层一个实例、子层靠 v-if 挂卸），大库（数千文件）不再一次性建出全部 DOM，
+ * 常驻行数 ≈ 视口行数 + 2×OVERSCAN，与库大小无关；折叠、过滤切换也只重算一次展平。
+ *
+ * props:`nodes` 是过滤/排序后的根节点列;`depth` 不再存在——层级完全体现在 FlatRow.depth 的缩进里。
+ * emits:`open(path)` 打开某篇笔记;`action(path, event)` 弹出 ⋯ 操作菜单(带原始 MouseEvent 定位)。
  * 依赖:useUiStore 的 `collapsedDirs`(哪些目录收起)、useVaultStore 的 `byPath`/`activePath`。
  *
  * 关键约束:
- * - 递归靠 SFC 文件名即组件名(FileTree.vue)自引用实现,没有 import 自己 —— 重命名文件会静默断掉整棵子树。
- * - 折叠状态绝不能存在本组件里:每层是一个独立实例,只有放在持久化的 ui store 中,深层目录才能在刷新后保持收起。
- * - 子层的 open/action 必须逐层 re-emit(见模板里的箭头函数转发),否则冒泡不到 SideBar。
+ * - 行高必须恒定:窗口切片全靠 ROW_H,故 CSS 里 `.row` 显式写死同一高度,两处必须同步改。
+ * - 滚动容器不是自己:树与上下的提示行共用 SideBar 侧的滚动祖先,挂载时向上探测
+ *   (overflow-y 为 auto/scroll),窗口用 ul 的上下 padding 占位——总高度不变,滚动条与
+ *   全量渲染完全一致,提示行照常随内容滚动;探测不到时退回全量渲染,宁可慢不可缺行。
+ * - 折叠状态仍在 ui store(跨层级、跨会话持久);展平是纯派生,没有也不允许有副作用。
  */
+import { computed, onBeforeUnmount, onMounted, ref, shallowRef } from 'vue'
 import type { TreeNode } from '@/stores/vault.ts'
 import { useUiStore } from '@/stores/ui.ts'
 import { useVaultStore } from '@/stores/vault.ts'
 
-/** depth 有默认值所以走 withDefaults;nodes 必填,渲染以 path 为 key,因此同层内 path 必须唯一。 */
 const props = withDefaults(
   defineProps<{
     nodes: TreeNode[]
-    depth?: number
     /** 过滤态：true 时无视 ui.collapsedDirs 强制展开所有目录——命中藏在收起的目录里等于没找到。 */
     expandAll?: boolean
   }>(),
-  { depth: 0, expandAll: false },
+  { expandAll: false },
 )
 /** action 带出 MouseEvent:调用方需要事件对象才能把操作菜单定位到点击处。 */
 const emit = defineEmits<{
@@ -36,7 +39,22 @@ const emit = defineEmits<{
 const ui = useUiStore()
 const vault = useVaultStore()
 
-/** 收起/展开某目录。状态在 ui store(持久化 + 跨层级共享),这里只是转发一下便于模板少写一层。 */
+/** 单行高度(px):窗口计算的唯一尺寸来源,必须与 CSS `.row { height }` 一致。 */
+const ROW_H = 24
+/** 视口上下各多渲染的行数:滚动余量;也让滚动祖先里位于树之外的少量内容(提示行)的偏移被吸收。 */
+const OVERSCAN = 8
+
+/** 展平后的一行;depth 只用来算缩进,不含任何逻辑。 */
+interface FlatRow {
+  kind: 'dir' | 'note'
+  path: string
+  name: string
+  /** 目录的直接子项数;笔记行为 undefined。 */
+  count?: number
+  depth: number
+}
+
+/** 收起/展开某目录。状态在 ui store(整套替换 Set 触发本组件的展平重算)。 */
 function toggle(path: string): void {
   ui.toggle(path)
 }
@@ -45,23 +63,111 @@ function toggle(path: string): void {
 function meta(path: string) {
   return vault.byPath.get(path)
 }
+
+/** 可见行:与旧递归渲染的可见结果一一对应(收起目录整棵跳过,expandAll 强制展开)。 */
+const rows = computed<FlatRow[]>(() => {
+  const out: FlatRow[] = []
+  const walk = (list: TreeNode[], depth: number): void => {
+    for (const node of list) {
+      if (node.kind === 'dir') {
+        out.push({ kind: 'dir', path: node.path, name: node.name, count: node.children.length, depth })
+        if (props.expandAll || !ui.collapsedDirs.has(node.path)) walk(node.children, depth + 1)
+      } else {
+        out.push({ kind: 'note', path: node.path, name: node.name, depth })
+      }
+    }
+  }
+  walk(props.nodes, 0)
+  return out
+})
+
+const rootEl = ref<HTMLElement | null>(null)
+/** 是否停留在窗口模式;挂载后探测不到滚动祖先就置假,退回全量渲染(缺行比慢更糟)。 */
+const virtual = shallowRef(true)
+/** 滚动祖先的纵向位置与高度:窗口切片的输入。 */
+const scrollTop = shallowRef(0)
+const viewportH = shallowRef(640)
+
+let scroller: HTMLElement | null = null
+let observer: ResizeObserver | null = null
+
+function onScroll(): void {
+  scrollTop.value = scroller?.scrollTop ?? 0
+}
+
+function onResize(): void {
+  if (scroller) viewportH.value = scroller.clientHeight
+}
+
+/** 向上找最近的纵向可滚动祖先;窗口必须相对它计算,不能假设自己就是滚动容器。 */
+function findScroller(el: HTMLElement | null): HTMLElement | null {
+  for (let p = el?.parentElement ?? null; p; p = p.parentElement) {
+    const overflowY = getComputedStyle(p).overflowY
+    if (overflowY === 'auto' || overflowY === 'scroll') return p
+  }
+  return null
+}
+
+onMounted(() => {
+  scroller = findScroller(rootEl.value)
+  if (!scroller) {
+    virtual.value = false
+    return
+  }
+  viewportH.value = scroller.clientHeight
+  scrollTop.value = scroller.scrollTop
+  scroller.addEventListener('scroll', onScroll, { passive: true })
+  if (typeof ResizeObserver !== 'undefined') {
+    observer = new ResizeObserver(onResize)
+    observer.observe(scroller)
+  }
+})
+
+onBeforeUnmount(() => {
+  scroller?.removeEventListener('scroll', onScroll)
+  observer?.disconnect()
+  observer = null
+  scroller = null
+})
+
+/**
+ * 窗口切片。上下 padding = 窗口外行的占位,ul 的总高度恒等于 rows.length × ROW_H,
+ * 滚动条比例与全量渲染一致;起止都夹进 [0, rows.length],折叠后残留的深 scrollTop 不会切出负区间。
+ */
+const view = computed(() => {
+  const all = rows.value
+  if (!virtual.value) return { rows: all, padTop: 0, padBottom: 0 }
+  const from = Math.floor(scrollTop.value / ROW_H) - OVERSCAN
+  const to = Math.ceil((scrollTop.value + viewportH.value) / ROW_H) + OVERSCAN
+  const start = Math.min(all.length, Math.max(0, from))
+  const end = Math.min(all.length, Math.max(start, to))
+  return {
+    rows: all.slice(start, end),
+    padTop: start * ROW_H,
+    padBottom: (all.length - end) * ROW_H,
+  }
+})
 </script>
 
 <template>
-  <!-- 每层一个列表：根层不加左缩进，子层整体左移 10px，再与行内 depth 步长叠加出最终缩进 -->
-  <ul class="tree" :style="{ paddingLeft: props.depth === 0 ? '0' : '10px' }">
-    <li v-for="node in props.nodes" :key="node.path" class="tree__item">
-      <template v-if="node.kind === 'dir'">
+  <!-- 上下 padding 占位:窗口外行数 × 行高,ul 高度恒定,滚动条与全量渲染完全一致 -->
+  <ul
+    ref="rootEl"
+    class="tree"
+    :style="{ paddingTop: `${view.padTop}px`, paddingBottom: `${view.padBottom}px` }"
+  >
+    <li v-for="row in view.rows" :key="row.path" class="tree__item">
+      <template v-if="row.kind === 'dir'">
         <!-- 目录行：整行点击切换折叠，右侧数字是直接子项数；
-             缩进 = 6 + 2×depth —— 小步长是因为大头已由子 ul 的 10px 承担，两套叠加避免双重放大 -->
+             缩进 6+12×depth = 旧版 (6+2×depth) 行内步长 + 嵌套 ul 每层 10px 的合并 -->
         <button
           class="row row--dir"
-          :style="{ paddingLeft: `${6 + props.depth * 2}px` }"
-          @click="toggle(node.path)"
+          :style="{ paddingLeft: `${6 + row.depth * 12}px` }"
+          @click="toggle(row.path)"
         >
           <svg
             class="chevron"
-            :class="{ 'chevron--open': props.expandAll || !ui.collapsedDirs.has(node.path) }"
+            :class="{ 'chevron--open': props.expandAll || !ui.collapsedDirs.has(row.path) }"
             viewBox="0 0 16 16"
             width="12"
             height="12"
@@ -69,44 +175,34 @@ function meta(path: string) {
           >
             <path d="M6 3.5 L10.5 8 L6 12.5" fill="none" stroke="currentColor" stroke-width="1.6" />
           </svg>
-          <span class="row__name">{{ node.name }}</span>
-          <span class="row__count">{{ node.children.length }}</span>
+          <span class="row__name">{{ row.name }}</span>
+          <span class="row__count">{{ row.count }}</span>
         </button>
-        <!-- 自引用递归:收起时整棵子树 v-if 卸载(不留 DOM);子层事件必须箭头函数逐层 re-emit 才冒泡到 SideBar。
-             expandAll 同步下传:过滤时整棵树都得展开,否则命中会藏在某个收起的目录里 -->
-        <FileTree
-          v-if="props.expandAll || !ui.collapsedDirs.has(node.path)"
-          :nodes="node.children"
-          :depth="props.depth + 1"
-          :expand-all="props.expandAll"
-          @open="(p) => emit('open', p)"
-          @action="(p, ev) => emit('action', p, ev)"
-        />
       </template>
 
       <template v-else>
-        <!-- 缩进 = 20 + 12×depth：笔记行没有 chevron，用更大的固定步长直接画出层级 -->
+        <!-- 缩进 20+22×depth = 旧版 (20+12×depth) + 每层 10px；笔记行没有 chevron，步长更大直接画出层级 -->
         <!-- 用 div + role="button" + tabindex 而不是 <button>:行内还要嵌 ⋯ 操作按钮,button 不能套 button -->
         <div
           class="row row--note"
-          :class="{ 'row--active': vault.activePath === node.path }"
-          :style="{ paddingLeft: `${20 + props.depth * 12}px` }"
+          :class="{ 'row--active': vault.activePath === row.path }"
+          :style="{ paddingLeft: `${20 + row.depth * 22}px` }"
           role="button"
           tabindex="0"
-          @click="emit('open', node.path)"
-          @keydown.enter.prevent="emit('open', node.path)"
-          @keydown.space.prevent="emit('open', node.path)"
+          @click="emit('open', row.path)"
+          @keydown.enter.prevent="emit('open', row.path)"
+          @keydown.space.prevent="emit('open', row.path)"
         >
-          <span class="row__name">{{ node.name }}</span>
+          <span class="row__name">{{ row.name }}</span>
           <!-- 角标：实心点 = 有未上传的本地修改；云朵 = 正文尚未下载到本地 -->
           <span class="row__badges">
             <span
-              v-if="meta(node.path)?.dirty"
+              v-if="meta(row.path)?.dirty"
               class="badge badge--dirty"
               title="有未上传的本地修改"
             ></span>
             <svg
-              v-if="meta(node.path) && !meta(node.path)!.cached"
+              v-if="meta(row.path) && !meta(row.path)!.cached"
               class="badge badge--cloud"
               viewBox="0 0 16 16"
               width="12"
@@ -125,7 +221,7 @@ function meta(path: string) {
           <button
             class="row__more"
             aria-label="笔记操作"
-            @click.stop="emit('action', node.path, $event)"
+            @click.stop="emit('action', row.path, $event)"
           >
             ⋯
           </button>
@@ -152,8 +248,11 @@ function meta(path: string) {
   align-items: center;
   gap: 5px;
   width: 100%;
-  padding-top: 3px;
-  padding-bottom: 3px;
+  /* 24px 是脚本里 ROW_H 的镜像:窗口切片全靠行高恒定,两处必须同步改 */
+  height: 24px;
+  box-sizing: border-box;
+  padding-top: 0;
+  padding-bottom: 0;
   padding-right: 6px;
   border-radius: 6px;
   text-align: left;
