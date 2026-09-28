@@ -3,7 +3,8 @@
  * - buildResolver：墓碑排除、basename 桶按路径长度排序、zid 冲突取字典序最小路径、墓碑上的卡不进索引；
  * - resolveTarget：固定优先级 精确 → 忽略大小写 → 省扩展名 → 剥前导斜杠 → basename 最短 → zid；
  *   附件与悬链一律 null；`[[202609151423]]` 这类目标先当 basename 找真笔记，找不到才落进 id 索引；
- * - preferredLinkText / validateNewPath：重命名改链的写法与改名目标校验。
+ * - preferredLinkText / validateNewPath：重命名改链的写法与改名目标校验；
+ * - resolverEquivalent：漂移扫描的跳过判定（路径集与 ID 映射逐一相等才算等价）。
  *
  * 运行：npm run verify（第 11 个套件；裸 node 直跑本文件）。全部通过退出码 0，否则 1。
  */
@@ -13,6 +14,7 @@ import {
   isAttachmentTarget,
   preferredLinkText,
   resolveTarget,
+  resolverEquivalent,
   validateNewPath,
 } from '../src/core/index/resolve.ts'
 
@@ -120,6 +122,42 @@ check('valid new path gets extension', validateNewPath(r, 'new'), { ok: true, pa
 check('existing path rejected', validateNewPath(r, 'Redis.md'), { ok: false, reason: '已存在同名笔记: Redis.md' })
 check('unsafe path rejected', validateNewPath(r, '../evil'), { ok: false, reason: '路径不合法(不能为空、不能包含 `..`)' })
 check('empty candidate rejected', validateNewPath(r, ''), { ok: false, reason: '路径不合法(不能为空、不能包含 `..`)' })
+
+// ---- resolverEquivalent：漂移扫描的跳过判定（路径集 + ID 映射逐一相等才等价） ----
+const r2 = buildResolver(notes, cards)
+ok('identical rebuild is equivalent', resolverEquivalent(r, r2))
+ok('resolver equals itself', resolverEquivalent(r, r))
+const added = buildResolver([...notes, note('notes/New.md')], cards)
+ok('added path breaks equivalence', !resolverEquivalent(r, added))
+const removed = buildResolver(
+  notes.filter((n) => n.path !== 'notes/Untitled.md'),
+  cards,
+)
+ok('removed path breaks equivalence', !resolverEquivalent(r, removed))
+// 同数量但成员不同：尺寸相等绝不能当等价——这正是集合成员逐一比对的意义。
+const swapped = buildResolver(
+  notes.map((n) => (n.path === 'notes/Untitled.md' ? note('notes/Other.md') : n)),
+  cards,
+)
+ok('same-size different membership breaks equivalence', !resolverEquivalent(r, swapped))
+// 墓碑翻转：路径从集合里消失，指向它的链接可能改指 → 必须重扫。
+const tombstoned = buildResolver(
+  notes.map((n) => (n.path === 'notes/Untitled.md' ? { ...n, removedLocal: 1 } : n)),
+  cards,
+)
+ok('tombstone flip breaks equivalence', !resolverEquivalent(r, tombstoned))
+// zid 变化：byZid 映射不同 → `[[id]]` 链接可能改指。
+const zidChanged = buildResolver(
+  notes,
+  cards.map((c) => (c.path === 'cards/b.md' ? { ...c, zid: '202601010001' } : c)),
+)
+ok('zid change breaks equivalence', !resolverEquivalent(r, zidChanged))
+// 无关字段（dirty/mtime/size）变化不进入 resolver → 依然等价。
+const dirtyCopy = buildResolver(
+  notes.map((n) => ({ ...n, dirty: 1, mtime: 123, size: 999 })),
+  cards,
+)
+ok('unrelated metadata keeps equivalence', resolverEquivalent(r, dirtyCopy))
 
 console.log(`${fail === 0 ? 'OK  ' : 'FAIL'} verify-resolve: ${pass} passed, ${fail} failed`)
 if (fail > 0) process.exit(1)

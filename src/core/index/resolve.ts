@@ -95,6 +95,22 @@ export function isAttachmentTarget(target: string): boolean {
 }
 
 /**
+ * 两个 resolver 是否在**任何**目标上都给出相同答案——漂移扫描用它判断「自上次扫描以来
+ * 有没有可能出现链接改指」，相等即可整段跳过。
+ *
+ * `byExactPath` / `byLowerPath` / `byLowerPathNoExt` / `byBasename`（含桶内排序）全部由
+ * `paths` 集合确定性派生（见 `buildResolver`），因此只需比较两处：路径集合与 ID 映射。
+ * 任一处有差异，就可能存在（但不必然出现）目标改指，调用方必须照旧全量扫描。
+ */
+export function resolverEquivalent(a: Resolver, b: Resolver): boolean {
+  if (a.paths.size !== b.paths.size) return false
+  for (const p of a.paths) if (!b.paths.has(p)) return false
+  if (a.byZid.size !== b.byZid.size) return false
+  for (const [zid, path] of a.byZid) if (b.byZid.get(zid) !== path) return false
+  return true
+}
+
+/**
  * 按固定优先级解析目标，返回笔记路径；解析不到（悬链）返回 null：
  * 1. 精确路径（先剥掉 `./` 前缀）；
  * 2. 忽略大小写的完整路径；

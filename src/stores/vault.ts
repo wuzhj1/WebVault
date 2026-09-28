@@ -31,6 +31,7 @@ import {
   isAttachmentTarget,
   preferredLinkText,
   resolveTarget,
+  resolverEquivalent,
   type Resolver,
 } from '@/core/index/resolve.ts'
 import { cardFromBody, frontmatterTagRows, isZid } from '@/core/zettel/card.ts'
@@ -119,6 +120,20 @@ export const useVaultStore = defineStore('vault', () => {
   const unresolvedTargets = shallowRef<string[]>([])
   /** 全库标签及计数，按次数倒序，供标签面板使用。 */
   const allTags = shallowRef<{ tag: string; count: number }[]>([])
+  /**
+   * 未解析目标 → 出现次数的**内存镜像**，与 `db.links` 始终同步：
+   * `reindexContent` 在每次正文写入时按差额调整，`refreshDerived` 全量重建收口。
+   * 有了它，保存路径刷新标签/未解析面板不必每次全表读 links/tags。
+   */
+  const unresolvedCount = new Map<string, number>()
+  /** 标签 → 出现次数的内存镜像，与 `db.tags` 同步维护，维护点同上。 */
+  const tagCount = new Map<string, number>()
+  /**
+   * 上一次漂移全量扫描完成时的 resolver。两次扫描之间它保持等价（`resolverEquivalent`），
+   * 任何链接的 targetPath 都不可能改指，`refreshDerived` 即可跳过整段扫描与全表读。
+   * null = 还没扫过（含清库），强制下一次全量。
+   */
+  let scannedResolver: Resolver | null = null
   /** 从 frontmatter 镜像出的卡片索引；纯派生数据，随时可从 OPFS 重建。 */
   const cards = shallowRef<CardRow[]>([])
   /** 同步引擎改写当前打开笔记的正文时自增，编辑器据此重新加载内容。 */
@@ -267,16 +282,57 @@ export const useVaultStore = defineStore('vault', () => {
       await db.links.clear()
       await db.tags.clear()
       await db.cards.clear()
+      // 镜像计数与扫描基线一并作废：下面的 refreshDerived 会强制全量重建。
+      unresolvedCount.clear()
+      tagCount.clear()
+      scannedResolver = null
     }
 
     notes.value = await db.notes.toArray()
     await refreshDerived()
   }
 
+  /** 某行链接当前是否算「未解析」——空目标与附件目标不计，与漂移扫描后的汇总同一判据。 */
+  function unresolvedRow(l: { target: string; targetPath: string | null }): boolean {
+    return l.targetPath === null && l.target !== '' && !isAttachmentTarget(l.target)
+  }
+
+  /** 镜像计数增减；减到 0 不落表，返回「表是否真的变了」（决定要不要重排 ref）。 */
+  function bumpCount(map: Map<string, number>, key: string, delta: number): boolean {
+    const prev = map.get(key) ?? 0
+    const next = prev + delta
+    if (next > 0) {
+      map.set(key, next)
+      return next !== prev
+    }
+    if (prev !== 0) {
+      map.delete(key)
+      return true
+    }
+    return false
+  }
+
+  /** unresolvedCount → unresolvedTargets（按次数倒序）。 */
+  function rebuildUnresolvedRef(): void {
+    unresolvedTargets.value = [...unresolvedCount.entries()]
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .map(([t]) => t)
+  }
+
+  /** tagCount → allTags（按次数倒序）。 */
+  function rebuildTagRef(): void {
+    allTags.value = [...tagCount.entries()]
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .map(([tag, count]) => ({ tag, count }))
+  }
+
   /**
    * 刷新全部派生状态，顺序有讲究：先清理卡片表并重载 cards——下面的 resolver 要重新解析所有链接，
    * 而 `[[id]]` 形式的链接只有在 id 索引到位后才能解析；随后修正链接 targetPath 漂移、
    * 汇总未解析目标、统计标签计数，最后刷新当前笔记的双链面板。
+   *
+   * 漂移部分按「自上次扫描以来 resolver 是否等价」增量跳过：等价意味着没有任何 target 可能改指，
+   * 两次扫描之间的计数差额已由 `reindexContent` 逐篇维护。不等价才全表读，且只回写真正漂了的行。
    */
   async function refreshDerived(): Promise<void> {
     // 必须先刷 cards：resolver 随后要重新解析所有链接，`[[id]]` 链接只有拿到 id 索引才解析得出。
@@ -288,33 +344,31 @@ export const useVaultStore = defineStore('vault', () => {
 
     const r = buildResolver(notes.value, cards.value)
 
-    const links = await db.links.toArray()
-    let drifted = false
-    for (const l of links) {
-      const resolved = resolveTarget(r, l.target)
-      if (resolved !== l.targetPath) {
-        l.targetPath = resolved
-        drifted = true
+    // 只有「从未扫过」或「与上次扫描时不等价」才需要动链接表：等价 ⇒ 任何 target 的答案
+    // 都不可能变 ⇒ 逐篇差额维护着的未解析计数也一定准，整段扫描（全表读 + 回写）可跳过。
+    if (scannedResolver === null || !resolverEquivalent(scannedResolver, r)) {
+      const links = await db.links.toArray()
+      const changed: LinkRow[] = []
+      unresolvedCount.clear()
+      for (const l of links) {
+        const resolved = resolveTarget(r, l.target)
+        if (resolved !== l.targetPath) {
+          l.targetPath = resolved
+          changed.push(l)
+        }
+        if (unresolvedRow(l)) bumpCount(unresolvedCount, l.target, 1)
       }
+      // 只回写真正漂了的行：原先一次漂移就把整张 links 表 bulkPut 回去。
+      if (changed.length > 0) await db.links.bulkPut(changed)
+      scannedResolver = r
+      rebuildUnresolvedRef()
     }
-    if (drifted) await db.links.bulkPut(links)
 
-    const unresolved = new Map<string, number>()
-    for (const l of links) {
-      if (l.targetPath === null && l.target !== '' && !isAttachmentTarget(l.target)) {
-        unresolved.set(l.target, (unresolved.get(l.target) ?? 0) + 1)
-      }
-    }
-    unresolvedTargets.value = [...unresolved.entries()]
-      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
-      .map(([t]) => t)
-
+    // 标签表小得多，且这里是权威自愈点（外部直写的兜底），每次照旧全量重建。
     const tags = await db.tags.toArray()
-    const counts = new Map<string, number>()
-    for (const t of tags) counts.set(t.tag, (counts.get(t.tag) ?? 0) + 1)
-    allTags.value = [...counts.entries()]
-      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
-      .map(([tag, count]) => ({ tag, count }))
+    tagCount.clear()
+    for (const t of tags) bumpCount(tagCount, t.tag, 1)
+    rebuildTagRef()
 
     await refreshActiveLinks()
   }
@@ -354,8 +408,9 @@ export const useVaultStore = defineStore('vault', () => {
   }
 
   /**
-   * 所有正文写入都要经过的漏斗，因此卡片索引的维护也只需放在这一处：
-   * 事务内删旧建新地重建该笔记的链接/标签行，并写入卡片。
+   * 所有正文写入都要经过的漏斗，因此卡片索引与两个计数镜像的维护也只需放在这一处：
+   * 事务内先读出该笔记的旧行、再删旧建新地重建链接/标签行并写入卡片；事务提交后按
+   * 新旧行的差额调整未解析/标签计数——保存路径由此不必全表读也能刷新侧栏两个面板。
    *
    * @returns 该笔记的永久 id 出现、变化或消失时为 true——其他笔记的 `[[id]]` 链接可能因此改指，
    * 只有全量漂移扫描（refreshDerived）能发现这种情况。
@@ -392,13 +447,32 @@ export const useVaultStore = defineStore('vault', () => {
     const card = cardFromBody(path, content, fm, tags)
     const zidChanged = (cardByPath.value.get(path)?.zid ?? '') !== card.zid
 
+    let oldLinks: LinkRow[] = []
+    let oldTags: TagRow[] = []
     await db.transaction('rw', db.links, db.tags, db.cards, async () => {
+      // 差额的「旧值」必须与删除在同一事务里读出：库走到哪，内存计数就跟到哪。
+      oldLinks = await db.links.where('src').equals(path).toArray()
+      oldTags = await db.tags.where('path').equals(path).toArray()
       await db.links.where('src').equals(path).delete()
       await db.tags.where('path').equals(path).delete()
       if (linkRows.length) await db.links.bulkAdd(linkRows)
       if (tagRows.length) await db.tags.bulkAdd(tagRows)
       await db.cards.put(card)
     })
+    // 事务提交后才动内存：中途抛出会直接跳过这里，镜像计数保持与库一致。
+    let linksTouched = false
+    for (const l of oldLinks) {
+      if (unresolvedRow(l)) linksTouched = bumpCount(unresolvedCount, l.target, -1) || linksTouched
+    }
+    for (const l of linkRows) {
+      if (unresolvedRow(l)) linksTouched = bumpCount(unresolvedCount, l.target, 1) || linksTouched
+    }
+    if (linksTouched) rebuildUnresolvedRef()
+    let tagsTouched = false
+    for (const t of oldTags) tagsTouched = bumpCount(tagCount, t.tag, -1) || tagsTouched
+    for (const t of tagRows) tagsTouched = bumpCount(tagCount, t.tag, 1) || tagsTouched
+    if (tagsTouched) rebuildTagRef()
+
     if (!opts?.deferCards) cards.value = [...cards.value.filter((c) => c.path !== path), card]
     return zidChanged
   }
@@ -464,9 +538,9 @@ export const useVaultStore = defineStore('vault', () => {
     const zidChanged = await reindexContent(path, content)
     // 只把这一条换进内存：原先每次保存都 db.notes.toArray() 全表重读，是一次多余的 O(n) IDB 往返。
     notes.value = replaceMeta(notes.value, meta)
-    // 刚出现的 id 会让其他笔记里的 `[[id]]` 链接首次解析成功，
-    // 而只有全量漂移扫描才会重写它们的 targetPath，故此时必须整套刷新。
-    if (activePath.value === path && !zidChanged) await refreshActiveLinks()
+    // 刚出现的 id、刚复活的墓碑都会让其他笔记里的链接改指，只有全量漂移扫描能发现 → 整套刷新；
+    // 普通保存只刷当前笔记的双链——未解析/标签计数已由 reindexContent 的差额同步维护。
+    if (activePath.value === path && !zidChanged && !prev?.removedLocal) await refreshActiveLinks()
     else await refreshDerived()
     return meta
   }
