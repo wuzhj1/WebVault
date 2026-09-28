@@ -219,6 +219,12 @@ async function load(): Promise<void> {
     }
   })
   byPath = index
+  // 节点数组换血后指针侧的下标全部作废：悬停/拖拽若还指着旧数组的下标，下一次 draw
+  // 就会拿 undefined 读属性把绘制打断（画布冻结在半帧），up 时也会读错节点。
+  hovered = null
+  dragging = null
+  panning = false
+  updateCard(null)
 
   const seen = new Set<string>()
   edges = []
@@ -384,7 +390,9 @@ function draw(): void {
    * 标题宽度按 11px 量一次后缓存在节点上（世界宽度 = 缓存值 / scale），免得每帧 measureText。
    */
   const labelFor = (i: number | null, hot: boolean): void => {
-    if (i === null) return
+    // 越界防御：激活笔记可能已删/被范围滤掉（取不到下标），hovered 也可能在重建后失效——
+    // 这里曾经拿 undefined 读 labelW，异常会把整个 draw 打断、循环不再续排，画布就冻住了。
+    if (i === null || i < 0 || i >= nodes.length) return
     const n = nodes[i]
     const size = 11 / scale
     if (n.labelW === 0) {
@@ -524,7 +532,12 @@ const cardStyle = computed(() => {
  * 未命中 → 进入平移。位移阈值 4px 在 move 中判定，用于区分"点击"与"拖动"。
  */
 function onPointerDown(event: PointerEvent): void {
-  canvas.value?.setPointerCapture(event.pointerId)
+  try {
+    canvas.value?.setPointerCapture(event.pointerId)
+  } catch {
+    // 捕获失败（合成事件没有活跃指针 / UA 已回收）只影响拖出画布后事件是否跟随，
+    // 不能让它打断按下流程——downX/moved/pick 全都排在它后面。
+  }
   downX = event.clientX
   downY = event.clientY
   moved = false
@@ -604,7 +617,11 @@ function onPointerUp(event: PointerEvent): void {
     emit('close')
   }
   panning = false
-  canvas.value?.releasePointerCapture(event.pointerId)
+  try {
+    canvas.value?.releasePointerCapture(event.pointerId)
+  } catch {
+    // 指针抬起/取消时 UA 可能已自动释放捕获，再释放会抛 NotFoundError——忽略即可。
+  }
 }
 
 /**
