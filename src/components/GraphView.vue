@@ -5,8 +5,10 @@
  * 数据来自 Dexie 的 links 表与 vault 笔记列表；requestAnimationFrame 循环每帧先做物理
  * 模拟（tick）再绘制（draw），温度 alpha 衰减到阈值后**整个循环停表**、画面保留最后一帧；
  * 指针移动 / 拖拽 / 缩放平移 / 主题切换 / 图重建各自调 wake() 续排，静止时零 CPU 开销。
- * 交互：拖动节点会固定它并唤醒模拟、拖空白平移、滚轮以光标为锚点缩放、点击节点请求打开
- * 对应笔记。坐标全部使用"世界坐标"，屏幕坐标只在指针事件里临时换算。
+ * 交互：拖动节点会固定它并唤醒模拟、拖空白平移、滚轮以光标为锚点缩放、悬停出信息卡
+ * （标题/路径/出入链数，HTML 浮层锚定节点屏幕坐标）、点击节点请求打开对应笔记。
+ * 工具条的「显示标题」默认常显全部节点的标签（热标签加粗压上层），大库嫌吵可随手关。
+ * 坐标全部使用"世界坐标"，屏幕坐标只在指针事件里临时换算。
  *
  * （孤儿卡筛选及其空心点画法已随卡片盒功能一并移除：图里现在只有「全局 / 只看邻居」一档。）
  */
@@ -28,13 +30,41 @@ const canvas = ref<HTMLCanvasElement | null>(null)
 const wrap = ref<HTMLElement | null>(null)
 /** 筛选：只看当前笔记的一跳邻居（无激活笔记时开关禁用）。 */
 const local = ref(false)
+/** 工具条：常显所有节点的标题（默认开；大库嫌吵可关，悬停/当前的高亮标签不受它影响）。 */
+const labels = ref(true)
 /** 头部统计：当前图里的节点数与去重后的边数。 */
 const stats = ref({ nodes: 0, edges: 0 })
+
+/**
+ * 悬停信息卡：指向某节点时展示的笔记档案，位置锚定该节点的屏幕坐标（跟随缩放平移重算）。
+ * 拖拽开始即隐藏——拖动时节点被钉在指针下，卡片跟着抖反而碍事。
+ */
+const card = ref<CardInfo | null>(null)
+
+/** 信息卡内容：身份（标题/路径/目录）+ 链路数（解释「这张图为什么长这样」，出链含未创建的目标）。 */
+interface CardInfo {
+  title: string
+  path: string
+  /** 所在目录；根目录下为空串，模板据此隐藏该行。 */
+  dir: string
+  out: number
+  in: number
+  /** 出链里指向「尚未创建的笔记」的条数——它们在图里没有对应节点，先说明才不会显得少线。 */
+  dangling: number
+  /** 卡片锚点：所指节点的屏幕坐标（容器内 CSS 像素）。 */
+  sx: number
+  sy: number
+  /** 靠近右/下边缘时向左/上展开，避免卡片被弹层裁掉。 */
+  flipX: boolean
+  flipY: boolean
+}
 
 /** 力导向图中的一个节点；位置/速度为世界坐标，非响应式，只被 rAF 循环读写。 */
 interface GNode {
   path: string
   title: string
+  /** 标题在 11px 字号下的宽度（CSS px）；0 = 尚未量过，首帧懒量一次后缓存，避免每帧 measureText。 */
+  labelW: number
   degree: number
   x: number
   y: number
@@ -42,6 +72,13 @@ interface GNode {
   vy: number
   /** 被用户拖住时固定，模拟阶段跳过对它的积分。 */
   fixed: boolean
+}
+
+/** 单篇笔记的链路档案；信息卡数据源，与图的范围筛选无关（悬空出链也算数）。 */
+interface LinkStat {
+  out: number
+  in: number
+  dangling: number
 }
 
 /** 边的平衡长度：弹簧力试图把两端拉到这个距离。 */
@@ -57,6 +94,8 @@ const CELL = 190
 let nodes: GNode[] = []
 let edges: [number, number][] = []
 let byPath = new Map<string, number>()
+/** 每篇笔记的链路档案：由 links 表在每次 load 时重建，供悬停信息卡查询。 */
+let linkStats = new Map<string, LinkStat>()
 /** 模拟温度：1 表示全力计算，每帧乘 0.985 衰减，低于 ALPHA_STOP 即停止模拟。 */
 let alpha = 1
 /** 收敛阈值：tick 停算、主循环停表用的是同一个数，两处判定必须一致。 */
@@ -130,6 +169,25 @@ async function load(): Promise<void> {
   const active = vault.activePath
   const scope = vault.notes.filter((n) => !n.removedLocal)
 
+  // 信息卡的链路档案：按整张 links 表统计，与下面的范围筛选无关——
+  // 出链包含 targetPath 为空的悬空链接（目标还没创建，图里没有对应节点，但账要算上）。
+  const profile = new Map<string, LinkStat>()
+  const bump = (path: string): LinkStat => {
+    let s = profile.get(path)
+    if (!s) {
+      s = { out: 0, in: 0, dangling: 0 }
+      profile.set(path, s)
+    }
+    return s
+  }
+  for (const r of rows) {
+    const from = bump(r.src)
+    from.out++
+    if (!r.targetPath) from.dangling++
+    else bump(r.targetPath).in++
+  }
+  linkStats = profile
+
   let keep: Set<string> | null = null
   if (local.value && active) {
     keep = new Set<string>([active])
@@ -151,6 +209,7 @@ async function load(): Promise<void> {
     return {
       path: n.path,
       title: n.title || titleOf(n.path),
+      labelW: 0,
       degree: 0,
       x: old?.x ?? Math.cos(angle) * radius + (Math.random() - 0.5) * 20,
       y: old?.y ?? Math.sin(angle) * radius + (Math.random() - 0.5) * 20,
@@ -319,24 +378,41 @@ function draw(): void {
     ctx.fill()
   }
 
-  /** 在节点上方绘制带底色的标题，字体与底框都按 scale 归一，保证缩放后视觉尺寸不变。 */
-  const labelFor = (i: number | null): void => {
+  /**
+   * 在节点上方绘制带底色的标题：字体与底框都按 scale 归一，保证缩放后视觉尺寸不变。
+   * `hot`（当前/悬停）画满不透明并加粗；普通标签半透明，压在热标签下层。
+   * 标题宽度按 11px 量一次后缓存在节点上（世界宽度 = 缓存值 / scale），免得每帧 measureText。
+   */
+  const labelFor = (i: number | null, hot: boolean): void => {
     if (i === null) return
     const n = nodes[i]
     const size = 11 / scale
-    ctx.font = `${size}px system-ui, sans-serif`
+    if (n.labelW === 0) {
+      ctx.font = '11px system-ui, sans-serif'
+      n.labelW = ctx.measureText(n.title).width || 1
+    }
+    ctx.font = `${hot ? '600 ' : ''}${size}px system-ui, sans-serif`
     ctx.textAlign = 'center'
-    ctx.globalAlpha = 0.78
+    ctx.globalAlpha = hot ? 0.95 : 0.6
     ctx.fillStyle = c.labelBg
-    const w = ctx.measureText(n.title).width
+    const w = n.labelW / scale
     const r = (2.6 + Math.sqrt(n.degree) * 1.5) / Math.max(scale, 0.35)
     ctx.fillRect(n.x - w / 2 - 4 / scale, n.y - r - size - 5 / scale, w + 8 / scale, size + 6 / scale)
-    ctx.globalAlpha = 1
+    ctx.globalAlpha = hot ? 1 : 0.85
     ctx.fillStyle = c.label
     ctx.fillText(n.title, n.x, n.y - r - 5 / scale)
   }
-  labelFor(activeIndex)
-  labelFor(hovered)
+  // 「显示标题」常显全部节点；热标签最后画，保证盖在普通标签上层。
+  if (labels.value) {
+    for (let i = 0; i < nodes.length; i++) {
+      if (i === activeIndex || i === hovered) continue
+      labelFor(i, false)
+    }
+  }
+  labelFor(activeIndex, true)
+  labelFor(hovered, true)
+  // 标签把 globalAlpha 留在了半透明档，复位后再交还下一帧。
+  ctx.globalAlpha = 1
 }
 
 /**
@@ -370,6 +446,8 @@ function resize(): void {
   c.style.width = `${width}px`
   c.style.height = `${height}px`
   // 重设画布物理像素会清空画布，必须立刻补一帧，否则停表期间会留一块空白。
+  // 画布尺寸变了，信息卡的贴边判定也得按新尺寸重算。
+  updateCard(hovered)
   wake()
 }
 
@@ -402,6 +480,46 @@ function pick(event: PointerEvent): number | null {
 }
 
 /**
+ * 更新悬停信息卡：锚定所指节点的屏幕坐标（与 draw 的视图变换同一套换算），
+ * 右/下余量不足时翻到左/上，避免卡片被弹层边缘裁掉；index 为 null 即收起。
+ * 缩放、平移、重置、拖拽结束、指针离开画布都要重调——卡片位置依赖视图变换。
+ */
+function updateCard(index: number | null): void {
+  if (index === null) {
+    card.value = null
+    return
+  }
+  const n = nodes[index]
+  const sx = n.x * scale + tx + width / 2
+  const sy = n.y * scale + ty + height / 2
+  const s = linkStats.get(n.path) ?? { out: 0, in: 0, dangling: 0 }
+  card.value = {
+    title: n.title,
+    path: n.path,
+    dir: n.path.includes('/') ? n.path.slice(0, n.path.lastIndexOf('/')) : '',
+    out: s.out,
+    in: s.in,
+    dangling: s.dangling,
+    sx,
+    sy,
+    flipX: sx > width - 250,
+    flipY: sy > height - 130,
+  }
+}
+
+/** 信息卡定位样式：默认在节点右下，贴右缘改右锚、贴下缘整体上移（transform 上翻）。 */
+const cardStyle = computed(() => {
+  const info = card.value
+  if (!info) return {}
+  const style: Record<string, string> = info.flipX
+    ? { right: `${Math.max(width - info.sx + 14, 8)}px` }
+    : { left: `${info.sx + 14}px` }
+  style.top = info.flipY ? `${info.sy - 14}px` : `${info.sy + 14}px`
+  if (info.flipY) style.transform = 'translateY(-100%)'
+  return style
+})
+
+/**
  * 按下：命中节点 → 进入拖拽并固定该节点，同时把 alpha 抬到至少 0.35 唤醒模拟；
  * 未命中 → 进入平移。位移阈值 4px 在 move 中判定，用于区分"点击"与"拖动"。
  */
@@ -414,6 +532,8 @@ function onPointerDown(event: PointerEvent): void {
   if (hit !== null) {
     dragging = hit
     nodes[hit].fixed = true
+    // 拖拽中节点钉在指针下，信息卡跟着抖反而碍事，先收起、松手再回来。
+    updateCard(null)
     alpha = Math.max(alpha, 0.35)
     wake()
   } else {
@@ -442,6 +562,8 @@ function onPointerMove(event: PointerEvent): void {
     ty += event.clientY - downY
     downX = event.clientX
     downY = event.clientY
+    // 视图平移了，锚定节点屏幕坐标的信息卡要跟着挪。
+    updateCard(hovered)
     wake()
     return
   }
@@ -449,8 +571,17 @@ function onPointerMove(event: PointerEvent): void {
   // 高亮真的换了才补一帧：鼠标在静止的图上空扫不该持续重绘。
   if (hit !== hovered) {
     hovered = hit
+    updateCard(hit)
     wake()
   }
+}
+
+/** 指针离开画布：清掉悬停高亮与信息卡（否则停在最后一个节点上不走）。 */
+function onPointerLeave(): void {
+  if (hovered === null) return
+  hovered = null
+  updateCard(null)
+  wake()
 }
 
 /**
@@ -466,6 +597,8 @@ function onPointerUp(event: PointerEvent): void {
     }
     nodes[dragging].fixed = false
     dragging = null
+    // 松手后指针若还停在节点上，信息卡恢复显示。
+    updateCard(hovered)
   } else if (!moved && hovered !== null) {
     emit('open', nodes[hovered].path)
     emit('close')
@@ -486,6 +619,8 @@ function onWheel(event: WheelEvent): void {
   const after = toWorld(event)
   tx += (after.x - before.x) * scale
   ty += (after.y - before.y) * scale
+  // 缩放改变了「世界坐标 → 屏幕坐标」的映射，信息卡要跟着重锚。
+  updateCard(hovered)
   wake()
 }
 
@@ -497,6 +632,7 @@ function recenter(): void {
   scale = 1
   tx = 0
   ty = 0
+  updateCard(hovered)
   alpha = Math.max(alpha, 0.5)
   wake()
 }
@@ -514,6 +650,9 @@ watch(local, () => {
   void load()
 })
 
+// 「显示标题」只改绘制内容；静止时循环已停表，切换要自己补一帧。
+watch(labels, () => wake())
+
 onMounted(async () => {
   resize()
   // 容器尺寸变化（含弹层放大缩小）时重设画布；wheel 用 passive:false 以便 preventDefault。
@@ -523,6 +662,7 @@ onMounted(async () => {
   canvas.value?.addEventListener('pointermove', onPointerMove)
   canvas.value?.addEventListener('pointerup', onPointerUp)
   canvas.value?.addEventListener('pointercancel', onPointerUp)
+  canvas.value?.addEventListener('pointerleave', onPointerLeave)
   canvas.value?.addEventListener('wheel', onWheel, { passive: false })
   document.addEventListener('keydown', onKeydown)
   await load() // load 内部已经 wake，这里不必再排一次
@@ -548,18 +688,32 @@ onBeforeUnmount(() => {
             <input v-model="local" type="checkbox" :disabled="!hasActive" />
             <span>只看当前笔记的邻居</span>
           </label>
+          <label class="graph__toggle">
+            <input v-model="labels" type="checkbox" />
+            <span>显示标题</span>
+          </label>
           <span class="graph__stats">{{ stats.nodes }} 篇 · {{ stats.edges }} 条链接</span>
           <div class="graph__gap"></div>
           <button class="graph__btn" @click="recenter">重置视图</button>
           <button class="graph__close" aria-label="关闭" @click="emit('close')">×</button>
         </header>
 
-        <!-- 画布容器：提供 CSS 尺寸，空态与图例浮在其上 -->
+        <!-- 画布容器：提供 CSS 尺寸；空态、悬停信息卡与图例浮在其上 -->
         <div ref="wrap" class="graph__canvas">
           <canvas ref="canvas"></canvas>
           <p v-if="stats.nodes === 0" class="graph__empty">还没有笔记可以绘制。</p>
+          <!-- 悬停信息卡：HTML 浮层而非 canvas 绘制——文字随 DPI 锐化、样式直接走主题变量；
+               pointer-events:none 保证不挡画布的拖拽与点击 -->
+          <div v-if="card" class="graph__card" :style="cardStyle">
+            <strong class="graph__card-title">{{ card.title }}</strong>
+            <span class="graph__card-path">{{ card.path }}</span>
+            <span class="graph__card-meta">
+              出链 {{ card.out }}<template v-if="card.dangling > 0">({{ card.dangling }} 条未创建)</template> · 入链 {{ card.in }}
+            </span>
+            <span v-if="card.dir" class="graph__card-dir">目录:{{ card.dir }}</span>
+          </div>
           <p class="graph__legend">
-            拖动节点可调整位置 · 滚轮缩放 · 拖动空白处平移 · 点击节点打开笔记
+            拖动节点可调整位置 · 滚轮缩放 · 拖动空白处平移 · 点击节点打开笔记 · 悬停查看笔记信息
             <span class="dot dot--active"></span>当前笔记
             <span class="dot dot--hover"></span>鼠标所指
           </p>
@@ -696,6 +850,44 @@ onBeforeUnmount(() => {
   margin: 0;
   color: var(--text-muted);
   font-size: 13px;
+}
+
+/* —— 悬停信息卡：锚定节点屏幕坐标,不参与指针事件 —— */
+.graph__card {
+  position: absolute;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-width: 240px;
+  padding: 8px 10px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px var(--shadow-color);
+  pointer-events: none;
+}
+
+.graph__card-title {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.graph__card-path {
+  /* 路径可能很长:允许断行,否则会把卡片撑出弹层 */
+  font-size: 11px;
+  color: var(--text-muted);
+  word-break: break-all;
+}
+
+.graph__card-meta {
+  font-size: 12px;
+  color: var(--text);
+}
+
+.graph__card-dir {
+  font-size: 11px;
+  color: var(--text-muted);
 }
 
 /* —— 底部图例与节点状态色标 —— */
