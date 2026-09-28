@@ -12,7 +12,7 @@
  */
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { bindingOfEvent, displayOfBinding } from '@/core/hotkeys.ts'
-// OPFS 读写在本组件里承担三件维护动作：探测持久化授权、重建索引时逐篇读正文、清空本机正文
+// 文件读写在本组件里承担四件维护动作：目录绑定/解除、探测持久化授权、重建索引时逐篇读正文、清空本机正文
 import * as opfs from '@/core/vault/opfs.ts'
 import { ACCENTS, THEMES } from '@/core/theme/themes.ts'
 import { useAppearanceStore } from '@/stores/appearance.ts'
@@ -55,7 +55,7 @@ const draft = ref<SyncSettings>({ ...settings.settings })
 const showToken = ref(false)
 /** 「已保存」提示的闪现开关，由 save() 里的定时器收回。 */
 const saved = ref(false)
-/** 保存或清空正文时抛出的错误文案；下次动作开始时会清掉，防止旧错误一直挂着。 */
+/** 保存、清空正文或目录操作抛出的错误文案；下次动作开始时会清掉，防止旧错误一直挂着。 */
 const error = ref<string | null>(null)
 /** 存储用量的一行人类可读文本，由 refreshUsage() 填充。 */
 const usage = ref<string>('')
@@ -67,6 +67,12 @@ const reindexing = ref(false)
 const reindexed = ref<number | null>(null)
 /** 清空本机正文的进行中标志：按钮文案与 disabled 都靠它。 */
 const wipeBusy = ref(false)
+/** 目录绑定操作（选择 / 迁移 / 解除）的进行中标志：三者共用一个，避免并发切换后端。 */
+const dirBusy = ref(false)
+/** 目录操作成功后的回执文案（复制了多少、跳过多少）。 */
+const dirMsg = ref<string | null>(null)
+/** 目录选择器可用性；Safari / Firefox 没有该 API，渲染静态提示而不是一个点了没反应的按钮。 */
+const dirPickerOk = opfs.isDirPickerSupported()
 
 /** 推送延迟的可选项；值用数字字面量分隔符写，方便和 setTimeout 的毫秒数对上。 */
 const DELAYS: { ms: number; label: string }[] = [
@@ -212,11 +218,25 @@ const stats = computed(() => {
   }
 })
 
+/** 「正文存放」一行的文案，随绑定状态即时切换。 */
+const backendLabel = computed(() => {
+  if (vault.storageBackend === 'dir') return `用户目录:${vault.storageDirName}`
+  if (vault.storageBackend === 'blocked') return `用户目录:${vault.storageDirName}(待授权)`
+  return '浏览器内置存储(OPFS)'
+})
+
 /** 草稿是否偏离了 store：用序列化比较代替逐字段比对；脏的时候才允许保存，也用来阻止外部值覆盖。 */
 const dirty = computed(() => JSON.stringify(draft.value) !== JSON.stringify(settings.settings))
 
 /** 读取浏览器存储配额与持久化授权；API 缺失时给出说明文本而不是抛错（部分浏览器不实现 estimate）。 */
 async function refreshUsage(): Promise<void> {
+  // 绑定目录后正文不占浏览器配额，持久化授权也只对内置 OPFS 有意义 —— 直接给说明文案，
+  // 顺手把 persisted 置回 null，模板据此隐藏授权那一行。
+  if (vault.storageBackend !== 'opfs') {
+    usage.value = '正文在所选目录,不计入浏览器配额(索引等派生数据仍占浏览器存储)。'
+    persisted.value = null
+    return
+  }
   if (typeof navigator.storage?.estimate !== 'function') {
     usage.value = '当前浏览器不提供存储用量信息。'
     return
@@ -300,6 +320,45 @@ async function wipeAndReload(): Promise<void> {
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err)
     wipeBusy.value = false
+  }
+}
+
+/**
+ * 「选择目录」：选择 → 迁移现有文件 → 落库绑定 → 对账（全在 vault.bindDirectoryFlow 里）。
+ * 用户在选择器里取消（AbortError）按「无操作」处理，不报错也不提示；其他错误展示给用户，
+ * 且绑定未落库、后端仍停在原处，可直接重试。
+ */
+async function chooseDirectory(): Promise<void> {
+  dirBusy.value = true
+  dirMsg.value = null
+  error.value = null
+  try {
+    const r = await vault.bindDirectoryFlow()
+    const skipped = r.skipped > 0 ? `,跳过目录里已存在的 ${r.skipped} 个` : ''
+    dirMsg.value = `已绑定到「${vault.storageDirName}」,复制了 ${r.copied} 个文件${skipped}。`
+    await refreshUsage()
+  } catch (err) {
+    if (!(err instanceof DOMException && err.name === 'AbortError')) {
+      error.value = err instanceof Error ? err.message : String(err)
+    }
+  } finally {
+    dirBusy.value = false
+  }
+}
+
+/** 「解除绑定」：目录内容回写内置存储（无授权则跳过）→ 解除 → 对账，随后刷新本机统计。 */
+async function unbindDirectory(): Promise<void> {
+  dirBusy.value = true
+  dirMsg.value = null
+  error.value = null
+  try {
+    await vault.unbindDirectoryFlow()
+    dirMsg.value = '已解除绑定,正文回到浏览器内置存储(OPFS)。'
+    await refreshUsage()
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err)
+  } finally {
+    dirBusy.value = false
   }
 }
 
@@ -478,8 +537,43 @@ onMounted(() => {
       </p>
     </template>
 
-    <!-- 数据与日志：只读统计 + 三个维护动作（重建索引、看同步日志、清空本机正文重来） -->
+    <!-- 数据与日志：存储位置与绑定管理 + 只读统计 + 三个维护动作（重建索引、看同步日志、清空本机正文重来） -->
     <template v-else-if="tab === 'data'">
+      <h4 class="sub sub--first">正文存储位置</h4>
+      <div class="callout">
+        <template v-if="vault.storageBackend === 'dir'">
+          正文读写都落在绑定的目录 <strong>「{{ vault.storageDirName }}」</strong
+          >里:资源管理器可见、可备份、可被其他编辑器修改。链接索引、标签、设置、同步日志仍存浏览器
+          IndexedDB —— 都是可从正文重建的派生数据。两者都只在这台设备上,不会上传到本应用之外的任何服务器。
+        </template>
+        <template v-else>
+          正文以明文 <code>.md</code> 存在浏览器内置存储(OPFS),资源管理器看不到,浏览器清理站点数据会一起丢。
+          指定一个本地目录后,笔记就是你磁盘上实打实的文件。链接索引、标签、设置、同步日志存在 IndexedDB,
+          是可从正文重建的派生数据。两者都只在这台设备上,不会上传到本应用之外的任何服务器。
+        </template>
+      </div>
+      <div class="row">
+        <button class="btn" type="button" :disabled="dirBusy || !dirPickerOk" @click="chooseDirectory">
+          {{ dirBusy ? '处理中…' : vault.storageBackend === 'dir' ? '换一个目录…' : '选择目录…' }}
+        </button>
+        <button
+          v-if="vault.storageBackend === 'dir'"
+          class="btn"
+          type="button"
+          :disabled="dirBusy"
+          @click="unbindDirectory"
+        >
+          解除绑定
+        </button>
+      </div>
+      <p v-if="!dirPickerOk" class="field__tip">当前浏览器不支持目录选择器,请改用 Chrome / Edge。</p>
+      <p v-else class="field__tip">
+        绑定时会把现有笔记复制进所选目录,推荐选一个空文件夹;目录里已有的同名文件不会被覆盖,差异以目录内容为准。
+        解除绑定前会先把目录内容回写回内置存储。
+      </p>
+      <p v-if="dirMsg" class="field__ok">{{ dirMsg }}</p>
+      <p v-if="error" class="field__error">{{ error }}</p>
+
       <dl class="info">
         <dt>笔记总数</dt>
         <dd>{{ stats.total }}</dd>
@@ -487,20 +581,19 @@ onMounted(() => {
         <dd>{{ stats.cached }} 篇(其余为仅索引,打开时按需下载)</dd>
         <dt>待上传</dt>
         <dd>{{ stats.pending }} 篇</dd>
+        <dt>正文存放</dt>
+        <dd>{{ backendLabel }}</dd>
         <dt>本机存储占用</dt>
         <dd>{{ usage }}</dd>
-        <dt>持久化存储授权</dt>
-        <dd>
-          <span :class="persisted ? 'field__ok' : 'field__error'">
-            {{ persisted === null ? '检测中…' : persisted ? '已授权(不易被浏览器自动清理)' : '未授权' }}
-          </span>
-        </dd>
+        <template v-if="vault.storageBackend === 'opfs'">
+          <dt>持久化存储授权</dt>
+          <dd>
+            <span :class="persisted ? 'field__ok' : 'field__error'">
+              {{ persisted === null ? '检测中…' : persisted ? '已授权(不易被浏览器自动清理)' : '未授权' }}
+            </span>
+          </dd>
+        </template>
       </dl>
-
-      <div class="callout">
-        <strong>数据存在哪里?</strong> 正文以明文 <code>.md</code> 保存在浏览器的 OPFS
-        (源私有文件系统),链接索引、标签、设置、同步日志保存在 IndexedDB。两者都只在这台设备上,不会上传到本应用之外的任何服务器。
-      </div>
 
       <div class="row">
         <button class="btn" type="button" :disabled="reindexing" @click="reindex">

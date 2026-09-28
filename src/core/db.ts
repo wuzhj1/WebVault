@@ -5,8 +5,9 @@
  * 硬约束/注意事项：
  * - NoteMeta 的 baseSha/localSha/remoteSha 三方合并语义，以及 dirty/cached/removedLocal/removedRemote
  *   四个标志位，是同步引擎（core/sync/engine.ts）的全部判定依据，只可增补注释、不可改名或改类型。
- * - version(1) 的五个 store 一经发布即冻结；新增 store 只能挂新版本号（见 cards 的 version(2)）。
- *   不写 upgrade 函数意味着没有数据转换风险，表从空开始由回填补齐。
+ * - version(1) 的五个 store 一经发布即冻结；新增 store 只能挂新版本号
+ *   （见 cards 的 version(2)、config 的 version(3)）。不写 upgrade 函数意味着没有数据转换风险，
+ *   表从空开始由回填补齐。
  * - links/tags/cards 均为纯派生索引：随时可从 OPFS 正文清空重建，不承载用户唯一数据。
  */
 import Dexie, { type EntityTable } from 'dexie'
@@ -106,6 +107,15 @@ export interface SettingRow {
   value: string
 }
 
+/**
+ * 结构化配置表：与 `settings`（value 只装 JSON 字符串）互补，专门放**不可 JSON 序列化**的值，
+ * 当前唯一用途是持久化绑定目录的 `FileSystemDirectoryHandle`（IDB 结构化克隆原生支持句柄）。
+ */
+export interface ConfigRow {
+  key: string
+  value: unknown
+}
+
 /** 同步日志表；logSync 写入时自动裁剪，只保留最近约 300 条。 */
 export interface SyncLogRow {
   id?: number
@@ -121,6 +131,7 @@ class VaultDB extends Dexie {
   tags!: EntityTable<TagRow, 'id'>
   cards!: EntityTable<CardRow, 'path'>
   settings!: EntityTable<SettingRow, 'key'>
+  config!: EntityTable<ConfigRow, 'key'>
   syncLog!: EntityTable<SyncLogRow, 'id'>
 
   constructor() {
@@ -135,6 +146,9 @@ class VaultDB extends Dexie {
     // 只列出新增的 store；Dexie 会原样沿用 version-1 的 schema，其余五个表不受影响。
     this.version(2).stores({
       cards: 'path, type, zid, created, parsed',
+    })
+    this.version(3).stores({
+      config: 'key',
     })
   }
 }
@@ -159,6 +173,25 @@ export async function getSetting<T = string>(key: string, fallback: T): Promise<
 /** 写入设置项，value 用 JSON 序列化后存入（任意可 JSON 序列化的值）。 */
 export async function putSetting(key: string, value: unknown): Promise<void> {
   await db.settings.put({ key, value: JSON.stringify(value) })
+}
+
+/**
+ * 读取结构化配置项（config 表）：值按结构化克隆原样存取，不做 JSON 解析；
+ * 键不存在返回 null —— 目录句柄这类对象的唯一存放处。
+ */
+export async function getConfig<T = unknown>(key: string): Promise<T | null> {
+  const row = await db.config.get(key)
+  return row ? (row.value as T) : null
+}
+
+/** 写入结构化配置项；值会被结构化克隆，可放 FileSystemDirectoryHandle 等不可 JSON 化的对象。 */
+export async function putConfig(key: string, value: unknown): Promise<void> {
+  await db.config.put({ key, value })
+}
+
+/** 删除结构化配置项；不存在时静默。 */
+export async function deleteConfig(key: string): Promise<void> {
+  await db.config.delete(key)
 }
 
 /**

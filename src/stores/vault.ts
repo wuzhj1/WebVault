@@ -98,6 +98,10 @@ function replaceMeta(list: readonly NoteMeta[], meta: NoteMeta): NoteMeta[] {
   return next
 }
 
+/** 浏览器不支持 OPFS 时的启动失败文案；init 与「改用内置存储」两条路径共用。 */
+const OPFS_UNSUPPORTED_MSG =
+  '当前浏览器不支持 OPFS(源私有文件系统),无法在本地保存笔记。请使用较新的 Chrome / Edge / Safari,并通过 HTTPS 或 localhost 访问。'
+
 /** vault 主 store：元数据索引、派生状态与正文读写的集中入口。 */
 export const useVaultStore = defineStore('vault', () => {
   /** 「最近打开」的记账人：ui store 只存本机书签，不反向依赖 vault，无循环引用。 */
@@ -112,6 +116,10 @@ export const useVaultStore = defineStore('vault', () => {
   const fatal = ref<string | null>(null)
   /** OPFS 被清空、而元数据索引里仍有笔记时置位；sync store 据此触发从远端恢复正文。 */
   const storageWasWiped = ref(false)
+  /** 存储后端：'opfs' 内置 / 'dir' 用户目录 / 'blocked' 目录待授权（授权前不置 ready）。 */
+  const storageBackend = ref<opfs.StorageBackend>('opfs')
+  /** 绑定的目录名；'dir' / 'blocked' 时非 null，授权屏与设置页展示用。 */
+  const storageDirName = ref<string | null>(null)
   /** 指向当前笔记的反链列表。 */
   const inbound = shallowRef<BacklinkEntry[]>([])
   /** 当前笔记发出的出链列表。 */
@@ -209,15 +217,20 @@ export const useVaultStore = defineStore('vault', () => {
   /** 已知存在于远端、但本地还没有正文（未缓存）的笔记，预取与按需下载都从这里取活。 */
   const uncached = computed(() => notes.value.filter((n) => !n.cached && !n.removedLocal))
 
-  /** 启动入口：探测 OPFS → 申请持久化存储 → reconcile；任何一步失败都写入 fatal。 */
+  /** 启动入口：解析存储后端 →（内置时）申请持久化存储 → reconcile；任何一步失败都写入 fatal。 */
   async function init(): Promise<void> {
-    if (!opfs.isOpfsSupported()) {
-      fatal.value =
-        '当前浏览器不支持 OPFS(源私有文件系统),无法在本地保存笔记。请使用较新的 Chrome / Edge / Safari,并通过 HTTPS 或 localhost 访问。'
-      return
-    }
     try {
-      await opfs.persistedStorageGranted()
+      storageBackend.value = await opfs.currentBackend()
+      storageDirName.value = await opfs.dirName()
+      // 目录待授权：授权屏接管、不置 ready —— 续期或改回内置存储后由对应动作补跑 reconcile。
+      if (storageBackend.value === 'blocked') return
+      if (storageBackend.value === 'opfs') {
+        if (!opfs.isOpfsSupported()) {
+          fatal.value = OPFS_UNSUPPORTED_MSG
+          return
+        }
+        await opfs.persistedStorageGranted()
+      }
       await reconcile()
       ready.value = true
     } catch (err) {
@@ -278,6 +291,33 @@ export const useVaultStore = defineStore('vault', () => {
     }
     if (lost.length > 0) await db.notes.bulkPut(lost)
 
+    // 文件在盘上而索引与之不符时，一律以文件为准重索引并标脏。两种后端的触发面不同：
+    // 绑定目录后外部编辑器（VS Code 等）可能改过任何文件，故逐篇核对哈希；内置 OPFS 没有
+    // 外部写入者，只有「清空后又被恢复」会留下 cached=0 却在盘的行 —— 只查这些行，
+    // 正常启动不必整库读正文。
+    const dirBackend = (await opfs.currentBackend()) === 'dir'
+    const suspects: NoteMeta[] = []
+    for (const n of known) {
+      if (n.removedLocal || !onDisk.has(n.path)) continue
+      if (dirBackend || !n.cached) suspects.push(n)
+    }
+    if (suspects.length > 0) {
+      const drift: NoteMeta[] = []
+      for (const n of suspects) {
+        const content = await opfs.readNote(n.path)
+        if (content === null) continue
+        const sha = await gitBlobSha(content)
+        if (sha === n.localSha) {
+          // 文件在盘上、索引却标着没下载：顺手纠正，否则 readBody 会一直按 stub 拒绝。
+          if (!n.cached) drift.push({ ...n, cached: 1 })
+          continue
+        }
+        await reindexContent(n.path, content, { deferCards: true })
+        drift.push({ ...n, localSha: sha, size: content.length, mtime: Date.now(), cached: 1, dirty: 1 })
+      }
+      if (drift.length > 0) await db.notes.bulkPut(drift)
+    }
+
     if ((await db.notes.count()) === 0 && onDisk.size === 0) {
       await db.links.clear()
       await db.tags.clear()
@@ -290,6 +330,67 @@ export const useVaultStore = defineStore('vault', () => {
 
     notes.value = await db.notes.toArray()
     await refreshDerived()
+  }
+
+  /**
+   * 设置页「选择目录」的编排：选择 → 把现有文件迁移进目录 → 落库绑定 → 对账。
+   * 迁移先行、绑定落库在后：中途失败时后端仍停在 OPFS，不留「已绑定但没迁完」的半状态。
+   * 用户在选择器里取消（AbortError）直接冒泡，由设置页按「无操作」处理。
+   */
+  async function bindDirectoryFlow(): Promise<opfs.MigrateResult> {
+    const handle = await opfs.pickDirectory()
+    const result = await opfs.migrateOpfsTo(handle)
+    await opfs.bindDirectory(handle)
+    const kind = await opfs.currentBackend()
+    if (kind !== 'dir') {
+      // 选择器已按 readwrite 授权却仍拿不到权限的异常情况：回滚绑定，不停在不可用的后端上。
+      await opfs.unbindDirectory()
+      throw new Error('未能取得目录的读写权限,绑定已取消。')
+    }
+    storageBackend.value = kind
+    storageDirName.value = await opfs.dirName()
+    await reconcile()
+    ready.value = true
+    return result
+  }
+
+  /** 授权屏「重新授权」：用户手势内续期；成功后照常对账并进入 ready。 */
+  async function grantDirAccess(): Promise<boolean> {
+    const ok = await opfs.requestDirectoryPermission()
+    if (!ok) return false
+    storageBackend.value = 'dir'
+    try {
+      await reconcile()
+      ready.value = true
+    } catch (err) {
+      fatal.value = err instanceof Error ? err.message : String(err)
+    }
+    return true
+  }
+
+  /**
+   * 「改用浏览器内置存储」：尽力把目录内容回写进 OPFS（无授权则跳过、文件原样留在目录里），
+   * 再解除绑定并重新对账。回写失败不阻断解除 —— 解除本身不依赖读到目录内容。
+   */
+  async function unbindDirectoryFlow(): Promise<void> {
+    try {
+      await opfs.migrateDirToOpfs()
+    } catch {
+      // 回迁尽力而为：OPFS 根不可用等极端情况仍要能解除绑定，由随后的对账如实反映本机状态。
+    }
+    await opfs.unbindDirectory()
+    storageBackend.value = 'opfs'
+    storageDirName.value = null
+    if (!opfs.isOpfsSupported()) {
+      fatal.value = OPFS_UNSUPPORTED_MSG
+      return
+    }
+    try {
+      await reconcile()
+      ready.value = true
+    } catch (err) {
+      fatal.value = err instanceof Error ? err.message : String(err)
+    }
   }
 
   /** 某行链接当前是否算「未解析」——空目标与附件目标不计，与漂移扫描后的汇总同一判据。 */
@@ -753,6 +854,8 @@ export const useVaultStore = defineStore('vault', () => {
     activePath,
     activeNote,
     storageWasWiped,
+    storageBackend,
+    storageDirName,
     tree,
     inbound,
     outgoing,
@@ -768,6 +871,9 @@ export const useVaultStore = defineStore('vault', () => {
     byPath,
     init,
     reconcile,
+    bindDirectoryFlow,
+    grantDirAccess,
+    unbindDirectoryFlow,
     openNote,
     notifyBodyChanged,
     reloadNotes,

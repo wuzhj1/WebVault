@@ -250,6 +250,27 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
+    <!-- 绑定的笔记目录需要重新授权（浏览器重启后权限过期）；授权或改回内置存储前，一切文件 IO 都停着 -->
+    <div v-else-if="vault.storageBackend === 'blocked'" class="screen">
+      <div class="screen__box">
+        <h2>需要授权访问笔记目录</h2>
+        <p>
+          笔记正文存放在「{{ vault.storageDirName }}」。浏览器重启后目录授权会过期,点下面的按钮重新允许访问。
+        </p>
+        <div class="screen__actions">
+          <button class="screen__btn screen__btn--primary" type="button" @click="vault.grantDirAccess">
+            重新授权
+          </button>
+          <button class="screen__btn" type="button" @click="vault.unbindDirectoryFlow">
+            改用浏览器内置存储
+          </button>
+        </div>
+        <p>
+          「改用内置存储」会回到迁移前的本机副本;绑定期间新增或修改的笔记,只有重新授权后才能带回来。
+        </p>
+      </div>
+    </div>
+
     <!-- 初始化中：读取本机笔记库 -->
     <div v-else-if="!vault.ready" class="screen">
       <div class="screen__box">
@@ -401,6 +422,34 @@ onBeforeUnmount(() => {
 
 .screen__box--error h2 {
   color: var(--danger);
+}
+
+/* —— 目录授权屏的操作按钮（组件里没有通用 .btn，这里自带一套） —— */
+.screen__actions {
+  display: flex;
+  gap: 10px;
+  justify-content: center;
+  margin: 16px 0 8px;
+}
+
+.screen__btn {
+  padding: 7px 16px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  font-size: 13px;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.screen__btn:hover {
+  background: var(--bg-hover);
+}
+
+.screen__btn--primary {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent-text);
 }
 
 /* —— 恢复提示条与加载动画 —— */
