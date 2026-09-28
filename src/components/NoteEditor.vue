@@ -204,6 +204,13 @@ let irRoot: HTMLElement | null = null
 let observer: MutationObserver | null = null
 /** 合并标志:同一时刻只排一个微任务,连续输入不会逐字重排 DOM。 */
 let decorateQueued = false
+/**
+ * 本轮攒下的装饰种子:observer 记下的新增/改写节点 + 上一轮的活动块。
+ * 空集意味着「这轮没有值得装饰的地方」(比如只删不增的重渲染),不等于全量。
+ */
+let seedNodes = new Set<Node>()
+/** 置真时下一轮退回全量扫(挂管后的首轮兜底)。 */
+let fullSweep = false
 /** 当前带光标的块;它保持裸 markdown 可编辑,不参与胶囊装饰。 */
 let activeBlock: HTMLElement | null = null
 
@@ -219,11 +226,19 @@ function queueDecorate(): void {
   })
 }
 
-/** 真正跑一轮装饰:重算活动块,再按 lookupLink 的结果把所有非活动块的双链重绘成胶囊。 */
+/**
+ * 真正跑一轮装饰:重算活动块,再只对**种子**跑 lookupLink 与胶囊重绘。
+ * 上一轮的活动块每次都入种:它在光标下待过、一直是裸 markdown,离开光标才轮到它被装饰。
+ */
 function runDecorate(): void {
   if (!irRoot) return
+  const prevActive = activeBlock
   activeBlock = markActiveBlock(irRoot)
-  decorateWikilinks(irRoot, lookupLink)
+  if (prevActive) seedNodes.add(prevActive)
+  const seeds = fullSweep ? undefined : seedNodes
+  fullSweep = false
+  seedNodes = new Set()
+  decorateWikilinks(irRoot, lookupLink, seeds)
   // 把自己刚改出来的记录丢掉,否则每一轮装饰都会把下一轮触发起来。
   observer?.takeRecords()
 }
@@ -336,9 +351,18 @@ function insertLink(target: string): void {
 function startDecorating(): void {
   irRoot = host.value?.querySelector<HTMLElement>('.vditor-ir .vditor-reset') ?? null
   if (!irRoot) return
-  observer = new MutationObserver(() => queueDecorate())
+  observer = new MutationObserver((records) => {
+    // 只有「新增的子树」和「被改写的文本」需要重新看;被删掉的自己不需要装饰。
+    for (const record of records) {
+      if (record.type === 'characterData') seedNodes.add(record.target)
+      else for (const node of record.addedNodes) seedNodes.add(node)
+    }
+    queueDecorate()
+  })
   observer.observe(irRoot, { childList: true, characterData: true, subtree: true })
   document.addEventListener('selectionchange', onSelectionChange)
+  // 挂管后的首轮兜底:此前发生过的变动不在 observer 记录里,先全量走一遍。
+  fullSweep = true
   queueDecorate()
 }
 
@@ -349,6 +373,8 @@ function stopDecorating(): void {
   document.removeEventListener('selectionchange', onSelectionChange)
   irRoot = null
   activeBlock = null
+  seedNodes = new Set()
+  fullSweep = false
 }
 
 onMounted(async () => {

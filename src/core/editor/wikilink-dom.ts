@@ -8,6 +8,9 @@
  * 光标所在的块完全不动：装饰它会拆掉选区下面的文本节点、把光标挤跑。取而代之的是给该块
  * 加一个 class，用 CSS 显示原始 markdown——这正是 Obsidian live preview 的行为。
  *
+ * 装饰是增量的：调用方把 MutationObserver 记下的新增/改写节点与刚离开光标的块作为种子传入，
+ * 每轮只走这些子树；光标块标记同样只动上一次那一个元素。
+ *
  * 硬约束：只增删 class 与装饰 span，绝不删除、改写任何原文字符；
  * 如需引入其他模块，一律用相对导入，且运行时不得导入 `db.ts`（`import type` 安全）。
  */
@@ -31,25 +34,58 @@ export const ACTIVE_BLOCK_CLASS = 'wl-active'
 /** 双链（含 `!` 前缀嵌入）；与 `parse/links.ts` 的正则保持同构，括号内不做嵌套匹配。 */
 const WIKILINK = /(!?)\[\[([^\[\]]+?)\]\]/g
 
-/** 装饰光标块之外的全部双链，返回构建的胶囊数量。 */
-export function decorateWikilinks(root: HTMLElement, resolve: WikilinkResolver): number {
-  const caretBlock = blockWithCaret(root)
-  const targets: Text[] = []
+/**
+ * 文本节点是否本轮该被装饰：含 `[[`、不在代码块/胶囊里、且不属于光标所在的活动块。
+ * 全量扫与按种子扫共用同一判据——两者对同一节点的结论必须一致。
+ */
+function acceptText(node: Text, caretBlock: HTMLElement | null, root: HTMLElement): boolean {
+  const value = node.nodeValue
+  if (!value || !value.includes('[[')) return false
+  const parent = node.parentElement
+  if (!parent || inCodeOrChip(parent, root)) return false
+  if (caretBlock && (caretBlock === parent || caretBlock.contains(parent))) return false
+  return true
+}
 
-  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
-    acceptNode(node) {
-      const value = node.nodeValue
-      if (!value || !value.includes('[[')) return NodeFilter.FILTER_REJECT
-      const parent = node.parentElement
-      if (!parent || inCodeOrChip(parent, root)) return NodeFilter.FILTER_REJECT
-      if (caretBlock && (caretBlock === parent || caretBlock.contains(parent))) {
-        return NodeFilter.FILTER_REJECT
-      }
-      return NodeFilter.FILTER_ACCEPT
-    },
-  })
-  // 先收集再动手：替换文本节点会让 TreeWalker 正在遍历的树失效。
-  while (walker.nextNode()) targets.push(walker.currentNode as Text)
+/**
+ * 装饰光标块之外的双链，返回构建的胶囊数量。
+ *
+ * `seeds` 给出本轮值得检查的子树（MutationObserver 记下的新增/改写节点、刚离开光标块的
+ * 活动块）：只走这些种子，不再每次全树 TreeWalker——大文档里逐键输入的开销从 O(整篇)
+ * 降到 O(被改的那个块)。`seeds` 省略时退回全量（首次兜底、全量请求）。
+ */
+export function decorateWikilinks(
+  root: HTMLElement,
+  resolve: WikilinkResolver,
+  seeds?: Iterable<Node>,
+): number {
+  const caretBlock = blockWithCaret(root)
+  /** 先收集再动手：替换文本节点会让 TreeWalker 正在遍历的树失效；Set 兼作种子重叠去重。 */
+  const targets = new Set<Text>()
+
+  const collect = (node: Node): void => {
+    if (node.nodeType === Node.TEXT_NODE) {
+      const text = node as Text
+      if (acceptText(text, caretBlock, root)) targets.add(text)
+      return
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE) return
+    const walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT, {
+      acceptNode: (n) =>
+        acceptText(n as Text, caretBlock, root) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT,
+    })
+    while (walker.nextNode()) targets.add(walker.currentNode as Text)
+  }
+
+  if (seeds === undefined) {
+    collect(root)
+  } else {
+    for (const seed of seeds) {
+      // 被换掉的块（种子已脱离文档）与其不在根内的副本都不用管，对应的替换子树另有种子。
+      if (!seed.isConnected || !root.contains(seed)) continue
+      collect(seed)
+    }
+  }
 
   let built = 0
   for (const node of targets) built += decorateTextNode(node, resolve)
@@ -67,13 +103,28 @@ function inCodeOrChip(el: Element, root: HTMLElement): boolean {
   return host !== null && host !== root
 }
 
-/** 在正在编辑的块上显示原始 markdown。只增删 class，绝不改结构。 */
+/** 每个根上一次被标记为活动的块；增量摘除靠它，省掉每次全树 querySelectorAll。 */
+const lastActiveByRoot = new WeakMap<HTMLElement, HTMLElement | null>()
+
+/**
+ * 在正在编辑的块上显示原始 markdown。只增删 class，绝不改结构。
+ *
+ * 增量策略：记住每个根上次标记的块，只摘它一个；首个根（或热重载后没有记录）才全量清一次，
+ * 兼容任何来源的陈旧标记。新活动块可能是刚换上来的新节点，直接加上即可。
+ */
 export function markActiveBlock(root: HTMLElement): HTMLElement | null {
   const active = blockWithCaret(root)
-  for (const el of root.querySelectorAll<HTMLElement>(`.${ACTIVE_BLOCK_CLASS}`)) {
-    if (el !== active) el.classList.remove(ACTIVE_BLOCK_CLASS)
+  const prev = lastActiveByRoot.get(root)
+  if (prev === undefined) {
+    for (const el of root.querySelectorAll<HTMLElement>(`.${ACTIVE_BLOCK_CLASS}`)) {
+      if (el !== active) el.classList.remove(ACTIVE_BLOCK_CLASS)
+    }
+  } else if (prev && prev !== active) {
+    // prev 已被 Vditor 换掉时它随旧节点一起消失了，对游离节点摘 class 是无害的空操作。
+    prev.classList.remove(ACTIVE_BLOCK_CLASS)
   }
   active?.classList.add(ACTIVE_BLOCK_CLASS)
+  lastActiveByRoot.set(root, active)
   return active
 }
 
