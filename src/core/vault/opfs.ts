@@ -19,6 +19,13 @@ import { ancestorDirs, normalizePath } from './paths.ts'
 /** 绑定目录句柄在 config 表里的键；值是结构化克隆后的 FileSystemDirectoryHandle。 */
 const DIR_HANDLE_KEY = 'vault-dir-handle'
 
+/**
+ * 数据文件目录名：索引与设置的 JSON 全落在 vault 根下的 `.config/`（见 datafiles.ts）。
+ * 放在本模块而不是 datafiles 里导出，是为了让 clearAllNotes 也能引用而不引入循环导入；
+ * 不以 `.md` 结尾，天然不会被 listNotePaths 收养、也不会进同步。
+ */
+export const CONFIG_DIR = '.config'
+
 /** 存储后端：内置 OPFS / 用户目录（已授权）/ 用户目录（待授权，授权前禁用一切文件 IO）。 */
 export type StorageBackend = 'opfs' | 'dir' | 'blocked'
 
@@ -135,10 +142,12 @@ async function getFileHandle(
   return { dir, name: slash === -1 ? p : p.slice(slash + 1) }
 }
 
-/** 在指定根下读正文；文件不存在返回 null（正常情况），其他错误照抛。 */
+/** 在指定根下读正文；文件或父目录不存在都返回 null（正常情况），其他错误照抛。 */
 async function readAt(root: FileSystemDirectoryHandle, path: string): Promise<string | null> {
-  const { dir, name } = await getFileHandle(root, path, false)
+  // getFileHandle 也要包进 try：`create:false` 的 resolveDir 在父目录整个不存在时会抛
+  // NotFoundError —— 对「读」来说语义同样是「没有这个文件」（如首读尚未创建的 .config）。
   try {
+    const { dir, name } = await getFileHandle(root, path, false)
     const file = await dir.getFileHandle(name)
     return await (await file.getFile()).text()
   } catch (err) {
@@ -372,6 +381,9 @@ export async function clearAllNotes(): Promise<void> {
     return
   }
   for await (const entry of root.values()) {
+    // `.config` 是数据文件（索引/设置/日志），不是正文 —— 「清空正文重来」不该连同步配置一起抹掉，
+    // 这与设置存 IndexedDB 时的行为一致（清正文从不清设置），否则恢复流程会连远端信息都丢光。
+    if (entry.name === CONFIG_DIR) continue
     await root.removeEntry(entry.name, { recursive: true })
   }
 }

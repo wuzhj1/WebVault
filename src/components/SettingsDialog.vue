@@ -8,7 +8,8 @@
  *
  * 关键约束：表单改的是 draft 副本，点「保存」才落盘，dirty 用来决定按钮是否可点；
  * 外观页是唯一例外——选项点击即写入本机存储、立刻生效，没有草稿也没有保存按钮。
- * Gitee token 只写进本机 IndexedDB，不会随笔记上传，也不会同步到其他设备（故 sync tab 顶部有醒目警告）。
+ * Gitee token 只落在本机(未绑定目录时是浏览器 IndexedDB,绑定后是正文目录的 .config/settings.json),
+ * 不会随笔记上传,也不会同步到其他设备(故 sync tab 顶部有醒目警告)。
  */
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { bindingOfEvent, displayOfBinding } from '@/core/hotkeys.ts'
@@ -397,7 +398,8 @@ onMounted(() => {
     <!-- Gitee 同步：唯一会把凭据写进本机数据库的一页，所以顶部先给警告 -->
     <template v-if="tab === 'sync'">
       <div class="callout callout--warn">
-        <strong>先看清楚:</strong> 私人令牌会明文保存在这台设备的浏览器数据库(IndexedDB)里,只会被发往
+        <strong>先看清楚:</strong> 私人令牌会明文保存在本机(未绑定目录时是浏览器数据库
+        <code>IndexedDB</code>,绑定后写入正文目录的 <code>.config/settings.json</code>),只会被发往
         <code>gitee.com</code>。公用电脑或共享设备请不要填。建议在 Gitee
         单独建一个仓库专门放笔记,并只给令牌勾选 <code>projects</code> 权限,这样即使泄露也影响有限。
       </div>
@@ -543,13 +545,14 @@ onMounted(() => {
       <div class="callout">
         <template v-if="vault.storageBackend === 'dir'">
           正文读写都落在绑定的目录 <strong>「{{ vault.storageDirName }}」</strong
-          >里:资源管理器可见、可备份、可被其他编辑器修改。链接索引、标签、设置、同步日志仍存浏览器
-          IndexedDB —— 都是可从正文重建的派生数据。两者都只在这台设备上,不会上传到本应用之外的任何服务器。
+          >里:资源管理器可见、可备份、可被其他编辑器修改。索引与设置也以 JSON 文件存在该目录的
+          <code>.config/</code> 下,浏览器 IndexedDB 只是缓存 —— 整个文件夹拷走即带走全部数据。
+          这些数据都只在这台设备上,不会上传到本应用之外的任何服务器。
         </template>
         <template v-else>
           正文以明文 <code>.md</code> 存在浏览器内置存储(OPFS),资源管理器看不到,浏览器清理站点数据会一起丢。
-          指定一个本地目录后,笔记就是你磁盘上实打实的文件。链接索引、标签、设置、同步日志存在 IndexedDB,
-          是可从正文重建的派生数据。两者都只在这台设备上,不会上传到本应用之外的任何服务器。
+          指定一个本地目录后,笔记是磁盘上实打实的文件,索引与设置(<code>.config/</code> 下的 JSON)也一起落进去,
+          整个文件夹拷走即带走全部数据。所有数据都只在这台设备上,不会上传到本应用之外的任何服务器。
         </template>
       </div>
       <div class="row">
@@ -568,8 +571,9 @@ onMounted(() => {
       </div>
       <p v-if="!dirPickerOk" class="field__tip">当前浏览器不支持目录选择器,请改用 Chrome / Edge。</p>
       <p v-else class="field__tip">
-        绑定时会把现有笔记复制进所选目录,推荐选一个空文件夹;目录里已有的同名文件不会被覆盖,差异以目录内容为准。
-        解除绑定前会先把目录内容回写回内置存储。
+        绑定时会把现有笔记(含 <code>.config</code> 数据文件)复制进所选目录,推荐选一个空文件夹;目录里已有的同名文件不会被覆盖,
+        差异以目录内容为准。解除绑定前会先把目录内容回写回内置存储。
+        <code>.config/settings.json</code> 里的 Gitee token 是明文,共享或备份文件夹前请留意。
       </p>
       <p v-if="dirMsg" class="field__ok">{{ dirMsg }}</p>
       <p v-if="error" class="field__error">{{ error }}</p>
@@ -583,6 +587,11 @@ onMounted(() => {
         <dd>{{ stats.pending }} 篇</dd>
         <dt>正文存放</dt>
         <dd>{{ backendLabel }}</dd>
+        <dt>索引与设置</dt>
+        <dd>
+          <code>.config/</code> 下的 6 个 JSON({{ vault.storageBackend === 'dir' ? '绑定目录内' : '内置存储内' }}),
+          浏览器 IndexedDB 仅作缓存
+        </dd>
         <dt>本机存储占用</dt>
         <dd>{{ usage }}</dd>
         <template v-if="vault.storageBackend === 'opfs'">
