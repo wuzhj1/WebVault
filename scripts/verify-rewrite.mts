@@ -4,7 +4,7 @@
  * - rewriting：改名时重写正文中的目标链接，修饰成分与受限上下文（行内代码、代码块、frontmatter）
  *   必须原样保留，且整个过程幂等、无损。
  *
- * 运行：npm run verify（第 4 个套件；裸 node 直跑本文件）。全部通过退出码 0，否则 1。
+ * 运行：pnpm verify（第 4 个套件；裸 node 直跑本文件）。全部通过退出码 0，否则 1。
  */
 import { rewriteWikilinks } from '../src/core/parse/rewrite.ts'
 import { buildResolver, resolveTarget, preferredLinkText } from '../src/core/index/resolve.ts'

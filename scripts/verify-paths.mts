@@ -4,7 +4,7 @@
  * - titleOf/dirOf/joinPath/ancestorDirs：文件树、双链分桶与 OPFS 建目录共用的纯字符串运算；
  * - ensureMdExt/isNotePath/sanitizeTitle/cardPath/comparePath：新建笔记、改名与排序的入口。
  *
- * 运行：npm run verify（第 9 个套件；裸 node 直跑本文件）。全部通过退出码 0，否则 1。
+ * 运行：pnpm verify（第 9 个套件；裸 node 直跑本文件）。全部通过退出码 0，否则 1。
  */
 import {
   UnsafePathError,

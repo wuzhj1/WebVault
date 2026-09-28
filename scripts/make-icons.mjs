@@ -5,7 +5,7 @@
  * 边缘抗锯齿用逐像素有符号距离的覆盖率解析计算，而不是超采样，
  * 这样无论图标尺寸多大，内存占用都保持恒定。
  *
- * 运行：node scripts/make-icons.mjs（或 npm run icons），产物写入 public/ 下的各目标路径。
+ * 运行：node scripts/make-icons.mjs（或 pnpm icons），产物写入 public/ 下的各目标路径。
  */
 import { deflateSync } from 'node:zlib'
 import { mkdirSync, writeFileSync } from 'node:fs'

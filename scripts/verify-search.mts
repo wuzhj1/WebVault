@@ -4,7 +4,7 @@
  *   这样中文词组才能被查询命中（中文没有空格可依）；
  * - buildExcerpt：摘要只截正文——剥掉 frontmatter 与代码块、把 wiki 链接退化成纯文本、限制长度。
  *
- * 运行：npm run verify（第 7 个套件；裸 node 直跑本文件）。全部通过退出码 0，否则 1。
+ * 运行：pnpm verify（第 7 个套件；裸 node 直跑本文件）。全部通过退出码 0，否则 1。
  */
 import { tokenize, buildExcerpt } from '../src/core/search/text.ts'
 

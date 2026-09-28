@@ -3,7 +3,7 @@
  * 按 WCAG 公式逐项算对比度，并附带三项全局守卫——代码高亮主题必须已本地化（离线可用）、
  * 组件里不许写死色值、用到的 CSS 变量必须有人声明。
  *
- * 运行：npm run verify（第 8 个套件；裸 node 直跑本文件，需在仓库根目录执行，
+ * 运行：pnpm verify（第 8 个套件；裸 node 直跑本文件，需在仓库根目录执行，
  * 因为下面用的是相对路径）。全部通过输出 OK 且退出码 0，否则 1。
  */
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
@@ -248,6 +248,6 @@ for (const file of walk('src').filter((f) => f.endsWith('.vue') || f.endsWith('.
 const missing = [...used].filter((name) => !declared.has(name)).sort()
 ok('用到的变量都已声明', missing.length === 0, missing.join(', '))
 
-// 汇总：任一断言失败即以非 0 退出，让 `npm run verify` 整条链失败
+// 汇总：任一断言失败即以非 0 退出，让 `pnpm verify` 整条链失败
 console.log(`${fail === 0 ? 'OK  ' : 'FAIL'} verify-theme: ${pass} passed, ${fail} failed`)
 if (fail > 0) process.exit(1)

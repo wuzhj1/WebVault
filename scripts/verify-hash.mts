@@ -5,7 +5,7 @@
  * - contentFingerprint：SHA-256 前 8 字节的截断指纹，16 位十六进制、确定且区分内容；
  * - conflictStamp：冲突副本后缀 YYYYMMDDTHHmmss，本地时间、单位补零。
  *
- * 运行：npm run verify（第 10 个套件；裸 node 直跑本文件）。全部通过退出码 0，否则 1。
+ * 运行：pnpm verify（第 10 个套件；裸 node 直跑本文件）。全部通过退出码 0，否则 1。
  */
 import { createHash } from 'node:crypto'
 import { conflictStamp, contentFingerprint, gitBlobSha, gitBlobShaBytes } from '../src/core/vault/hash.ts'

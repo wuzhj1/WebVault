@@ -6,7 +6,7 @@
  * - preferredLinkText / validateNewPath：重命名改链的写法与改名目标校验；
  * - resolverEquivalent：漂移扫描的跳过判定（路径集与 ID 映射逐一相等才算等价）。
  *
- * 运行：npm run verify（第 11 个套件；裸 node 直跑本文件）。全部通过退出码 0，否则 1。
+ * 运行：pnpm verify（第 11 个套件；裸 node 直跑本文件）。全部通过退出码 0，否则 1。
  */
 import type { NoteMeta } from '../src/core/db.ts'
 import {

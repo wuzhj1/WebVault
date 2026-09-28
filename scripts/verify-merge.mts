@@ -4,7 +4,7 @@
  * - threeWayMerge：以 base 为基准逐行合并两侧文本，不相交的修改自动合并，
  *   同行冲突时正文保底用本地、远端文本另行暴露，且绝不把冲突标记写进正文。
  *
- * 运行：npm run verify（第 5 个套件；裸 node 直跑本文件）。全部通过退出码 0，否则 1。
+ * 运行：pnpm verify（第 5 个套件；裸 node 直跑本文件）。全部通过退出码 0，否则 1。
  */
 import { classifySync, threeWayMerge } from '../src/core/sync/merge.ts'
 

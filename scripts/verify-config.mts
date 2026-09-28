@@ -3,7 +3,7 @@
  * owner/repo/branch（认不出的返回 null），normalizeGiteeConfig 则负责清洗配置对象——
  * 用户经常把整段 URL 粘进 owner 或 repo 栏，这里必须能从里面把字段拆回来。
  *
- * 运行：npm run verify（第 1 个套件；裸 node 直跑本文件，import src/core/sync/gitee.ts）。
+ * 运行：pnpm verify（第 1 个套件；裸 node 直跑本文件，import src/core/sync/gitee.ts）。
  * 全部通过输出 OK 且退出码 0，否则打印 expected/actual 差异并以 1 退出。
  */
 import { normalizeGiteeConfig, parseRepoUrl } from '../src/core/sync/gitee.ts'
@@ -83,6 +83,6 @@ check(
   { token: 't', owner: 'wuzhj', repo: 'my-note', branch: 'master' },
 )
 
-// 汇总：任一断言失败即以非 0 退出，让 `npm run verify` 整条链失败
+// 汇总：任一断言失败即以非 0 退出，让 `pnpm verify` 整条链失败
 console.log(`${fail === 0 ? 'OK  ' : 'FAIL'} verify-config: ${pass} passed, ${fail} failed`)
 if (fail > 0) process.exit(1)

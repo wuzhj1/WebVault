@@ -3,7 +3,7 @@
  * （目标、别名、#标题、#^块引用、!嵌入）、行内 #标签与标题行，并且必须正确跳过
  * frontmatter、行内代码和围栏代码块——这些地方的链接/标签不是笔记间的引用，进了索引就是脏数据。
  *
- * 运行：npm run verify（第 2 个套件；裸 node 直跑本文件）。全部通过退出码 0，否则 1。
+ * 运行：pnpm verify（第 2 个套件；裸 node 直跑本文件）。全部通过退出码 0，否则 1。
  */
 import { parseNote } from '../src/core/parse/links.ts'
 

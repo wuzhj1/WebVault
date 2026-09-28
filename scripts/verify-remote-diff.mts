@@ -4,7 +4,7 @@
  * - findRemoteDeletions：一次同步里找出“远端已消失、本地还认为存在”的笔记，
  *   同时跳过从未推送过的、本地已删的（墓碑）和已经标记过的，避免重复标记与误删。
  *
- * 运行：npm run verify（第 6 个套件；裸 node 直跑本文件）。全部通过退出码 0，否则 1。
+ * 运行：pnpm verify（第 6 个套件；裸 node 直跑本文件）。全部通过退出码 0，否则 1。
  */
 import type { NoteMeta } from '../src/core/db.ts'
 import { findRemoteDeletions, needsRemoteDelete } from '../src/core/sync/remote-diff.ts'
