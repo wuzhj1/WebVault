@@ -83,7 +83,20 @@ const sync = useSyncStore()
 const appearance = useAppearanceStore()
 
 /** Vditor 删除时把 `[[` 触发符一起吃掉,所以候选项的 value 必须自带方括号。 */
+/**
+ * `[[` 补全层的候选项:把目标包成 `[[目标]]` 交回 Vditor。
+ *
+ * `query` 是 Vditor `getKey` 从「光标前最后一个 `[[` 之后」原样切下来的片段，它**不判断这处链接有没有闭合**:
+ * 光标只要落在一个已经写完的 `[[双链]]` 上或它后面，片段里就带着 `]]`（连同用户随后敲的任何字）。
+ * 而 `Hint.fillEmoji` 会从 `[[` 一路替换到光标，值里再包一层方括号就等于把已有的 `]]` 又写了一遍
+ * —— 实测 `x [[abc]]zw` 按一次回车会变成 `x [[abc]]zw]]`。
+ *
+ * 片段里出现 `]` 就说明这处链接已经写完：wikilink 的目标不允许含 `]`（见 `core/parse/links.ts`
+ * 的 `[[([^[\]]+)]]`），所以那半截不可能是目标名的一部分。此时交空列表，`genHTML` 会据此收起弹层，
+ * 回车于是走正常换行；补全只在链接尚未闭合时才出手，也就不会再往闭合好的链接上重复补 `]]`。
+ */
 function hintLinks(query: string): { html: string; value: string }[] {
+  if (query.includes(']')) return []
   return vault.suggestLinks(query).map((item) => ({
     html: item.html,
     value: `[[${item.value}]]`,
