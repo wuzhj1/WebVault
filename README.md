@@ -31,7 +31,7 @@ pnpm dev           # http://localhost:5173
 自检命令：
 
 ```bash
-pnpm verify        # 12 个验证套件,576 条断言(配置 / 解析 / frontmatter 与 ID 兼容 / 链接改写 / 三方合并 / 远端删除判定 / 搜索 / 主题 / 路径与标题 / 内容指纹 / 链接解析 / 落盘簿记)
+pnpm verify        # 14 个验证套件,701 条断言(配置 / 解析 / frontmatter 与 ID 兼容 / 链接改写 / 三方合并 / 远端删除判定 / 搜索 / 主题 / 路径与标题 / 内容指纹 / 链接解析 / 落盘簿记 / ZIP 打包 / 凭据抹除)
 pnpm typecheck     # vue-tsc --noEmit
 pnpm build         # 类型检查 → 生成 PWA 图标与 vditor 静态资源 → 产出 dist/
 ```
@@ -172,6 +172,13 @@ Safari 的防跟踪策略（ITP）会在大约 7 天不使用后清空该站点�
 
 **你的 Gitee 仓库就是备份，也是导出格式**——里面是普通 `.md` 文件，可以直接用 Obsidian、VS Code 或任何编辑器打开。换设备时，新设备打开应用、填同一个仓库配置、同步即可。应用会主动申请持久化存储授权（设置里能看到是否已授权），降低被浏览器自动清理的概率。
 
+不想只依赖 Gitee 的话，「设置 → 数据与日志」里有**「导出备份 (zip)」**：把本机当前读得到的全部正文按原目录结构（含中文目录）打成一个 zip 下载，另在 `_webvault/` 下放一份导出时刻的索引快照和一份 `README.txt`。几处刻意的取舍：
+
+- **只读**，应用不支持从 zip 导入（恢复 = 把解压出的 `.md` 放回笔记目录，或重新连回 Gitee 同步）。
+- **不带 Gitee 令牌**——快照里的凭据字段在导出时被置空，键保留、值留空，方便你和 `.config` 原件对 diff；同步日志是滚动窗口，也一并不带。
+- **以磁盘为清单**：索引里标着「已缓存」而盘上读不到的正文会如实计入回执并单独弹一条警告，绝不静默少几篇。
+- 每篇的 `lastModified` 一并写进 zip，恢复出来的文件保留原来的修改时间。
+
 ---
 
 ## 同步是怎么做的
@@ -202,6 +209,7 @@ Safari 的防跟踪策略（ITP）会在大约 7 天不使用后清空该站点�
 - 仓库文件过多导致 Gitee 返回被截断的文件树时，本次同步不完整，会给一条警告。
 - 三方合并按行工作，不认识 YAML。两台设备分别改同一个 frontmatter 键时，合并结果可能出现重复的键。应用会**保留第一处并给出提示**，请自己在编辑器里清理；绝不会有键被静默改写或删掉。
 - 没有版本历史界面，也没有多用户协作模型；历史请直接去 Gitee 网页看提交记录。
+- 「导出备份 (zip)」只能导出、不能导入。恢复靠放回笔记目录或重新连 Gitee；导入要处理三方合并、删除墓碑与同步三元组的冲突，是另一个量级的问题，没有含糊地做半套。
 
 ---
 
@@ -212,6 +220,7 @@ Safari 的防跟踪策略（ITP）会在大约 7 天不使用后清空该站点�
 - 公用电脑、共享设备、别人的浏览器**不要填令牌**。
 - 令牌只勾 `projects` 权限，并用一个专门放笔记的私有仓库，这样即使泄露影响也有限。
 - 怀疑泄露就立刻去 Gitee 撤销令牌并重新生成，然后在设置里更新。
+- 「导出备份 (zip)」**不携带令牌**：`_webvault/settings.json` 里的凭据字段在导出时就被置空（`core/vault/redact.ts`，由 `verify-redact` 断言钉住）。但**绑定目录里的 `.config/settings.json` 仍是明文**，共享整个文件夹前要自己清掉。
 - 笔记在仓库里是明文 `.md`，**没有端到端加密**。仓库务必设为私有；不要把存笔记的仓库和公开项目放在一起。
 - 本应用不收集任何数据，也没有第三方统计或 CDN 依赖。
 
@@ -223,7 +232,8 @@ Safari 的防跟踪策略（ITP）会在大约 7 天不使用后清空该站点�
 src/
   core/
     db.ts              Dexie:notes / links / tags / cards / settings / syncLog
-    vault/             OPFS 读写与文件 mtime、路径规范化、git blob sha、.config 数据文件与落盘簿记
+    vault/             OPFS 读写与文件 mtime、路径规范化、git blob sha、.config 数据文件与落盘簿记、
+                       zip 打包与导出备份(含凭据抹除)
     editor/            编辑器内双链胶囊的 DOM 装饰(字符原样保留,不影响 Lute 序列化)
     index/             双链与标签解析、链接目标解析规则(含按 ID 解析)
     parse/             Markdown 扫描:[[链接]]、#标签、标题锚点;frontmatter 的逐行无损读写
@@ -236,8 +246,8 @@ src/
                        settings / appearance / ui(界面状态、最近/置顶与快捷键绑定持久化)
   components/          TopBar、SideBar、FileTree、NoteEditor、RightPanel、Modal、
                        SearchPanel、LinkPicker、GraphView、SettingsDialog、Notices
-scripts/               图标生成、vditor 资源拷贝 + 12 个 Node 验证套件(pnpm verify),CI 见 .github/workflows/
+scripts/               图标生成、vditor 资源拷贝 + 14 个 Node 验证套件(pnpm verify),CI 见 .github/workflows/
 public/vditor/         自托管的编辑器资源,由 scripts/copy-vditor.mjs 从 node_modules 拷出,不入库
 ```
 
-`core/parse/frontmatter.ts`、`core/zettel/*` 和 `core/vault/flush-state.ts` 是纯函数模块，有两条硬约束：**只用相对导入**（验证脚本以 `node scripts/*.mts` 直跑，没有 `@/` 别名解析），且**不得在运行时导入 `db.ts`**（它在模块作用域就构造 Dexie，需要 IndexedDB）。用 `import type` 引类型是安全的，编译后会被擦除。违反任一条，验证脚本会静默失效或直接崩掉。
+`core/parse/frontmatter.ts`、`core/zettel/*`、`core/vault/flush-state.ts`、`core/vault/zip.ts` 和 `core/vault/redact.ts` 是纯函数模块，有两条硬约束：**只用相对导入**（验证脚本以 `node scripts/*.mts` 直跑，没有 `@/` 别名解析），且**不得在运行时导入 `db.ts`**（它在模块作用域就构造 Dexie，需要 IndexedDB）。用 `import type` 引类型是安全的，编译后会被擦除。违反任一条，验证脚本会静默失效或直接崩掉。

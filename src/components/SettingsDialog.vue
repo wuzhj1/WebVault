@@ -13,8 +13,10 @@
  */
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { bindingOfEvent, displayOfBinding } from '@/core/hotkeys.ts'
-// 文件读写在本组件里承担四件维护动作：目录绑定/解除、探测持久化授权、重建索引时逐篇读正文、清空本机正文
+// 文件读写在本组件里承担五件维护动作：目录绑定/解除、探测持久化授权、重建索引时逐篇读正文、
+// 清空本机正文、导出 zip 备份；导出本身在 core/vault/backup.ts，本组件只负责按钮与回执。
 import * as opfs from '@/core/vault/opfs.ts'
+import { buildBackup, downloadZip } from '@/core/vault/backup.ts'
 import { ACCENTS, THEMES } from '@/core/theme/themes.ts'
 import { useAppearanceStore } from '@/stores/appearance.ts'
 import { useSettingsStore, type SyncSettings } from '@/stores/settings.ts'
@@ -66,6 +68,10 @@ const persisted = ref<boolean | null>(null)
 const reindexing = ref(false)
 /** 重建索引完成后写入处理篇数；用 null 区分「还没跑过」和「跑了但 0 篇」。 */
 const reindexed = ref<number | null>(null)
+/** 打包导出进行中；按钮文案与 disabled 都靠它。 */
+const exporting = ref(false)
+/** 导出成功后的回执（篇数 / 体积 / 文件名）；失败走 sync.notify，两者不会同时出现。 */
+const exportMsg = ref<string | null>(null)
 /** 清空本机正文的进行中标志：按钮文案与 disabled 都靠它。 */
 const wipeBusy = ref(false)
 /**
@@ -357,6 +363,31 @@ async function reindex(): Promise<void> {
     sync.notify('error', `重建索引失败: ${err instanceof Error ? err.message : String(err)}`)
   } finally {
     reindexing.value = false
+  }
+}
+
+/**
+ * 导出 zip 备份：打包交给 core/vault/backup.ts，本函数只管按钮态、回执与报错。
+ * 成功回执带上篇数与体积 —— 「下载成功」不等于「内容对」，把包里有什么写出来才好核对。
+ * 索引里标着已下载、盘上却读不到的正文会单独弹一条 warn，绝不静默少几篇。
+ */
+async function exportBackup(): Promise<void> {
+  exporting.value = true
+  exportMsg.value = null
+  try {
+    const archive = await buildBackup()
+    downloadZip(archive.bytes, archive.filename)
+    const kb = archive.bytes.length / 1024
+    const size = kb < 1024 ? `${kb.toFixed(0)} KB` : `${(kb / 1024).toFixed(1)} MB`
+    exportMsg.value = `已导出 ${archive.noteCount} 篇正文 / ${archive.rowCount} 行索引,${size} —— ${archive.filename}`
+    if (archive.missing > 0) {
+      sync.notify('warn', `有 ${archive.missing} 篇正文标着已下载却读不到,未包含在本次备份里。`)
+    }
+  } catch (err) {
+    // 没有这一 catch,抛错会穿过 finally 直达 void 调用点,按钮恢复了但用户不知道发生了什么。
+    sync.notify('error', `导出备份失败: ${err instanceof Error ? err.message : String(err)}`)
+  } finally {
+    exporting.value = false
   }
 }
 
@@ -677,6 +708,18 @@ onMounted(() => {
           </dd>
         </template>
       </dl>
+
+      <div class="row">
+        <button class="btn" type="button" :disabled="exporting" @click="exportBackup">
+          {{ exporting ? '打包中…' : '导出备份 (zip)' }}
+        </button>
+        <span v-if="exportMsg" class="field__tip">{{ exportMsg }}</span>
+      </div>
+      <p class="field__tip">
+        把本机的全部笔记正文连同索引快照打成一个 zip 下载,包内保持原目录结构,解压即可直接阅读。
+        导出<strong>只读</strong>,不改动任何数据;<strong>Gitee token 等凭据不会写进包里</strong>。
+        浏览器有清理内置存储的可能,这是独立于 Gitee 的第二份副本。
+      </p>
 
       <div class="row">
         <button class="btn" type="button" :disabled="reindexing" @click="reindex">
