@@ -14,6 +14,7 @@
  */
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { db } from '@/core/db.ts'
+import { useFocusTrap } from '@/core/ui/focus-trap.ts'
 import { cssColor } from '@/core/theme/apply.ts'
 import { titleOf } from '@/core/vault/paths.ts'
 import { useAppearanceStore } from '@/stores/appearance.ts'
@@ -28,6 +29,8 @@ const appearance = useAppearanceStore()
 /** Canvas 元素与其外层容器；容器负责提供 CSS 尺寸，Canvas 按 DPR 设置物理像素。 */
 const canvas = ref<HTMLCanvasElement | null>(null)
 const wrap = ref<HTMLElement | null>(null)
+/** 弹层卡片：焦点陷阱的循环范围与初始落点（见 useFocusTrap）。 */
+const box = ref<HTMLElement | null>(null)
 /** 筛选：只看当前笔记的一跳邻居（无激活笔记时开关禁用）。 */
 const local = ref(false)
 /** 工具条：常显所有节点的标题（默认开；大库嫌吵可关，悬停/当前的高亮标签不受它影响）。 */
@@ -654,13 +657,17 @@ function recenter(): void {
   wake()
 }
 
-/** Esc 关闭图谱；stopPropagation 防止外层（如全局快捷键）再处理这次按键。 */
-function onKeydown(event: KeyboardEvent): void {
-  if (event.key === 'Escape') {
+/**
+ * Esc 关闭 + Tab 循环 + 关闭后焦点还原：与 Modal / SearchPanel / LinkPicker 同一份实现。
+ * 原来这里手写了一份只处理 Esc 的监听，Tab 能一路走到遮罩背后的主界面。
+ * 初始焦点给卡片本体（图谱没有输入框，工具条按钮是 Tab 的第一站）。
+ */
+useFocusTrap(box, {
+  onEscape: (event) => {
     event.stopPropagation()
     emit('close')
-  }
-}
+  },
+})
 
 // 「只看邻居」开关变化 → 重建图（load 会复用旧坐标，布局不至于重置）。
 watch(local, () => {
@@ -681,23 +688,21 @@ onMounted(async () => {
   canvas.value?.addEventListener('pointercancel', onPointerUp)
   canvas.value?.addEventListener('pointerleave', onPointerLeave)
   canvas.value?.addEventListener('wheel', onWheel, { passive: false })
-  document.addEventListener('keydown', onKeydown)
   await load() // load 内部已经 wake，这里不必再排一次
 })
 
-/* 卸载：停掉动画帧、断开尺寸观察、移除 Esc 监听（指针监听随 canvas 一起回收）。 */
+/* 卸载：停掉动画帧、断开尺寸观察（Esc 监听与焦点还原归 useFocusTrap，指针监听随 canvas 回收）。 */
 onBeforeUnmount(() => {
   if (frame !== null) cancelAnimationFrame(frame)
   frame = null
   observer?.disconnect()
-  document.removeEventListener('keydown', onKeydown)
 })
 </script>
 
 <template>
   <Teleport to="body">
     <div class="graph" @mousedown.self="emit('close')">
-      <div class="graph__box" role="dialog" aria-label="关系图谱">
+      <div ref="box" class="graph__box" role="dialog" aria-modal="true" aria-label="关系图谱" tabindex="-1">
         <!-- 工具条：范围筛选（互不排斥时取交集）、统计与视图操作 -->
         <header class="graph__head">
           <h3>关系图谱</h3>

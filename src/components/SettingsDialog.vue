@@ -68,6 +68,39 @@ const reindexing = ref(false)
 const reindexed = ref<number | null>(null)
 /** 清空本机正文的进行中标志：按钮文案与 disabled 都靠它。 */
 const wipeBusy = ref(false)
+/**
+ * 危险动作的「预备」态：第一次点只上膛、不执行，第二次点才真跑。
+ * 这两个动作都不可逆（清空要等重新下载、解除绑定要重走授权），而原来的按钮是
+ * 一次点击直接执行 —— 手滑一下就得靠同步慢慢补。预备态超时自动收回，
+ * 免得用户上膛后切走忘了，回头误以为点一下就会执行。
+ */
+const wipeArmed = ref(false)
+const unbindArmed = ref(false)
+/** 上膛后未确认的自动收回计时器，两者共用一个句柄（同一时刻只会有一个处于预备态）。 */
+let disarmTimer: ReturnType<typeof setTimeout> | null = null
+
+/** 上膛并起一个 8 秒的自动收回；再次点击由各自的 on*Click 先 disarm 再执行。 */
+function arm(kind: 'wipe' | 'unbind'): void {
+  wipeArmed.value = kind === 'wipe'
+  unbindArmed.value = kind === 'unbind'
+  if (disarmTimer) clearTimeout(disarmTimer)
+  disarmTimer = setTimeout(() => {
+    wipeArmed.value = false
+    unbindArmed.value = false
+    disarmTimer = null
+  }, 8_000)
+}
+
+/** 收回预备态（执行前、切页、卸载都调），顺带清掉计时器。 */
+function disarm(): void {
+  wipeArmed.value = false
+  unbindArmed.value = false
+  if (disarmTimer) {
+    clearTimeout(disarmTimer)
+    disarmTimer = null
+  }
+}
+
 /** 目录绑定操作（选择 / 迁移 / 解除）的进行中标志：三者共用一个，避免并发切换后端。 */
 const dirBusy = ref(false)
 /** 目录操作成功后的回执文案（复制了多少、跳过多少）。 */
@@ -206,8 +239,15 @@ function onRecordKey(event: KeyboardEvent): void {
 }
 
 // 录制中切页 / 关弹窗都要摘监听:不然界面上看不见,按键却一直被吞。
-watch(tab, stopRecord)
-onBeforeUnmount(stopRecord)
+// 顺带收回危险动作的预备态:切到别的页还亮着「再点一次执行」，回来时很容易误触。
+watch(tab, () => {
+  stopRecord()
+  disarm()
+})
+onBeforeUnmount(() => {
+  stopRecord()
+  disarm()
+})
 
 /** 数据页与危险区用的三计数：排除「本机已删除」的墓碑笔记，只算真正还在库里的。 */
 const stats = computed(() => {
@@ -276,10 +316,19 @@ async function save(): Promise<void> {
   }
 }
 
-/** 「测试连接」也是先保存再探活：Gitee API 需要凭据，不存下来就没法只测当前输入。 */
+/**
+ * 「测试连接」也是先保存再探活：Gitee API 需要凭据，不存下来就没法只测当前输入。
+ * 保存本身也可能失败（配额、目录未授权），这里没有内联错误位 —— 走全局通知，
+ * 否则按钮点了什么都不发生。
+ */
 async function test(): Promise<void> {
-  await settings.save({ ...draft.value })
-  draft.value = { ...settings.settings }
+  try {
+    await settings.save({ ...draft.value })
+    draft.value = { ...settings.settings }
+  } catch (err) {
+    sync.notify('error', `保存设置失败: ${err instanceof Error ? err.message : String(err)}`)
+    return
+  }
   await sync.checkConnection()
 }
 
@@ -303,6 +352,9 @@ async function reindex(): Promise<void> {
     }
     await vault.refreshDerived()
     reindexed.value = count
+  } catch (err) {
+    // 没有这一 catch，抛错会穿过 finally 直达 void 调用点，按钮恢复了但用户不知道发生了什么。
+    sync.notify('error', `重建索引失败: ${err instanceof Error ? err.message : String(err)}`)
   } finally {
     reindexing.value = false
   }
@@ -322,6 +374,26 @@ async function wipeAndReload(): Promise<void> {
     error.value = err instanceof Error ? err.message : String(err)
     wipeBusy.value = false
   }
+}
+
+/** 清空按钮的两段式入口：先上膛，再点一次才真正 wipeAndReload。 */
+function onWipeClick(): void {
+  if (!wipeArmed.value) {
+    arm('wipe')
+    return
+  }
+  disarm()
+  void wipeAndReload()
+}
+
+/** 解除绑定的两段式入口，与 onWipeClick 同构（预备态见 arm 的注释）。 */
+function onUnbindClick(): void {
+  if (!unbindArmed.value) {
+    arm('unbind')
+    return
+  }
+  disarm()
+  void unbindDirectory()
 }
 
 /**
@@ -562,12 +634,14 @@ onMounted(() => {
         <button
           v-if="vault.storageBackend === 'dir'"
           class="btn"
+          :class="{ 'btn--danger': unbindArmed }"
           type="button"
           :disabled="dirBusy"
-          @click="unbindDirectory"
+          @click="onUnbindClick"
         >
-          解除绑定
+          {{ unbindArmed ? '再点一次确认解除' : '解除绑定' }}
         </button>
+        <button v-if="unbindArmed" class="btn btn--ghost" type="button" @click="disarm">取消</button>
       </div>
       <p v-if="!dirPickerOk" class="field__tip">当前浏览器不支持目录选择器,请改用 Chrome / Edge。</p>
       <p v-else class="field__tip">
@@ -640,15 +714,18 @@ onMounted(() => {
           用于修复本机文件损坏,或把 Safari 清空的缓存补回来。会先删除本机所有笔记正文,再从 Gitee
           仓库完整拉取。<strong>未上传的本地修改会丢失</strong>,请先确认「待上传」为 0。
         </p>
-        <!-- 三个禁用条件缺一不可：未配置就没处可拉；还有待上传就等于删掉唯一一份未同步的修改；进行中防重复点 -->
+        <!-- 三个禁用条件缺一不可：未配置就没处可拉；还有待上传就等于删掉唯一一份未同步的修改；进行中防重复点。
+             点击是两段式：第一次只上膛（文案变「再点一次」+ 危险配色 + 出现取消），第二次才执行。 -->
         <button
-          class="btn btn--danger"
+          class="btn"
+          :class="{ 'btn--danger': wipeArmed }"
           type="button"
           :disabled="!settings.configured || stats.pending > 0 || wipeBusy"
-          @click="wipeAndReload"
+          @click="onWipeClick"
         >
-          {{ wipeBusy ? '处理中…' : '清空并重新下载' }}
+          {{ wipeBusy ? '处理中…' : wipeArmed ? '再点一次确认清空' : '清空并重新下载' }}
         </button>
+        <button v-if="wipeArmed" class="btn btn--ghost" type="button" @click="disarm">取消</button>
         <p v-if="stats.pending > 0" class="field__tip">当前有 {{ stats.pending }} 篇待上传,请先同步。</p>
       </div>
     </template>
@@ -768,6 +845,13 @@ onMounted(() => {
 }
 
 .tabs__btn--on {
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+
+/* 选中页签必须自己盖过 hover：否则 .tabs__btn:hover(0,2,0) 会用 --bg-hover
+   压掉 --on(0,1,0) 的淡底，鼠标移上去像是高亮丢了（与 SideBar 同样的处理） */
+.tabs__btn--on:hover {
   background: var(--accent-soft);
   color: var(--accent-text);
 }
@@ -959,6 +1043,19 @@ onMounted(() => {
   background: var(--danger-soft);
   border-color: var(--danger);
   color: var(--danger);
+}
+
+/* .btn--danger 只有 (0,1,0)，压不住 .btn:hover:not(:disabled) 的 (0,3,0)：
+   危险按钮一悬停就退回中性底，「再点一次」的警告色恰好在最该强调的时刻消失。
+   这里用同特异度补一条覆盖，让预备态在 hover 下仍是危险配色。 */
+.btn--danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--danger) 24%, var(--bg));
+  color: var(--danger);
+}
+
+/* 危险区两个按钮是兄弟而不是 .row 子项，得自己留缝，否则「取消」贴着上膛按钮 */
+.danger .btn + .btn {
+  margin-left: 8px;
 }
 
 .btn--ghost {

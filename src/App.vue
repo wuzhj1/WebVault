@@ -14,7 +14,7 @@ import RightPanel from './components/RightPanel.vue'
 import SideBar from './components/SideBar.vue'
 import TopBar from './components/TopBar.vue'
 import { getSetting } from './core/db.ts'
-import { dropPendingSave, readPendingSave } from './core/editor/pending-save.ts'
+import { dropPendingSave, readPendingSave, snapshotPendingSave } from './core/editor/pending-save.ts'
 import { bindingOfEvent, hasMod, isTypingTarget } from './core/hotkeys.ts'
 import { titleOf } from './core/vault/paths.ts'
 import { useSyncStore } from './stores/sync.ts'
@@ -174,15 +174,21 @@ function onVisibility(): void {
 async function recoverPendingSave(): Promise<void> {
   const pending = readPendingSave()
   if (!pending) return
-  // 先丢快照再回灌：坏路径或写失败时，不能让它每轮启动都重试同一条。
-  dropPendingSave()
   const meta = vault.byPath.get(pending.path)
-  // 笔记已删或只剩墓碑时没有合法写入目标，直接丢弃这次恢复。
-  if (!meta || meta.removedLocal) return
+  // 笔记已删或只剩墓碑时没有合法写入目标，这条快照永远回灌不了 —— 无条件丢弃，
+  // 免得每轮启动都重试同一条死路径。
+  if (!meta || meta.removedLocal) {
+    dropPendingSave()
+    return
+  }
   try {
     await vault.saveBody(pending.path, pending.value)
+    // 写成功才丢快照：原先是「先 drop 再写」，一次写失败（配额、目录未授权）就同时
+    // 丢掉了快照和正文，用户重启也找不回来。失败路径反而要把快照原样写回去。
+    dropPendingSave()
     sync.notify('info', `已恢复上次未保存的编辑「${titleOf(pending.path)}」`)
   } catch (err) {
+    snapshotPendingSave(pending.path, pending.value)
     sync.notify('error', `恢复未保存的编辑失败: ${err instanceof Error ? err.message : String(err)}`)
   }
 }

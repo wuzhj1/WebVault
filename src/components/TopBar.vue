@@ -29,6 +29,25 @@ const vault = useVaultStore()
 
 /** 标题行：无选中笔记时退回应用名，避免顶栏出现空白。 */
 const title = computed(() => (vault.activePath ? titleOf(vault.activePath) : 'WebVault'))
+/**
+ * 落盘状态徽标：防抖窗口内「改了但还没存」是完全不可见的，这是唯一一处能看见它的地方。
+ * idle 返回 null，不渲染徽标；saved 显示具体时刻 —— 只写「已保存」无法区分
+ * 是刚存的还是十分钟前存的，等于没说。
+ */
+const saveLabel = computed(() => {
+  switch (vault.saveState) {
+    case 'dirty':
+      return '有未保存修改'
+    case 'saving':
+      return '保存中…'
+    case 'saved':
+      return vault.savedAt === null ? '已保存' : `已保存 ${formatClock(vault.savedAt)}`
+    case 'error':
+      return '保存失败'
+    default:
+      return null
+  }
+})
 /** 待上传篇数，>0 时在同步按钮上挂数字角标。 */
 const pending = computed(() => vault.pendingUpload)
 /** 同步进行中禁用按钮，防重入。 */
@@ -40,6 +59,11 @@ const offline = computed(() => !sync.online)
 function onSync(): void {
   if (sync.syncing) return
   void sync.syncNow()
+}
+
+/** 时刻 → `HH:mm`（24 小时制）；徽标里只需要时分，日期对"刚存过"这件事没意义。 */
+function formatClock(ts: number): string {
+  return new Date(ts).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })
 }
 </script>
 
@@ -53,7 +77,19 @@ function onSync(): void {
 
     <!-- 左区：侧栏开关 + 当前笔记标题（副行是完整路径）；与右区的全局动作之间靠 spacer 撑开 -->
     <div class="topbar__title">
-      <span class="topbar__name">{{ title }}</span>
+      <span class="topbar__name">
+        <!-- 标题自己占一个 span：外层是 flex，文本节点会变成匿名 flex item，省略号不再生效 -->
+        <span class="topbar__name-text">{{ title }}</span>
+        <!-- 徽标不参与截断：宁可把它挤掉（flex:none），也不能让标题把它顶出视野 -->
+        <span
+          v-if="saveLabel"
+          class="saveflag"
+          :class="`saveflag--${vault.saveState}`"
+          :title="saveLabel"
+        >
+          {{ saveLabel }}
+        </span>
+      </span>
       <span v-if="vault.activePath" class="topbar__path">{{ vault.activePath }}</span>
     </div>
 
@@ -150,11 +186,46 @@ function onSync(): void {
 }
 
 .topbar__name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
   font-size: 13.5px;
   font-weight: 600;
+}
+
+.topbar__name-text {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* —— 落盘状态徽标：常驻可见，颜色只作辅助，文案本身已把状态说全 —— */
+.saveflag {
+  flex: none;
+  padding: 0 6px;
+  border-radius: 8px;
+  font-size: 10.5px;
+  font-weight: 500;
+  line-height: 16px;
+  color: var(--text-muted);
+  background: var(--bg-hover);
+}
+
+.saveflag--dirty {
+  color: var(--warn);
+  background: var(--warn-soft);
+}
+
+.saveflag--saving {
+  color: var(--accent-text);
+  background: var(--accent-soft);
+}
+
+.saveflag--error {
+  color: var(--danger);
+  background: var(--danger-soft);
 }
 
 .topbar__path {

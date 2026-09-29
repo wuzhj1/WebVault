@@ -148,6 +148,15 @@ export const useVaultStore = defineStore('vault', () => {
   const cards = shallowRef<CardRow[]>([])
   /** 同步引擎改写当前打开笔记的正文时自增，编辑器据此重新加载内容。 */
   const bodyRevision = ref(0)
+  /**
+   * 编辑器落盘状态：idle=没有待写内容、dirty=有未落盘的修改、saving=写入中、
+   * saved=已写进 OPFS、error=写失败（内容还挂在 pendingValue 上等重试）。
+   * 状态归编辑器写、顶栏读 —— 700ms 防抖窗口内用户完全看不出"改了到底存没存"，
+   * 这是唯一能让那段时间可见的地方。error 不自动回落：下一次成功保存才翻回 saved。
+   */
+  const saveState = ref<'idle' | 'dirty' | 'saving' | 'saved' | 'error'>('idle')
+  /** 最近一次成功落盘的时刻；顶栏显示「已保存 14:03」用，null = 本会话还没保存过。 */
+  const savedAt = ref<number | null>(null)
 
   /** path/标题/zid → 笔记的解析器，随 notes/cards 变化重建。 */
   const resolver = computed<Resolver>(() => buildResolver(notes.value, cards.value))
@@ -881,6 +890,8 @@ export const useVaultStore = defineStore('vault', () => {
     pendingUpload,
     uncached,
     bodyRevision,
+    saveState,
+    savedAt,
     resolver,
     byPath,
     init,

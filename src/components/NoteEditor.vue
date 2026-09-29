@@ -111,6 +111,7 @@ async function flushSave(): Promise<void> {
   // 与其写坏文件不如回滚到上次渲染的正文并报警(这次待写内容随 pendingValue 一起丢弃)。
   if (loadedFm !== '' && !value.startsWith(loadedFm)) {
     pendingValue = null
+    vault.saveState = 'idle'
     sync.notify('warn', '元数据块偏移计算异常，已拒绝保存以防止正文损坏')
     setContent(renderedBody ?? '', true)
     return
@@ -119,15 +120,19 @@ async function flushSave(): Promise<void> {
   // 快照必须写在 await 之前:beforeunload 不等任何 Promise,这是唯一能留住这次编辑的时机。
   // 写成功后由 clearPendingSave 按内容比对清掉(见 core/editor/pending-save.ts)。
   snapshotPendingSave(path, value)
+  vault.saveState = 'saving'
   try {
     await vault.saveBody(path, value)
   } catch (err) {
     // 落盘失败:把正文放回 pendingValue,下一次输入/换文/页面隐藏都会重试;
     // 快照也留着,即便这一轮再没机会重试,下次启动仍能回灌。
     pendingValue = body
+    vault.saveState = 'error'
     sync.notify('error', `保存失败: ${err instanceof Error ? err.message : String(err)}`)
     return
   }
+  vault.saveState = 'saved'
+  vault.savedAt = Date.now()
   clearPendingSave(path, value)
   sync.schedulePush()
 }
@@ -136,6 +141,9 @@ async function flushSave(): Promise<void> {
 function onInput(value: string): void {
   if (suppressInput || !loadedPath) return
   pendingValue = value
+  // 防抖窗口内这一格是用户唯一能感知"还没存"的地方;已在 saving/error 中时不动,
+  // 免得刚失败就被一次新的输入抹成"改了"。
+  if (vault.saveState !== 'saving' && vault.saveState !== 'error') vault.saveState = 'dirty'
   // 每次输入都重置同一个 timer:滑动式防抖,而不是排一串落盘任务。
   if (saveTimer) clearTimeout(saveTimer)
   saveTimer = setTimeout(() => {
@@ -162,6 +170,12 @@ async function loadActive(): Promise<void> {
   if (!editorReady) return
   await flushSave()
   const prevPath = loadedPath
+  // flushSave 落完就没有任何待写内容了；若它因为 pendingValue 为空而直接返回
+  // （例如外部替我们保存过），状态还停在 dirty，这里统一收口。
+  // 换文时还多一件事：上一篇的「已保存 14:03」不能挂到这一篇头上 —— 它描述的是另一篇。
+  if (pendingValue === null && (vault.saveState === 'dirty' || vault.saveState === 'saving')) {
+    vault.saveState = 'idle'
+  }
 
   const path = vault.activePath
   if (!path) {
@@ -169,8 +183,10 @@ async function loadActive(): Promise<void> {
     loadedFm = ''
     state.value = 'empty'
     setContent('', false)
+    vault.saveState = 'idle'
     return
   }
+  if (path !== prevPath && vault.saveState === 'saved') vault.saveState = 'idle'
 
   loadedPath = path
   const raw = await vault.readBody(path)
@@ -253,7 +269,11 @@ function onSelectionChange(): void {
   queueDecorate()
 }
 
-/** 跟随链接:能解析就交出去,解析不出就直接建一篇再打开。 */
+/**
+ * 跟随链接:能解析就交出去,解析不出就直接建一篇再打开。
+ * 新建可能失败(路径不合法、目录被外部改名),失败必须报出来 —— 调用方是
+ * `void followLink(...)`,不 catch 就只剩一条 unhandled rejection,界面毫无反应。
+ */
 async function followLink(raw: string): Promise<void> {
   const target = raw.trim()
   if (target === '' || isAttachmentTarget(target)) return
@@ -262,7 +282,11 @@ async function followLink(raw: string): Promise<void> {
     emit('open-link', resolved)
     return
   }
-  emit('open-link', await vault.createFromLink(target))
+  try {
+    emit('open-link', await vault.createFromLink(target))
+  } catch (err) {
+    sync.notify('error', `无法创建「${target}」: ${err instanceof Error ? err.message : String(err)}`)
+  }
 }
 
 /** 用来区分任务复选框和其它 input(Vditor 的搜索框之类也是 input)。 */

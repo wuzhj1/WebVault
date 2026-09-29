@@ -13,6 +13,8 @@
  */
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { resolveTarget } from '@/core/index/resolve.ts'
+import { useFocusTrap } from '@/core/ui/focus-trap.ts'
+import { useSyncStore } from '@/stores/sync.ts'
 import { useVaultStore } from '@/stores/vault.ts'
 
 /** 三条出口：open=切到该笔记并关闭；insert=把 target 交回编辑器插入（不打开文件）；close=纯关闭。 */
@@ -23,9 +25,13 @@ const emit = defineEmits<{
 }>()
 
 const vault = useVaultStore()
+/** 打开失败时的唯一出口：浮层自身没有错误位，借全局通知报出来。 */
+const sync = useSyncStore()
 
 /** 挂载后立即聚焦：浮层一出现就能直接打字，无需再点一下输入框。 */
 const input = ref<HTMLInputElement | null>(null)
+/** 卡片元素：焦点陷阱的循环范围（见 useFocusTrap）。 */
+const box = ref<HTMLElement | null>(null)
 /** 当前输入，同时驱动候选过滤（见 rows）与光标复位（见 watch(query)）。 */
 const query = ref('')
 /** 高亮行下标，键盘移动与鼠标 hover 共同维护。 */
@@ -58,14 +64,17 @@ function move(delta: number): void {
 /**
  * 打开：未指定行时取当前高亮行。createFromLink 先按链接解析规则找已存在的笔记，
  * 找不到才新建 —— 回传的 path 因此一定是可打开的真实文件。
+ * 失败时**不关浮层**：用户还停在选择上下文里，改一行目标再按一次即可，而不是被弹回编辑器。
  */
-function open(row?: Row): void {
+async function open(row?: Row): Promise<void> {
   const target = row ?? rows.value[cursor.value]
   if (!target) return
-  void vault.createFromLink(target.target).then((path) => {
-    emit('open', path)
+  try {
+    emit('open', await vault.createFromLink(target.target))
     emit('close')
-  })
+  } catch (err) {
+    sync.notify('error', `无法打开「${target.target}」: ${err instanceof Error ? err.message : String(err)}`)
+  }
 }
 
 /** 只把目标文本交给编辑器（emit insert），不读写任何文件；同样缺省取高亮行。 */
@@ -76,10 +85,8 @@ function insert(row?: Row): void {
   emit('close')
 }
 
-/**
- * document 级键盘处理：Esc 关闭、↑/↓ 移动高亮、Enter 打开，
- * Ctrl/⌘ + Enter 降级为「只插入链接」—— 把链接写进当前笔记而不是跳走。
- */
+/** document 级键盘处理：Esc 关闭、↑/↓ 移动高亮、Enter 打开，
+ * Ctrl/⌘ + Enter 降级为「只插入链接」—— 把链接写进当前笔记而不是跳走。 */
 function onKeydown(event: KeyboardEvent): void {
   if (event.key === 'Escape') {
     event.preventDefault()
@@ -97,14 +104,20 @@ function onKeydown(event: KeyboardEvent): void {
   }
 }
 
+/**
+ * Tab 循环与关闭后的焦点还原走共用实现；Esc 仍由上面的 onKeydown 认领 ——
+ * 它和 Enter 的分支挤在同一个函数里，拆出去只会让「按 Esc 到底谁响应」更难读。
+ * （Modal 那边同时挂着监听时两边都会收到，与本次改动之前的行为一致。）
+ */
+useFocusTrap(box, { initialFocus: input })
+
 /** 查询一变就把高亮拉回首行：候选顺序已变，旧下标指向的行没有意义。 */
 watch(query, () => {
   cursor.value = 0
 })
 
-// 聚焦输入框；document 监听必须成对解绑，否则浮层关掉后 Esc 仍会触发 close。
+// document 监听必须成对解绑，否则浮层关掉后 Esc 仍会触发 close。
 onMounted(() => {
-  input.value?.focus()
   document.addEventListener('keydown', onKeydown)
 })
 
@@ -115,7 +128,7 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKeydown))
   <Teleport to="body">
     <!-- 遮罩：.self 保证只有点在遮罩本体上才关闭，点卡片内部（含拖动选中文本）不算 -->
     <div class="pick" @mousedown.self="emit('close')">
-      <div class="pick__box" role="dialog" aria-label="链接到笔记">
+      <div ref="box" class="pick__box" role="dialog" aria-modal="true" aria-label="链接到笔记">
         <!-- 输入行：左侧 [[ 视觉标记表明当前是「链接目标」输入态 -->
         <div class="pick__bar">
           <span class="pick__mark">[[</span>

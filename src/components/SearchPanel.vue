@@ -12,6 +12,7 @@
  * 依赖：core/search 的 search()（索引是否重建由传入的 vault.revision 决定）与 vault store。
  */
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { useFocusTrap } from '@/core/ui/focus-trap.ts'
 import { search, type SearchHit } from '@/core/search/index.ts'
 import { useVaultStore } from '@/stores/vault.ts'
 
@@ -25,6 +26,8 @@ const vault = useVaultStore()
 
 /** 挂载即聚焦：面板的主交互就是直接打字。 */
 const input = ref<HTMLInputElement | null>(null)
+/** 卡片元素：焦点陷阱的循环范围与初始落点（见 useFocusTrap）。 */
+const box = ref<HTMLElement | null>(null)
 /** 查询串，每次变动触发防抖搜索。 */
 const query = ref((props.initial ?? '').trim())
 /** 当前结果，整批替换（不做逐条 diff）。 */
@@ -98,12 +101,10 @@ function choose(hit?: SearchHit): void {
   emit('close')
 }
 
-/** document 级键盘导航：Esc 关闭、↑/↓ 移动高亮（preventDefault 兼带拦掉页面滚动）、Enter 打开。 */
+/** document 级键盘导航：↑/↓ 移动高亮（preventDefault 兼带拦掉页面滚动）、Enter 打开。
+ *  Esc 与 Tab 循环交给 useFocusTrap —— 那是四个浮层共用的焦点契约，不在这里重复实现。 */
 function onKeydown(event: KeyboardEvent): void {
-  if (event.key === 'Escape') {
-    event.preventDefault()
-    emit('close')
-  } else if (event.key === 'ArrowDown') {
+  if (event.key === 'ArrowDown') {
     event.preventDefault()
     move(1)
   } else if (event.key === 'ArrowUp') {
@@ -115,10 +116,13 @@ function onKeydown(event: KeyboardEvent): void {
   }
 }
 
+// 焦点陷阱 + Esc 关闭 + 关闭后焦点还原：与 Modal / LinkPicker / GraphView 同一份实现。
+// 初始焦点给输入框（面板的主交互就是直接打字），nextTick 由 composable 负责。
+useFocusTrap(box, { onEscape: () => emit('close'), initialFocus: input })
+
 // 打开即聚焦输入框；document 监听必须成对解绑，否则面板关闭后仍会响应键盘。
 // 带初始查询打开时跳过防抖直接搜一次——用户点了标签就是来看结果的，不该先愣 180ms。
 onMounted(() => {
-  input.value?.focus()
   document.addEventListener('keydown', onKeydown)
   if (query.value !== '') void run()
 })
@@ -130,7 +134,7 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKeydown))
   <Teleport to="body">
     <!-- 遮罩：.self 点空白关闭；卡片内操作不冒泡到遮罩 -->
     <div class="search" @mousedown.self="emit('close')">
-      <div class="search__box" role="dialog" aria-label="全库搜索">
+      <div ref="box" class="search__box" role="dialog" aria-modal="true" aria-label="全库搜索">
         <!-- 输入行：busy 时用 spinner 占位，提示查询仍在进行 -->
         <div class="search__bar">
           <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">

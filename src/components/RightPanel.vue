@@ -16,6 +16,7 @@
 import { computed, ref, watch } from 'vue'
 import { db } from '@/core/db.ts'
 import { parseFrontmatter } from '@/core/parse/frontmatter.ts'
+import { useSyncStore } from '@/stores/sync.ts'
 import { useVaultStore } from '@/stores/vault.ts'
 
 const emit = defineEmits<{
@@ -24,6 +25,8 @@ const emit = defineEmits<{
 }>()
 
 const vault = useVaultStore()
+/** 「待创建」点击失败时的唯一出口：面板没有内联错误位，借全局通知报出来。 */
+const sync = useSyncStore()
 
 /** 当前笔记的标签列表，带 `#` 前缀，仅用于展示。 */
 const tags = ref<string[]>([])
@@ -92,9 +95,16 @@ function countWords(body: string): number {
   return cjk + latin
 }
 
-/** 点「待创建」行:按链接目标建出笔记,建成后直接打开。 */
-function createMissing(target: string): void {
-  void vault.createFromLink(target).then((path) => emit('open', path))
+/**
+ * 点「待创建」行：按链接目标建出笔记，建成后直接打开。
+ * 失败（例如目标是附件类型）必须落到全局通知 —— 裸 `void ...then()` 会让错误静默消失。
+ */
+async function createMissing(target: string): Promise<void> {
+  try {
+    emit('open', await vault.createFromLink(target))
+  } catch (err) {
+    sync.notify('error', `无法创建「${target}」: ${err instanceof Error ? err.message : String(err)}`)
+  }
 }
 
 /** 当前笔记换了、正文改了(mtime)或修订号变了(别处保存/同步拉取)都重算本地字段;immediate 保证首帧就有数据。 */
@@ -267,6 +277,13 @@ watch(
 }
 
 .tabs__btn--on {
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+
+/* 选中页签必须自己盖过 hover：否则 .tabs__btn:hover(0,2,0) 会用 --bg-hover
+   压掉 --on(0,1,0) 的淡底，鼠标移上去像是高亮丢了（与 SideBar 同样的处理） */
+.tabs__btn--on:hover {
   background: var(--accent-soft);
   color: var(--accent-text);
 }

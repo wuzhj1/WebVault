@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { cardPath, dirOf, sanitizeTitle, titleOf } from '@/core/vault/paths.ts'
 import FileTree from './FileTree.vue'
 import Modal from './Modal.vue'
+import { useSyncStore } from '@/stores/sync.ts'
 import { useUiStore } from '@/stores/ui.ts'
 import { useVaultStore, type TreeNode } from '@/stores/vault.ts'
 
@@ -17,6 +18,8 @@ const emit = defineEmits<{ (e: 'open', path: string): void; (e: 'search', query:
 const vault = useVaultStore()
 /** 折叠目录与置顶/最近两组书签都落在 ui store（持久化 + 跨组件共享）。 */
 const ui = useUiStore()
+/** 删除 / 待建创建这类没有内联错误位的操作，失败时借全局通知出口报出来。 */
+const sync = useSyncStore()
 
 const menu = ref<{ path: string; x: number; y: number } | null>(null)
 const renaming = ref<string | null>(null)
@@ -266,11 +269,20 @@ async function confirmRename(): Promise<void> {
   }
 }
 
+/**
+ * 删除失败时不能把弹窗关掉：`deleting` 一置空，错误文案就没地方渲染了。
+ * 因此先关弹窗再落 toast —— 与 rename/create 的「弹窗内联错误」不同，
+ * 删除弹窗本身没有错误插槽，全局通知是它唯一可靠的出口。
+ */
 async function confirmDelete(): Promise<void> {
   const path = deleting.value
   if (!path) return
-  await vault.deleteNote(path)
   deleting.value = null
+  try {
+    await vault.deleteNote(path)
+  } catch (err) {
+    sync.notify('error', `删除「${titleOf(path)}」失败: ${err instanceof Error ? err.message : String(err)}`)
+  }
 }
 
 async function startCreate(): Promise<void> {
@@ -310,8 +322,17 @@ async function confirmCreate(): Promise<void> {
   }
 }
 
-function openUnresolved(target: string): void {
-  void vault.createFromLink(target).then((path) => emit('open', path))
+/**
+ * 「待创建」行：点了就要么跳转、要么建出来，失败必须有回音。
+ * 原来是裸 `void ....then(...)`，附件目标抛错（`createFromLink` 对附件直接 throw）
+ * 时界面毫无反应，只剩控制台一条 unhandled rejection。
+ */
+async function openUnresolved(target: string): Promise<void> {
+  try {
+    emit('open', await vault.createFromLink(target))
+  } catch (err) {
+    sync.notify('error', `无法创建「${target}」: ${err instanceof Error ? err.message : String(err)}`)
+  }
 }
 
 onBeforeUnmount(closeMenu)
