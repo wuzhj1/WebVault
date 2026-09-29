@@ -15,6 +15,7 @@ import SideBar from './components/SideBar.vue'
 import TopBar from './components/TopBar.vue'
 import { getSetting } from './core/db.ts'
 import { dropPendingSave, readPendingSave, snapshotPendingSave } from './core/editor/pending-save.ts'
+import { onFlushError } from './core/vault/datafiles.ts'
 import { bindingOfEvent, hasMod, isTypingTarget } from './core/hotkeys.ts'
 import { titleOf } from './core/vault/paths.ts'
 import { useSyncStore } from './stores/sync.ts'
@@ -205,6 +206,18 @@ async function locateLastNote(): Promise<void> {
   await openNote(path)
 }
 
+/**
+ * `.config` 落盘失败原先只写 console.error ——「文件是真相源」这句话会在用户完全不知情时失效，
+ * 直到下次启动才暴露出索引和文件对不上。core 层不 import 任何 store（会成环），只能回调注入。
+ * 连续失败只报一次，见 datafiles 的 flushFailed。
+ */
+const offFlushError = onFlushError((file, err) => {
+  sync.notify(
+    'error',
+    `保存索引/设置到 .config/${file} 失败,数据仍留在浏览器里: ${err instanceof Error ? err.message : String(err)}`,
+  )
+})
+
 onMounted(async () => {
   if (window.innerWidth < 1200) rightOpen.value = false
   syncDrawerState()
@@ -225,8 +238,9 @@ onMounted(async () => {
   startupDone.value = true
 })
 
-// 卸载前注销全部监听：媒体查询、快捷键、关闭前落盘、页面隐藏落盘。
+// 卸载前注销全部监听：媒体查询、快捷键、关闭前落盘、页面隐藏落盘、.config 落盘失败回调。
 onBeforeUnmount(() => {
+  offFlushError()
   narrow?.removeEventListener('change', syncDrawerState)
   window.removeEventListener('keydown', onKeydown)
   window.removeEventListener('beforeunload', flush)

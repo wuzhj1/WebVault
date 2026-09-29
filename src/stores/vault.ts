@@ -223,8 +223,17 @@ export const useVaultStore = defineStore('vault', () => {
   const activeNote = computed(() =>
     activePath.value ? byPath.value.get(activePath.value) ?? null : null,
   )
-  /** 待上传条数（脏笔记 + 删除墓碑），驱动同步角标。 */
-  const pendingUpload = computed(() => notes.value.filter((n) => n.dirty || n.removedLocal).length)
+  /**
+   * 待上传条数，驱动同步角标与「清空本机正文」的前置拦截。
+   *
+   * 只数**真正会被推上 Gitee** 的行：有本地改动的活笔记，加上「远端曾有过」的墓碑。
+   * `remoteSha === null` 的墓碑不算 —— 引擎对它做的是本地清除（engine.push 直接删行），
+   * 不是上传；算进来会让「删除一篇从未同步过的笔记」顶出一个永远推不出去的角标。
+   */
+  const pendingUpload = computed(
+    () =>
+      notes.value.filter((n) => (n.dirty && !n.removedLocal) || (n.removedLocal && n.remoteSha !== null)).length,
+  )
   /** 已知存在于远端、但本地还没有正文（未缓存）的笔记，预取与按需下载都从这里取活。 */
   const uncached = computed(() => notes.value.filter((n) => !n.cached && !n.removedLocal))
 
@@ -256,8 +265,24 @@ export const useVaultStore = defineStore('vault', () => {
    * 应用之外删除的笔记，以及 Safari ITP 清空 OPFS 而 IndexedDB 幸存下来的情况。
    */
   async function reconcile(): Promise<void> {
-    const onDisk = new Set(await opfs.listNotePaths())
     const stored = await db.notes.toArray()
+
+    /**
+     * 墓碑 = 「这个路径的本地正文不该存在」。先清正文，再决定墓碑留不留。
+     * 顺序反过来的话，同一次对账就会把这个残留文件当成「索引外的新笔记」收养回来 ——
+     * 删除或移动的旧路径就此复活，而且是带着 `dirty=1` 排进上传队列的复活。
+     * 这正是「先删文件、后改索引」那条老路径中途崩溃时留下的现场。
+     */
+    for (const n of stored) {
+      if (!n.removedLocal) continue
+      try {
+        await opfs.deleteNote(n.path)
+      } catch {
+        // 删不掉就留到下一轮：索引这侧已经是对的，一个孤儿文件不影响任何读写。
+      }
+    }
+
+    const onDisk = new Set(await opfs.listNotePaths())
 
     // 远端从未有过的文件的墓碑永远推不出去；不清理的话它会一直挂在待上传计数里。
     const stale = new Set(
@@ -266,12 +291,16 @@ export const useVaultStore = defineStore('vault', () => {
     if (stale.size > 0) await db.notes.bulkDelete([...stale])
     const known = stored.filter((n) => !stale.has(n.path))
 
-    if (known.length > 0 && onDisk.size === 0) {
+    // 墓碑不算「活笔记」：库里只剩待推的删除、盘上一份不剩，是用户把笔记全删光的正常状态。
+    // 拿它判定「浏览器清空了缓存」会触发整库重新下载，把刚删掉的笔记原样拉回来。
+    const live = known.filter((n) => !n.removedLocal)
+    if (live.length > 0 && onDisk.size === 0) {
       storageWasWiped.value = true
       // 保留索引：sync store 会用 remoteSha 从 Gitee 把正文重新拉回来。
-      const reset = known.map((n) => ({ ...n, cached: 0 as const }))
+      const reset = live.map((n) => ({ ...n, cached: 0 as const }))
       await db.notes.bulkPut(reset)
-      notes.value = reset
+      // 重新读全表而不是直接塞 reset —— 后者只装了活笔记，会把还没推的墓碑从内存里抹掉。
+      notes.value = await db.notes.toArray()
       await refreshDerived()
       return
     }
@@ -669,11 +698,19 @@ export const useVaultStore = defineStore('vault', () => {
     return meta
   }
 
+  /** 某路径是否已被**在用**的笔记占用：墓碑不算 —— 删完/移走后立刻同名重建是正常操作。 */
+  function occupiedBy(path: string): boolean {
+    const row = byPath.value.get(path)
+    return row !== undefined && row.removedLocal === 0
+  }
+
   /** 新建笔记：路径归一化并补 .md 后缀；路径非 .md 抛错，已存在则原样返回该路径（幂等）。 */
   async function createNote(rawPath: string, content = ''): Promise<string> {
     const path = normalizePath(ensureMdExt(rawPath))
     if (!isNotePath(path)) throw new Error('只能创建 .md 笔记')
-    if (byPath.value.has(path)) return path
+    // 占用判定用 occupiedBy：路径上留着墓碑时必须放行并写正文，
+    // 否则 createNote 会在「已有同名行」处早退，返回一个根本没有文件的路径。
+    if (occupiedBy(path)) return path
 
     await opfs.writeNote(path, content)
     const sha = await gitBlobSha(content)
@@ -699,11 +736,11 @@ export const useVaultStore = defineStore('vault', () => {
   async function renameNote(from: string, rawTo: string): Promise<string> {
     const to = normalizePath(ensureMdExt(rawTo))
     if (from === to) return from
-    if (byPath.value.has(to)) throw new Error(`已存在同名笔记: ${to}`)
+    if (occupiedBy(to)) throw new Error(`已存在同名笔记: ${to}`)
 
     const body = (await opfs.readNote(from)) ?? ''
+    // 先把新路径写成：正文落盘是这一步唯一的硬失败点，失败时旧路径原封不动、索引还没动。
     await opfs.writeNote(to, body)
-    await opfs.deleteNote(from)
 
     const prev = byPath.value.get(from) ?? newMeta(from)
     await db.notes.delete(from)
@@ -718,20 +755,21 @@ export const useVaultStore = defineStore('vault', () => {
     }
     await db.notes.put(meta)
 
-    // git 记录移动就是「旧路径删除 + 新路径新增」，所以旧路径必须留一条墓碑排队推删除——
-    // 但前提是它曾经上过远端（needsRemoteDelete），否则墓碑永远推不出去。
-    if (needsRemoteDelete(prev)) {
-      const tombstone: NoteMeta = {
-        ...newMeta(from),
-        baseSha: prev.baseSha,
-        remoteSha: prev.remoteSha,
-        localSha: prev.localSha,
-        cached: 0,
-        dirty: 0,
-        removedLocal: 1,
-      }
-      await db.notes.put(tombstone)
+    // git 记录移动就是「旧路径删除 + 新路径新增」，所以旧路径必须留一条墓碑排队推删除 ——
+    // 但只有曾经上过远端（needsRemoteDelete）的才带 remoteSha，否则墓碑永远推不出去。
+    // 从未上过远端的也照样留一条临时墓碑：它标记「这个路径不该再有正文」，
+    // 让中途失败留下的旧文件能被下次对账清掉，而不是被当成新笔记收养回来（见 reconcile）。
+    const remote = needsRemoteDelete(prev)
+    const tombstone: NoteMeta = {
+      ...newMeta(from),
+      baseSha: remote ? prev.baseSha : null,
+      remoteSha: remote ? prev.remoteSha : null,
+      localSha: remote ? prev.localSha : null,
+      cached: 0,
+      dirty: 0,
+      removedLocal: 1,
     }
+    await db.notes.put(tombstone)
 
     await db.transaction('rw', db.links, db.tags, db.cards, async () => {
       const ownLinks = await db.links.where('src').equals(from).toArray()
@@ -747,8 +785,23 @@ export const useVaultStore = defineStore('vault', () => {
     })
 
     await rewriteInboundLinks(from, to)
-    notes.value = await db.notes.toArray()
     if (activePath.value === from) activePath.value = to
+
+    // 旧正文最后删：此时新正文已落盘、入链也改写完了，删失败只留下孤儿文件，
+    // 由下次对账按墓碑清掉。这一步早先放在最前面 —— 一旦后续任何一步抛错，
+    // 用户看到的是「重命名失败」，而盘上已经躺着两份、索引还指着旧路径。
+    let fileGone = false
+    try {
+      await opfs.deleteNote(from)
+      fileGone = true
+    } catch (err) {
+      console.error(`重命名后清理旧文件失败,临时墓碑留着让下次对账重试: ${from}`, err)
+    }
+    // 从未上过远端的临时墓碑：旧正文已经没了，它就到此为止 —— 留着只会让「待上传」
+    // 多出一个永远推不出去的计数。远端有过的那条必须留着排队推删除。
+    if (!remote && fileGone) await db.notes.delete(from)
+
+    notes.value = await db.notes.toArray()
     await refreshDerived()
     return to
   }
@@ -794,21 +847,46 @@ export const useVaultStore = defineStore('vault', () => {
     return touched
   }
 
-  /** 删除笔记：正文从 OPFS 移除，派生索引清理；远端知道的才留墓碑等推送。 */
+  /**
+   * 删除笔记：索引先行、正文随后。顺序反了（先删文件）的话，中途任何一次失败都会留下
+   * 「索引说还在、盘上没有」的行，还没推送过的笔记连副本都找不回来。
+   *
+   * 所以即使远端从没有过这篇，也先落一条临时墓碑（remoteSha=null）：它把「这条路径应当没有
+   * 正文」这一意图记进索引，万一正文没删掉，下次对账会按墓碑再删一次，而不是把残留文件当成
+   * 新笔记收养回来。正文删成功后这条临时墓碑就地撤掉，不会一直挂在待上传计数里。
+   */
   async function deleteNote(path: string): Promise<void> {
-    await opfs.deleteNote(path)
     const meta = byPath.value.get(path)
-    if (meta && needsRemoteDelete(meta)) {
-      // 远端有这篇：留墓碑，让删除动作随后推送出去。
-      await db.notes.put({ ...meta, cached: 0, removedLocal: 1, dirty: 0, localSha: null })
-    } else {
-      await db.notes.delete(path)
-    }
+    // 只有「远端曾经有过这篇」才需要一条真正排队推删除的墓碑；
+    // 其余情况的墓碑只是删除意图的临时记录，正文删掉就该就地撤掉。
+    const pushDelete = meta !== undefined && needsRemoteDelete(meta)
+    await db.notes.put(
+      pushDelete
+        ? { ...meta!, cached: 0, removedLocal: 1, dirty: 0, localSha: null }
+        : { ...newMeta(path), cached: 0, removedLocal: 1, dirty: 0 },
+    )
     await db.transaction('rw', db.links, db.tags, async () => {
       await db.links.where('src').equals(path).delete()
       await db.tags.where('path').equals(path).delete()
     })
     if (activePath.value === path) activePath.value = null
+
+    // 正文随后删：索引已经记下意图，删失败也只是留下一个孤儿文件，下次对账按墓碑再清一次；
+    // 顺序反过来的话，一次失败丢的就是再也补不回来的正文。这里不跨 store 弹提示（vault → sync
+    // 会成环），失败现场留在控制台。
+    let fileGone = false
+    try {
+      await opfs.deleteNote(path)
+      fileGone = true
+    } catch (err) {
+      console.error(`删除正文文件失败,临时墓碑留着让下次对账重试: ${path}`, err)
+    }
+
+    if (!pushDelete && fileGone) {
+      // 临时墓碑到此完成使命：留着会让「待上传」多出一个永远推不出去的计数，
+      // 而正文已经没了，它唯一能防的「孤儿文件被收养回来」也不存在了。
+      await db.notes.delete(path)
+    }
     notes.value = await db.notes.toArray()
     await refreshDerived()
   }

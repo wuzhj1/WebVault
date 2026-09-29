@@ -31,7 +31,7 @@ pnpm dev           # http://localhost:5173
 自检命令：
 
 ```bash
-pnpm verify        # 11 个验证套件,543 条断言(配置 / 解析 / frontmatter 与 ID 兼容 / 链接改写 / 三方合并 / 远端删除判定 / 搜索 / 主题 / 路径与标题 / 内容指纹 / 链接解析)
+pnpm verify        # 12 个验证套件,576 条断言(配置 / 解析 / frontmatter 与 ID 兼容 / 链接改写 / 三方合并 / 远端删除判定 / 搜索 / 主题 / 路径与标题 / 内容指纹 / 链接解析 / 落盘簿记)
 pnpm typecheck     # vue-tsc --noEmit
 pnpm build         # 类型检查 → 生成 PWA 图标与 vditor 静态资源 → 产出 dist/
 ```
@@ -223,20 +223,21 @@ Safari 的防跟踪策略（ITP）会在大约 7 天不使用后清空该站点�
 src/
   core/
     db.ts              Dexie:notes / links / tags / cards / settings / syncLog
-    vault/             OPFS 读写、路径规范化、git blob sha
+    vault/             OPFS 读写、路径规范化、git blob sha、.config 数据文件与落盘簿记
     editor/            编辑器内双链胶囊的 DOM 装饰(字符原样保留,不影响 Lute 序列化)
     index/             双链与标签解析、链接目标解析规则(含按 ID 解析)
     parse/             Markdown 扫描:[[链接]]、#标签、标题锚点;frontmatter 的逐行无损读写
     search/            CJK 分词 + MiniSearch 索引与摘要
     sync/              gitee API、同步引擎、三方合并、远端删除判定
     theme/             主题与强调色注册表、对比度计算
+    ui/                浮层共用的焦点陷阱(Tab 循环 / 焦点还原 / Esc 分发)
     zettel/            卡片元数据的 frontmatter 行解析与链接层永久 ID 兼容(card.ts)
   stores/              Pinia:vault(笔记与索引) / sync(同步与通知) /
                        settings / appearance / ui(界面状态、最近/置顶与快捷键绑定持久化)
   components/          TopBar、SideBar、FileTree、NoteEditor、RightPanel、Modal、
                        SearchPanel、LinkPicker、GraphView、SettingsDialog、Notices
-scripts/               图标生成、vditor 资源拷贝 + 11 个 Node 验证套件(pnpm verify),CI 见 .github/workflows/
+scripts/               图标生成、vditor 资源拷贝 + 12 个 Node 验证套件(pnpm verify),CI 见 .github/workflows/
 public/vditor/         自托管的编辑器资源,由 scripts/copy-vditor.mjs 从 node_modules 拷出,不入库
 ```
 
-`core/parse/frontmatter.ts` 和 `core/zettel/*` 是纯函数模块，有两条硬约束：**只用相对导入**（验证脚本以 `node scripts/*.mts` 直跑，没有 `@/` 别名解析），且**不得在运行时导入 `db.ts`**（它在模块作用域就构造 Dexie，需要 IndexedDB）。用 `import type` 引类型是安全的，编译后会被擦除。违反任一条，验证脚本会静默失效或直接崩掉。
+`core/parse/frontmatter.ts`、`core/zettel/*` 和 `core/vault/flush-state.ts` 是纯函数模块，有两条硬约束：**只用相对导入**（验证脚本以 `node scripts/*.mts` 直跑，没有 `@/` 别名解析），且**不得在运行时导入 `db.ts`**（它在模块作用域就构造 Dexie，需要 IndexedDB）。用 `import type` 引类型是安全的，编译后会被擦除。违反任一条，验证脚本会静默失效或直接崩掉。

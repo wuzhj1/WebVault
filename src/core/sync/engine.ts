@@ -293,7 +293,17 @@ export async function push(cfg: GiteeConfig, summary: SyncSummary, sink: Progres
     if (meta.remoteSha) {
       jobs.push({ action: { action: 'delete', path: meta.path }, path: meta.path, content: null })
     } else {
-      await db.notes.delete(meta.path)
+      // 行与残留正文必须一起清：只删行的话，那个孤儿文件会在下次对账被当成新笔记收养回来。
+      // 正常路径下 deleteNote 已经删过文件，这里是「当时没删掉」的兜底 —— 所以清不掉就不能
+      // 摘掉墓碑：行还在，下次对账仍认得这个路径，会再试一次。
+      let fileGone = false
+      try {
+        await opfs.deleteNote(meta.path)
+        fileGone = true
+      } catch {
+        // 见上：留着墓碑等下一轮
+      }
+      if (fileGone) await db.notes.delete(meta.path)
     }
   }
 
