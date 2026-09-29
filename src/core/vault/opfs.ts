@@ -156,14 +156,18 @@ async function readAt(root: FileSystemDirectoryHandle, path: string): Promise<st
   }
 }
 
-/** 在指定根下整文件覆盖写（writable 默认从头截断），不做追加也不做合并；顺带补建中间目录。 */
-async function writeAt(root: FileSystemDirectoryHandle, path: string, content: string): Promise<void> {
+/**
+ * 在指定根下整文件覆盖写（writable 默认从头截断），不做追加也不做合并；顺带补建中间目录。
+ * 返回写完那一刻的 `lastModified` —— 调用方直接把它记进索引，省掉随后为取 mtime 再 stat 一次。
+ */
+async function writeAt(root: FileSystemDirectoryHandle, path: string, content: string): Promise<number> {
   const { dir, name } = await getFileHandle(root, path, true)
   const file = await dir.getFileHandle(name, { create: true })
   const writable = await file.createWritable()
   await writable.write(content)
   // 必须 close()：数据在 close 之前只在 write stream 里，中途关页面就会留下半截文件。
   await writable.close()
+  return (await file.getFile()).lastModified
 }
 
 /** 在指定根下删文件；不存在视为已达成目标而静默吞掉，让调用方不必自己先 exists。 */
@@ -193,9 +197,22 @@ export async function readNote(path: string): Promise<string | null> {
   return readAt(await getRoot(), path)
 }
 
-/** 整文件覆盖写（当前后端的 writable 默认从头截断），不做追加也不做合并。 */
-export async function writeNote(path: string, content: string): Promise<void> {
-  await writeAt(await getRoot(), path, content)
+/**
+ * 文件的最后修改时间：一次 stat，**不读内容**。文件不存在或任何读取失败都返回 null ——
+ * 语义上「拿不到就当没观测过」，让调用方落到「照常读正文」的安全分支，绝不据此跳过核对。
+ */
+export async function fileMtimeOf(path: string): Promise<number | null> {
+  try {
+    const { dir, name } = await getFileHandle(await getRoot(), path, false)
+    return (await (await dir.getFileHandle(name)).getFile()).lastModified
+  } catch {
+    return null
+  }
+}
+
+/** 整文件覆盖写，返回写完后的 `lastModified`（见 writeAt）；调用方可据此更新索引里的 fileMtime。 */
+export async function writeNote(path: string, content: string): Promise<number> {
+  return writeAt(await getRoot(), path, content)
 }
 
 /** 删文件；不存在视为已达成目标而静默吞掉，让调用方不必自己先 exists。 */

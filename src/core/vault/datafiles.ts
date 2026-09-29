@@ -176,9 +176,12 @@ function startFilePersist(): void {
     t.hook('deleting', onWrite)
   }
   if (typeof window !== 'undefined') {
-    window.addEventListener('pagehide', () => void flushToFiles(true))
+    // 页面隐藏/关闭只需把「改过而没存」的表推下去，而脏标就是那份清单 —— force（全量）
+    // 留给 hydrate 尾部：那里表没脏，但文件可能缺失或损坏，必须照表写一遍才能补上。
+    // 原先这里也用 force，等于每次切标签页都把六张表全量序列化一遍，大库上白烧。
+    window.addEventListener('pagehide', () => void flushToFiles())
     document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'hidden') void flushToFiles(true)
+      if (document.visibilityState === 'hidden') void flushToFiles()
     })
   }
 }
@@ -193,8 +196,10 @@ function schedule(): void {
 }
 
 /**
- * 把表写成 `.config` 文件。force = 无视 dirty 集合全量写（hydrate 尾部与页面隐藏时用）。
- * 返回的 Promise 永不 reject：串行排队，失败逐表捕获并留在 dirty 里等下一轮。
+ * 把表写成 `.config` 文件。force = 无视脏标全量写，**只给「文件本身可能不对」的场合**用：
+ * hydrate 尾部（文件缺失/损坏要照表补上）与换后端前的落盘（迁移要拷到完整的一份）。
+ * 日常落盘一律传 false —— 脏标加代次已经能准确圈出真正需要写的表。
+ * 返回的 Promise 永不 reject：串行排队，失败逐表捕获并留在脏标里等下一轮。
  */
 export function flushToFiles(force = false): Promise<void> {
   chain = chain.then(

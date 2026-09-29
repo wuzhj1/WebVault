@@ -159,6 +159,7 @@ export async function pullIndex(cfg: GiteeConfig, summary: SyncSummary, sink: Pr
         localSha: null,
         remoteSha: sha,
         mtime: Date.now(),
+        fileMtime: null,
         size: 0,
         dirty: 0,
         cached: 0,
@@ -208,7 +209,7 @@ export async function ensureCached(
   const { file } = await withRetry(`下载 ${path}`, () => gitee.getFile(cfg, path), sink)
   if (!file) return null
 
-  await opfs.writeNote(path, file.text)
+  const fileMtime = await opfs.writeNote(path, file.text)
   const sha = await gitBlobSha(file.text)
   // 下载即视为与远端一致：三个 sha 对齐、清脏标记，并同步派生索引。
   await db.notes.put({
@@ -217,6 +218,7 @@ export async function ensureCached(
     baseSha: sha,
     remoteSha: file.sha || meta.remoteSha,
     size: file.text.length,
+    fileMtime,
     cached: 1,
     dirty: 0,
     mtime: Date.now(),
@@ -340,7 +342,10 @@ export async function push(cfg: GiteeConfig, summary: SyncSummary, sink: Progres
     const outcome = await mergeWithRemote(cfg, meta, local)
     if (outcome.status === 'merged') {
       summary.autoMerged++
-      await opfs.writeNote(meta.path, outcome.text)
+      const fileMtime = await opfs.writeNote(meta.path, outcome.text)
+      // 先把新 mtime 记进索引：下面 settle 会按刚读到的这份 meta 重新对齐三方 sha，
+      // 不在这一步记，下一轮启动就只能把这篇整篇重读一遍来补。
+      await db.notes.put({ ...meta, fileMtime })
       // 合并阶段是逐篇循环、结尾统一 reloadNotes：循环内不刷内存 cards（O(N²)）。
       await useVaultStore().reindexContent(meta.path, outcome.text, { deferCards: true })
       jobs.push({
@@ -353,7 +358,7 @@ export async function push(cfg: GiteeConfig, summary: SyncSummary, sink: Progres
     if (outcome.status === 'remote-wins') {
       // 无须上传：远端版本直接成为本地版本，三方 sha 对齐、清脏。
       summary.pulled++
-      await opfs.writeNote(meta.path, outcome.text)
+      const fileMtime = await opfs.writeNote(meta.path, outcome.text)
       await useVaultStore().reindexContent(meta.path, outcome.text, { deferCards: true })
       const sha = await gitBlobSha(outcome.text)
       await db.notes.put({
@@ -362,6 +367,7 @@ export async function push(cfg: GiteeConfig, summary: SyncSummary, sink: Progres
         baseSha: sha,
         remoteSha: sha,
         size: outcome.text.length,
+        fileMtime,
         dirty: 0,
         cached: 1,
         mtime: Date.now(),
@@ -570,7 +576,7 @@ async function writeConflictCopy(path: string, remoteText: string): Promise<stri
     const p = normalizePath(dir === '' ? name : `${dir}/${name}`)
     if (!(await taken(p))) candidate = p
   }
-  await opfs.writeNote(candidate, remoteText)
+  const fileMtime = await opfs.writeNote(candidate, remoteText)
   const sha = await gitBlobSha(remoteText)
   await db.notes.put({
     path: candidate,
@@ -579,6 +585,7 @@ async function writeConflictCopy(path: string, remoteText: string): Promise<stri
     localSha: sha,
     remoteSha: null,
     mtime: Date.now(),
+    fileMtime,
     size: remoteText.length,
     dirty: 1,
     cached: 1,

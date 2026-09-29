@@ -36,6 +36,13 @@ export interface NoteMeta {
   /** 最近一次在远端观测到的 blob sha；null = 还没推上去过 */
   remoteSha: string | null
   mtime: number
+  /**
+   * 正文文件的 `lastModified`（文件系统 stat 出来的真值，不是 `Date.now()`）。
+   * 对账时先比这个数再决定要不要整篇读进来 —— 见 `reconcile` 的廉价判定。
+   * null = 还没观测过（新行，或来自旧版 notes.json），首轮对账读过一次后补上。
+   * 只在「由文件本身得出」的时机写入；拿不到 stat 时保持 null，宁可下次多读一遍也不能猜。
+   */
+  fileMtime: number | null
   size: number
   /** 1 = 本地已编辑，尚未推送 */
   dirty: 0 | 1

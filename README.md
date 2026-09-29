@@ -223,7 +223,7 @@ Safari 的防跟踪策略（ITP）会在大约 7 天不使用后清空该站点�
 src/
   core/
     db.ts              Dexie:notes / links / tags / cards / settings / syncLog
-    vault/             OPFS 读写、路径规范化、git blob sha、.config 数据文件与落盘簿记
+    vault/             OPFS 读写与文件 mtime、路径规范化、git blob sha、.config 数据文件与落盘簿记
     editor/            编辑器内双链胶囊的 DOM 装饰(字符原样保留,不影响 Lute 序列化)
     index/             双链与标签解析、链接目标解析规则(含按 ID 解析)
     parse/             Markdown 扫描:[[链接]]、#标签、标题锚点;frontmatter 的逐行无损读写

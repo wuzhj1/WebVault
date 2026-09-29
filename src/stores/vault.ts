@@ -77,12 +77,49 @@ function newMeta(path: string): NoteMeta {
     localSha: null,
     remoteSha: null,
     mtime: Date.now(),
+    fileMtime: null,
     size: 0,
     dirty: 0,
     cached: 0,
     removedLocal: 0,
     removedRemote: 0,
   }
+}
+
+/** 两条元数据是否逐字段相同 —— 内容没变就不该惊动响应式（见 reloadNotes）。 */
+function sameMeta(a: NoteMeta, b: NoteMeta): boolean {
+  return (
+    a.path === b.path &&
+    a.title === b.title &&
+    a.baseSha === b.baseSha &&
+    a.localSha === b.localSha &&
+    a.remoteSha === b.remoteSha &&
+    a.mtime === b.mtime &&
+    a.fileMtime === b.fileMtime &&
+    a.size === b.size &&
+    a.dirty === b.dirty &&
+    a.cached === b.cached &&
+    a.removedLocal === b.removedLocal &&
+    a.removedRemote === b.removedRemote
+  )
+}
+
+/** 两张元数据列表是否逐条相同（含顺序）：reloadNotes 据此决定要不要替换 `notes.value`。 */
+function sameNotes(a: readonly NoteMeta[], b: readonly NoteMeta[]): boolean {
+  if (a.length !== b.length) return false
+  for (let i = 0; i < a.length; i++) {
+    if (!sameMeta(a[i], b[i])) return false
+  }
+  return true
+}
+
+/** 逐元素相等判断：让「重建出来的结果和现在一样」的那次重建不触发响应式失效。 */
+function sameList<T>(a: readonly T[], b: readonly T[], eq: (x: T, y: T) => boolean): boolean {
+  if (a.length !== b.length) return false
+  for (let i = 0; i < a.length; i++) {
+    if (!eq(a[i], b[i])) return false
+  }
+  return true
 }
 
 /** 「上次打开路径」落盘的防抖定时器，避免频繁写设置。 */
@@ -334,9 +371,9 @@ export const useVaultStore = defineStore('vault', () => {
     if (lost.length > 0) await db.notes.bulkPut(lost)
 
     // 文件在盘上而索引与之不符时，一律以文件为准重索引并标脏。两种后端的触发面不同：
-    // 绑定目录后外部编辑器（VS Code 等）可能改过任何文件，故逐篇核对哈希；内置 OPFS 没有
+    // 绑定目录后外部编辑器（VS Code 等）可能改过任何文件，故逐篇核对；内置 OPFS 没有
     // 外部写入者，只有「清空后又被恢复」会留下 cached=0 却在盘的行 —— 只查这些行，
-    // 正常启动不必整库读正文。
+    // 正常启动不必整库读正文。核对本身先用 fileMtime 做廉价判定（见循环内注释）。
     const dirBackend = (await opfs.currentBackend()) === 'dir'
     const suspects: NoteMeta[] = []
     for (const n of known) {
@@ -346,16 +383,36 @@ export const useVaultStore = defineStore('vault', () => {
     if (suspects.length > 0) {
       const drift: NoteMeta[] = []
       for (const n of suspects) {
+        // 廉价判定先行：先 stat 一次拿 lastModified，与索引里记下的一致就整篇不读。
+        // 绑定目录后原本每次启动都要逐篇读正文 + 算 sha —— 大库等于启动即读完整个语料；
+        // 而外部编辑器（VS Code 等）必然更新 lastModified，所以这一步把「核对」从
+        // 「读全库 + 全量哈希」降成「一轮 stat」。stat 拿不到就照旧整篇读（安全分支）。
+        const fm = await opfs.fileMtimeOf(n.path)
+        if (n.cached && fm !== null && n.fileMtime === fm) continue
         const content = await opfs.readNote(n.path)
         if (content === null) continue
         const sha = await gitBlobSha(content)
         if (sha === n.localSha) {
-          // 文件在盘上、索引却标着没下载：顺手纠正，否则 readBody 会一直按 stub 拒绝。
-          if (!n.cached) drift.push({ ...n, cached: 1 })
+          if (!n.cached) {
+            // 文件在盘上、索引却标着没下载：顺手纠正，否则 readBody 会一直按 stub 拒绝。
+            drift.push({ ...n, cached: 1, fileMtime: fm })
+          } else if (fm !== null && n.fileMtime !== fm) {
+            // 内容没变，只是索引里还没记下文件的修改时间（本机刚保存过 / 旧版 notes.json）：
+            // 记下来，下一轮启动就走 stat 短路，不再整篇读。
+            drift.push({ ...n, fileMtime: fm })
+          }
           continue
         }
         await reindexContent(n.path, content, { deferCards: true })
-        drift.push({ ...n, localSha: sha, size: content.length, mtime: Date.now(), cached: 1, dirty: 1 })
+        drift.push({
+          ...n,
+          localSha: sha,
+          size: content.length,
+          mtime: Date.now(),
+          cached: 1,
+          dirty: 1,
+          fileMtime: fm,
+        })
       }
       if (drift.length > 0) await db.notes.bulkPut(drift)
     }
@@ -465,18 +522,24 @@ export const useVaultStore = defineStore('vault', () => {
     return false
   }
 
-  /** unresolvedCount → unresolvedTargets（按次数倒序）。 */
+  /**
+   * unresolvedCount → unresolvedTargets（按次数倒序）。
+   * 结果与当前值相等时不赋值：这两个 ref 每次 refreshDerived 都会被重建，
+   * 无条件赋值等于每次同步都把侧栏对应面板重画一遍。
+   */
   function rebuildUnresolvedRef(): void {
-    unresolvedTargets.value = [...unresolvedCount.entries()]
+    const next = [...unresolvedCount.entries()]
       .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
       .map(([t]) => t)
+    if (!sameList(unresolvedTargets.value, next, (a, b) => a === b)) unresolvedTargets.value = next
   }
 
-  /** tagCount → allTags（按次数倒序）。 */
+  /** tagCount → allTags（按次数倒序）；同样只在内容真的变了时才赋值。 */
   function rebuildTagRef(): void {
-    allTags.value = [...tagCount.entries()]
+    const next = [...tagCount.entries()]
       .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
       .map(([tag, count]) => ({ tag, count }))
+    if (!sameList(allTags.value, next, (a, b) => a.tag === b.tag && a.count === b.count)) allTags.value = next
   }
 
   /**
@@ -650,9 +713,17 @@ export const useVaultStore = defineStore('vault', () => {
     }, 400)
   }
 
-  /** 同步引擎在我们背后改了元数据索引后，重新读取并刷新派生状态。 */
+  /**
+   * 同步引擎在我们背后改了元数据索引后，重新读取并刷新派生状态。
+   *
+   * 收敛点：一轮 syncAll 会调 4~8 次，其中多数什么都没改（索引没变、只是走个流程）。
+   * 原先每次都无条件替换 `notes.value`，于是 byPath / tree / revision / pendingUpload
+   * 一整串 computed 全部重算，侧栏整棵树跟着重新 patch —— 同步期间白抖这么多次。
+   * 逐字段比对后，内容没变就完全不惊动响应式。
+   */
   async function reloadNotes(): Promise<void> {
-    notes.value = await db.notes.toArray()
+    const rows = await db.notes.toArray()
+    if (!sameNotes(notes.value, rows)) notes.value = rows
     await refreshDerived()
   }
 
@@ -673,7 +744,8 @@ export const useVaultStore = defineStore('vault', () => {
 
   /** 把正文写入 OPFS 并刷新所有由它派生的状态（元数据、链接、标签、卡片）。 */
   async function saveBody(path: string, content: string, markDirty = true): Promise<NoteMeta> {
-    await opfs.writeNote(path, content)
+    // writeNote 直接把写完后的 lastModified 带回来：对账的廉价判定据此短路，省掉随后一次 stat。
+    const fileMtime = await opfs.writeNote(path, content)
     const sha = await gitBlobSha(content)
     const prev = byPath.value.get(path)
     const meta: NoteMeta = {
@@ -683,6 +755,7 @@ export const useVaultStore = defineStore('vault', () => {
       localSha: sha,
       size: content.length,
       mtime: Date.now(),
+      fileMtime,
       cached: 1,
       dirty: markDirty ? 1 : (prev?.dirty ?? 0),
       removedLocal: 0,
@@ -712,13 +785,14 @@ export const useVaultStore = defineStore('vault', () => {
     // 否则 createNote 会在「已有同名行」处早退，返回一个根本没有文件的路径。
     if (occupiedBy(path)) return path
 
-    await opfs.writeNote(path, content)
+    const fileMtime = await opfs.writeNote(path, content)
     const sha = await gitBlobSha(content)
     const meta: NoteMeta = {
       ...newMeta(path),
       localSha: sha,
       baseSha: sha,
       size: content.length,
+      fileMtime,
       cached: 1,
       dirty: 1,
     }
@@ -740,7 +814,7 @@ export const useVaultStore = defineStore('vault', () => {
 
     const body = (await opfs.readNote(from)) ?? ''
     // 先把新路径写成：正文落盘是这一步唯一的硬失败点，失败时旧路径原封不动、索引还没动。
-    await opfs.writeNote(to, body)
+    const toMtime = await opfs.writeNote(to, body)
 
     const prev = byPath.value.get(from) ?? newMeta(from)
     await db.notes.delete(from)
@@ -749,6 +823,8 @@ export const useVaultStore = defineStore('vault', () => {
       path: to,
       title: titleOf(to),
       mtime: Date.now(),
+      // 必须覆盖掉从旧路径继承来的 fileMtime：那是 `from` 文件的 mtime，对 `to` 是错的。
+      fileMtime: toMtime,
       dirty: 1,
       cached: 1,
       removedLocal: 0,
