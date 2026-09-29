@@ -14,17 +14,17 @@
  * 非写入口（读 / 删 / 探测）一律 `create: false`：一次读绝不允许在树上凭空造出目录或文件。
  */
 import { deleteConfig, getConfig, putConfig } from '../db.ts'
+import { CONFIG_DIR, LEGACY_CONFIG_DIR } from './config-layout.ts'
 import { ancestorDirs, normalizePath } from './paths.ts'
 
 /** 绑定目录句柄在 config 表里的键；值是结构化克隆后的 FileSystemDirectoryHandle。 */
 const DIR_HANDLE_KEY = 'vault-dir-handle'
 
-/**
- * 数据文件目录名：索引与设置的 JSON 全落在 vault 根下的 `.config/`（见 datafiles.ts）。
- * 放在本模块而不是 datafiles 里导出，是为了让 clearAllNotes 也能引用而不引入循环导入；
+/*
+ * 数据文件目录名（`.webvault/`，旧版是 `.config/`）由 config-layout.ts 声明，这里只取用 ——
+ * 目录形状是 datafiles、导出备份与验证脚本三方共用的事实，必须只有一个出处。
  * 不以 `.md` 结尾，天然不会被 listNotePaths 收养、也不会进同步。
  */
-export const CONFIG_DIR = '.config'
 
 /** 存储后端：内置 OPFS / 用户目录（已授权）/ 用户目录（待授权，授权前禁用一切文件 IO）。 */
 export type StorageBackend = 'opfs' | 'dir' | 'blocked'
@@ -145,7 +145,7 @@ async function getFileHandle(
 /** 在指定根下读正文；文件或父目录不存在都返回 null（正常情况），其他错误照抛。 */
 async function readAt(root: FileSystemDirectoryHandle, path: string): Promise<string | null> {
   // getFileHandle 也要包进 try：`create:false` 的 resolveDir 在父目录整个不存在时会抛
-  // NotFoundError —— 对「读」来说语义同样是「没有这个文件」（如首读尚未创建的 .config）。
+  // NotFoundError —— 对「读」来说语义同样是「没有这个文件」（如首读尚未创建的 .webvault）。
   try {
     const { dir, name } = await getFileHandle(root, path, false)
     const file = await dir.getFileHandle(name)
@@ -235,6 +235,38 @@ export async function moveNote(from: string, to: string): Promise<void> {
 /** 只做存在性判断，不取内容 —— 用于挑候选冲突文件名，避免整篇读进内存。 */
 export async function existsNote(path: string): Promise<boolean> {
   return existsAt(await getRoot(), path)
+}
+
+/**
+ * 列出顶层目录下的**直接文件名**（不含子目录项）。目录不存在、未授权或浏览器不支持一律返回空数组 ——
+ * 调用方（配置目录搬迁）据此判断「没有要搬的」，不值得让启动流程为一个不存在的目录报错。
+ * 这里刻意不复用 `walk`：搬迁要的是「这一层有什么」，递归进来反而会把子目录里的东西也算成搬迁对象。
+ */
+export async function listTopDir(name: string): Promise<string[]> {
+  try {
+    const dir = await (await getRoot()).getDirectoryHandle(name)
+    const out: string[] = []
+    for await (const entry of dir.values()) {
+      if (entry.kind === 'file') out.push(entry.name)
+    }
+    return out
+  } catch {
+    return []
+  }
+}
+
+/**
+ * 尝试删掉一个顶层目录；**不递归**（`removeEntry` 默认 `recursive: false`）——
+ * 目录里还有没认领的文件就整体放弃，用户自己放进去的东西绝不跟着搬迁一起消失。
+ * 目录不存在也算已达成，返回 true。
+ */
+export async function removeTopDir(name: string): Promise<boolean> {
+  try {
+    await (await getRoot()).removeEntry(name)
+    return true
+  } catch {
+    return false
+  }
 }
 
 /** 当前后端（触发一次惰性解析）。设置页与启动流程据此分叉。 */
@@ -398,9 +430,10 @@ export async function clearAllNotes(): Promise<void> {
     return
   }
   for await (const entry of root.values()) {
-    // `.config` 是数据文件（索引/设置/日志），不是正文 —— 「清空正文重来」不该连同步配置一起抹掉，
+    // `.webvault` 是数据文件（索引/设置/日志），不是正文 —— 「清空正文重来」不该连同步配置一起抹掉，
     // 这与设置存 IndexedDB 时的行为一致（清正文从不清设置），否则恢复流程会连远端信息都丢光。
-    if (entry.name === CONFIG_DIR) continue
+    // `.config` 是还没搬完的旧版目录，同样跳过：搬迁没跑成时它就是唯一那份设置。
+    if (entry.name === CONFIG_DIR || entry.name === LEGACY_CONFIG_DIR) continue
     await root.removeEntry(entry.name, { recursive: true })
   }
 }

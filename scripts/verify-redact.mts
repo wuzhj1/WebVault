@@ -1,6 +1,7 @@
 /**
  * 凭据抹除验证（src/core/vault/redact.ts）：
- * - 真实的 settings 行形状进去，Gitee token 必须变空串、其余字段原样保留；
+ * - 真实的 settings 行形状进去（`value` 是 `JSON.stringify` 后的**字符串**，token 裹在里面），
+ *   Gitee token 必须变空串、其余字段与排版原样保留；
  * - 匹配是大小写不敏感的整串匹配：`Token` / `PASSWORD` / `api_key` 都要被抹，
  *   而 `tokenCount` / `lastTokenAt` / `secretary` 这类只「含」这些词的字段**不能**被误伤 ——
  *   误抹等于把一份正常快照悄悄改坏，比漏抹更难发现；
@@ -34,35 +35,44 @@ function ok(name: string, cond: boolean, detail = '') {
   }
 }
 
-// ---- 真实形状：settings 表的一行，Gitee 配置整个裹在 value 里 ----
+// ---- 真实形状：settings 表的一行 —— value 是 JSON.stringify 之后的**字符串**（见 db.putSetting），
+// Gitee token 裹在那层字符串里。只看对象键的话这里根本不会命中，备份会把密码原样带走。
+const giteeValue = JSON.stringify({
+  token: 'ghp_THIS_MUST_NOT_LEAK',
+  owner: 'someone',
+  repo: 'notes',
+  branch: 'main',
+  basePath: 'notes',
+})
 const giteeRow = [
-  {
-    key: 'gitee',
-    value: {
-      owner: 'someone',
-      repo: 'notes',
-      branch: 'main',
-      basePath: 'notes',
-      token: 'ghp_THIS_MUST_NOT_LEAK',
-    },
-  },
-  { key: 'last-open-path', value: 'notes/想法.md' },
+  { key: 'sync-settings', value: giteeValue },
+  { key: 'last-open-path', value: '"notes/想法.md"' },
 ]
 const cleaned = redactSecrets(giteeRow) as typeof giteeRow
-check('gitee token is blanked', cleaned[0].value.token, '')
+const cleanedSync = JSON.parse(cleaned[0]!.value) as Record<string, unknown>
+check('gitee token inside the JSON string is blanked', cleanedSync.token, '')
 check(
   'everything around the token survives',
-  { owner: cleaned[0].value.owner, repo: cleaned[0].value.repo, branch: cleaned[0].value.branch, basePath: cleaned[0].value.basePath },
+  { owner: cleanedSync.owner, repo: cleanedSync.repo, branch: cleanedSync.branch, basePath: cleanedSync.basePath },
   { owner: 'someone', repo: 'notes', branch: 'main', basePath: 'notes' },
 )
 check('unrelated setting row is untouched', cleaned[1], giteeRow[1])
+ok('unrelated row keeps its original bytes (no reformatting)', cleaned[1]!.value === giteeRow[1]!.value)
 
 // ---- 形状守恒：键还在，只是值空了 ----
 check(
   'keys are preserved, not deleted',
-  Object.keys(cleaned[0].value).sort(),
-  Object.keys(giteeRow[0].value).sort(),
+  Object.keys(cleanedSync).sort(),
+  Object.keys(JSON.parse(giteeValue) as Record<string, unknown>).sort(),
 )
+
+// ---- 两层形状都要吃得下：value 直接是对象的行同样要抹 ----
+const objectValued = redactSecrets([{ key: 'k', value: { token: 'x', keep: 1 } }]) as {
+  key: string
+  value: Record<string, unknown>
+}[]
+check('object-valued row token blanked', objectValued[0]!.value.token, '')
+check('object-valued row sibling kept', objectValued[0]!.value.keep, 1)
 
 // ---- 各种凭据字段名，大小写不敏感 ----
 const SECRET_NAMES = ['token', 'Token', 'TOKEN', 'password', 'PASSWORD', 'secret', 'ApiKey', 'api_key', 'apikey', 'credential', 'authorization']
@@ -94,7 +104,21 @@ check('empty array', redactSecrets([]), [])
 const before = JSON.stringify(giteeRow)
 redactSecrets(giteeRow)
 check('input is not mutated', JSON.stringify(giteeRow), before)
-ok('input still holds the original token', giteeRow[0].value.token === 'ghp_THIS_MUST_NOT_LEAK')
+ok(
+  'input still holds the original token',
+  (JSON.parse(giteeRow[0]!.value) as { token: string }).token === 'ghp_THIS_MUST_NOT_LEAK',
+)
+
+// ---- 字符串下钻：只在真的命中凭据时才改写，其余原样返回 ----
+check('a plain path string is untouched', redactSecrets('notes/a.md'), 'notes/a.md')
+check('a non-JSON string is untouched', redactSecrets('[1,  2]'), '[1,  2]')
+check('a JSON number string is untouched', redactSecrets('42'), '42')
+check('a JSON string string is untouched', redactSecrets('"hi"'), '"hi"')
+const spaced = JSON.stringify({ token: 'x' }, null, 2)
+ok('a credential-bearing JSON string does get rewritten', redactSecrets(spaced) !== spaced, String(redactSecrets(spaced)))
+check('...and lands compact with an empty token', redactSecrets(spaced), '{"token":""}')
+const noSecret = '[\n  "a",\n  "b"\n]'
+check('a credential-free JSON string keeps its formatting', redactSecrets(noSecret), noSecret)
 
 // ---- 非普通对象不摊平：Date 要能原样交给 JSON.stringify ----
 const withDate = redactSecrets({ at: new Date('2026-09-29T00:00:00.000Z'), token: 'x' }) as { at: unknown; token: string }

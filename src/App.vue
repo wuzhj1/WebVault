@@ -14,6 +14,7 @@ import RightPanel from './components/RightPanel.vue'
 import SideBar from './components/SideBar.vue'
 import TopBar from './components/TopBar.vue'
 import { getSetting } from './core/db.ts'
+import { SETTING_KEYS } from './core/vault/config-layout.ts'
 import { dropPendingSave, readPendingSave, snapshotPendingSave } from './core/editor/pending-save.ts'
 import { onFlushError } from './core/vault/datafiles.ts'
 import { bindingOfEvent, hasMod, isTypingTarget } from './core/hotkeys.ts'
@@ -197,9 +198,10 @@ async function recoverPendingSave(): Promise<void> {
 /**
  * 启动定位：回到上次打开的那篇（`last-open-path` 由 openNote 防抖写入）。
  * 路径已失效（笔记被删 / 只剩墓碑）就停在空态页，不报错也不清键。
+ * 这一项分流在 `.webvault/workspace.json`（高频变动的工作区状态，与静态配置分开）。
  */
 async function locateLastNote(): Promise<void> {
-  const path = await getSetting<string | null>('last-open-path', null)
+  const path = await getSetting<string | null>(SETTING_KEYS.lastOpenPath, null)
   if (!path) return
   const meta = vault.byPath.get(path)
   if (!meta || meta.removedLocal) return
@@ -207,14 +209,14 @@ async function locateLastNote(): Promise<void> {
 }
 
 /**
- * `.config` 落盘失败原先只写 console.error ——「文件是真相源」这句话会在用户完全不知情时失效，
+ * `.webvault` 落盘失败原先只写 console.error ——「文件是真相源」这句话会在用户完全不知情时失效，
  * 直到下次启动才暴露出索引和文件对不上。core 层不 import 任何 store（会成环），只能回调注入。
  * 连续失败只报一次，见 datafiles 的 flushFailed。
  */
 const offFlushError = onFlushError((file, err) => {
   sync.notify(
     'error',
-    `保存索引/设置到 .config/${file} 失败,数据仍留在浏览器里: ${err instanceof Error ? err.message : String(err)}`,
+    `保存索引/设置到 .webvault/${file} 失败,数据仍留在浏览器里: ${err instanceof Error ? err.message : String(err)}`,
   )
 })
 
@@ -238,7 +240,7 @@ onMounted(async () => {
   startupDone.value = true
 })
 
-// 卸载前注销全部监听：媒体查询、快捷键、关闭前落盘、页面隐藏落盘、.config 落盘失败回调。
+// 卸载前注销全部监听：媒体查询、快捷键、关闭前落盘、页面隐藏落盘、.webvault 落盘失败回调。
 onBeforeUnmount(() => {
   offFlushError()
   narrow?.removeEventListener('change', syncDrawerState)

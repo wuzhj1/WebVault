@@ -1,7 +1,7 @@
 /**
  * vault store（Pinia）：笔记元数据、派生索引（文件树/双链/标签/卡片）与 OPFS 正文读写的唯一入口。
  *
- * 职责边界：正文永远写文件层（opfs），索引永远写 Dexie 并由 datafiles 落成 `.config` 数据文件
+ * 职责边界：正文永远写文件层（opfs），索引永远写 Dexie 并由 datafiles 落成 `.webvault` 数据文件
  * （文件为真相源、IndexedDB 只是缓存），正文与索引的最终一致由 reconcile 保证；
  * links/tags/cards 等派生数据随时可清空重建，不承载用户唯一内容。
  *
@@ -15,6 +15,8 @@ import { defineStore } from 'pinia'
 import { computed, ref, shallowRef } from 'vue'
 import { db, putSetting, type CardRow, type LinkRow, type NoteMeta, type TagRow } from '@/core/db.ts'
 import { flushToFiles, hydrateFromFiles } from '@/core/vault/datafiles.ts'
+// 键名只在 core/vault/config-layout.ts 声明一次，那里同时决定它落进 .webvault/workspace.json。
+import { SETTING_KEYS } from '@/core/vault/config-layout.ts'
 import { gitBlobSha } from '@/core/vault/hash.ts'
 import * as opfs from '@/core/vault/opfs.ts'
 import {
@@ -288,7 +290,7 @@ export const useVaultStore = defineStore('vault', () => {
         }
         await opfs.persistedStorageGranted()
       }
-      // `.config` 数据文件 → Dexie：文件为真相源，必须先于 reconcile 与一切设置读取跑。
+      // `.webvault` 数据文件 → Dexie：文件为真相源，必须先于 reconcile 与一切设置读取跑。
       await hydrateFromFiles()
       await reconcile()
       ready.value = true
@@ -437,7 +439,7 @@ export const useVaultStore = defineStore('vault', () => {
    * 用户在选择器里取消（AbortError）直接冒泡，由设置页按「无操作」处理。
    */
   async function bindDirectoryFlow(): Promise<opfs.MigrateResult> {
-    // 迁移前先落盘：表里可能有还没进防抖窗口的更新，复制进新目录的 .config 必须是最新的。
+    // 迁移前先落盘：表里可能有还没进防抖窗口的更新，复制进新目录的 .webvault 必须是最新的。
     await flushToFiles(true)
     const handle = await opfs.pickDirectory()
     const result = await opfs.migrateOpfsTo(handle)
@@ -450,7 +452,7 @@ export const useVaultStore = defineStore('vault', () => {
     }
     storageBackend.value = kind
     storageDirName.value = await opfs.dirName()
-    // 换了根就换真相源：新目录的 .config（迁移时复制过去的）覆盖表，再对账。
+    // 换了根就换真相源：新目录的 .webvault（迁移时复制过去的）覆盖表，再对账。
     await hydrateFromFiles()
     await reconcile()
     ready.value = true
@@ -463,7 +465,7 @@ export const useVaultStore = defineStore('vault', () => {
     if (!ok) return false
     storageBackend.value = 'dir'
     try {
-      // 授权屏期间没能读文件（IO 阻断），续期后先以目录里的 .config 刷新表再对账。
+      // 授权屏期间没能读文件（IO 阻断），续期后先以目录里的 .webvault 刷新表再对账。
       await hydrateFromFiles()
       await reconcile()
       ready.value = true
@@ -478,7 +480,7 @@ export const useVaultStore = defineStore('vault', () => {
    * 再解除绑定并重新对账。回写失败不阻断解除 —— 解除本身不依赖读到目录内容。
    */
   async function unbindDirectoryFlow(): Promise<void> {
-    // 回迁前先落盘：镜像进 OPFS 的 .config 才是最新状态。
+    // 回迁前先落盘：镜像进 OPFS 的 .webvault 才是最新状态。
     await flushToFiles(true)
     try {
       await opfs.migrateDirToOpfs()
@@ -493,7 +495,7 @@ export const useVaultStore = defineStore('vault', () => {
       return
     }
     try {
-      // 根换回 OPFS（.config 已随镜像回到 OPFS 根）：装载后再对账。
+      // 根换回 OPFS（.webvault 已随镜像回到 OPFS 根）：装载后再对账。
       await hydrateFromFiles()
       await reconcile()
       ready.value = true
@@ -709,7 +711,7 @@ export const useVaultStore = defineStore('vault', () => {
     if (lastOpenTimer) clearTimeout(lastOpenTimer)
     lastOpenTimer = setTimeout(() => {
       lastOpenTimer = null
-      void putSetting('last-open-path', path)
+      void putSetting(SETTING_KEYS.lastOpenPath, path)
     }, 400)
   }
 

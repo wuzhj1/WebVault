@@ -15,30 +15,20 @@
  * - **纯只读，不提供导入**：恢复 = 把解压出的 `.md` 放回笔记目录，或连回 Gitee 仓库。
  *   导入要处理合并语义、墓碑与同步三元组的冲突，是另一个量级的问题，不在这里含糊地做半套。
  *
+ * 快照目录与文件名直接取 `config-layout` 的那份映射 —— 包内 `.webvault/` 与绑定目录里的原件
+ * 逐字同名同结构，可以整份 diff；`_webvault` 那种「另起一个名以免覆盖原件」的做法会让解压出来
+ * 的东西既不能直接用、也不能直接比。
+ *
  * 硬约束：只用相对导入。
  */
 import { db } from '../db.ts'
+import { CONFIG_DIR, TABLE_FILES, partitionRows } from './config-layout.ts'
 import { conflictStamp } from './hash.ts'
 import * as opfs from './opfs.ts'
 import { redactSecrets } from './redact.ts'
 import { buildZip, type ZipEntry } from './zip.ts'
 
 const ENCODER = new TextEncoder()
-
-/** 备份内承载索引快照的目录名；与 `.config` 刻意不同名，解压进绑定目录也不会覆盖原件。 */
-const SNAPSHOT_DIR = '_webvault'
-
-/**
- * 带上的表 → 文件名，与 `.config/` 同名（settings 除外，见下），方便与绑定目录里的原件逐个 diff。
- * 不带 syncLog：滚动日志，只有最近约 300 条，没有备份价值还平添噪音。
- */
-const SNAPSHOT_TABLES = [
-  ['notes', 'notes.json'],
-  ['links', 'links.json'],
-  ['tags', 'tags.json'],
-  ['cards', 'cards.json'],
-  ['settings', 'settings.json'],
-] as const
 
 /** 一次导出的结果，UI 直接照这个报数。 */
 export interface BackupArchive {
@@ -50,7 +40,7 @@ export interface BackupArchive {
   noteCount: number
   /** 索引里标着「已缓存」、盘上却读不到的篇数；大于 0 就是有人比对时会发现的差额。 */
   missing: number
-  /** 索引快照四张表的总行数。 */
+  /** 快照各文件的总行数。 */
   rowCount: number
 }
 
@@ -67,18 +57,18 @@ function readme(a: { noteCount: number; rowCount: number; missing: number; at: s
 ============
 
 导出时间: ${a.at}
-正文 ${a.noteCount} 篇,索引快照 ${a.rowCount} 行。
+正文 ${a.noteCount} 篇,快照 ${a.rowCount} 行。
 
 包含
 ----
   *.md            笔记正文,保持导出时的库内相对路径 —— 解压即得一份可直接打开的 Markdown 目录。
-  ${SNAPSHOT_DIR}/       导出那一刻的索引快照(notes / links / tags / cards / settings)。
+  ${CONFIG_DIR}/     导出那一刻的配置与索引快照,目录名与文件名都和库内原件一致,可逐字 diff。
 
 不包含
 ------
-  - Gitee token 等凭据。快照里的 settings.json 已把这些字段抹空 —— 备份文件不该替你保管密码,
+  - Gitee token 等凭据。快照里的 sync.json 已把这些字段抹空 —— 备份文件不该替你保管密码,
     恢复时请到「设置 → Gitee 同步」重新填写。
-  - 同步日志(滚动窗口,无备份价值)。
+  - 同步日志 sync-log.json(滚动窗口,无备份价值)。
 ${missingLine}
 恢复
 ----
@@ -97,7 +87,7 @@ ${missingLine}
 /**
  * 组装一次完整备份。不负责触发下载（那是 `downloadZip` 的事），以便调用方先拿到统计再决定提示文案。
  *
- * 顺序：先列盘上有什么 → 读正文 → 读四张索引表 → 读 settings 并抹凭据 → 打包。
+ * 顺序：先列盘上有什么 → 读正文 → 逐表读并按档分桶 → 打包。
  * 全程只读，任何一步抛错都不会动到库里的数据。
  */
 export async function buildBackup(): Promise<BackupArchive> {
@@ -117,16 +107,23 @@ export async function buildBackup(): Promise<BackupArchive> {
 
   let rowCount = 0
   let noteRows: { path: string; cached: number; removedLocal: number }[] = []
-  for (const [table, file] of SNAPSHOT_TABLES) {
+  for (const [table, files] of TABLE_FILES) {
+    // 滚动日志只有最近约 300 条，没有备份价值还平添噪音。
+    if (table === 'syncLog') continue
     const rows: unknown[] = await db.table(table).toArray()
     rowCount += rows.length
-    const payload = table === 'settings' ? redactSecrets(rows) : rows
-    // 与 datafiles.ts 同样的 `JSON.stringify(rows, null, 1)` —— 快照要能和 .config 原件逐字 diff。
-    entries.push({
-      path: `${SNAPSHOT_DIR}/${file}`,
-      data: ENCODER.encode(JSON.stringify(payload, null, 1)),
-      mtime: Date.now(),
-    })
+    const groups = partitionRows(table, files, rows)
+    for (const file of files) {
+      const bucket = groups.get(file) ?? []
+      // 抹凭据只对 settings 生效、且在分桶之后：只动字段值、不动键名，分流结果不受影响。
+      const payload = table === 'settings' ? redactSecrets(bucket) : bucket
+      // 与 datafiles.doFlush 同样的 `JSON.stringify(rows, null, 1)` —— 快照要能和原件逐字 diff。
+      entries.push({
+        path: `${CONFIG_DIR}/${file}`,
+        data: ENCODER.encode(JSON.stringify(payload, null, 1)),
+        mtime: Date.now(),
+      })
+    }
     if (table === 'notes') noteRows = rows as { path: string; cached: number; removedLocal: number }[]
   }
 
@@ -136,7 +133,7 @@ export async function buildBackup(): Promise<BackupArchive> {
   const noteCount = included.size
   const at = new Date().toLocaleString('zh-CN', { hour12: false })
   entries.push({
-    path: `${SNAPSHOT_DIR}/README.txt`,
+    path: `${CONFIG_DIR}/README.txt`,
     data: ENCODER.encode(readme({ noteCount, rowCount, missing, at })),
     mtime: Date.now(),
   })

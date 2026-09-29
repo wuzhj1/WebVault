@@ -1,6 +1,7 @@
 /**
  * Gitee 同步设置的 store：内存里一份 `SyncSettings`，持久化到 Dexie 的 settings 表（单行 JSON）。
- * token 只存在本机 IndexedDB 中，从不写入代码库或日志，也不随笔记一起被同步——它是本机的凭据。
+ * token 只存在本机（未绑定目录时是浏览器 IndexedDB，绑定后是正文目录的 `.webvault/sync.json`），
+ * 从不写入代码库或日志，也不随笔记一起被同步——它是本机的凭据。
  *
  * 硬约束：只能在浏览器里跑（Pinia + IndexedDB）；store 本身不做防抖或版本迁移，字段新增一律靠
  * `DEFAULTS` 兜底 —— 旧数据缺字段时由 `{ ...DEFAULTS, ...stored }` 补齐。
@@ -8,6 +9,8 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import { getSetting, putSetting } from '@/core/db.ts'
+// 键名在 core/vault/config-layout.ts 声明：它同时决定这份配置落进 .webvault/sync.json。
+import { SETTING_KEYS } from '@/core/vault/config-layout.ts'
 import { normalizeGiteeConfig, type GiteeConfig } from '@/core/sync/gitee.ts'
 
 /** 同步设置的完整形状：连接信息（`GiteeConfig` 的四个字段）+ 本 store 独有的两个行为开关。 */
@@ -29,7 +32,7 @@ const DEFAULTS: SyncSettings = {
 }
 
 /** settings 表里的行键；整份设置合成一个 JSON 值，避免每个字段一行。 */
-const KEY = 'sync-settings'
+const KEY = SETTING_KEYS.syncSettings
 
 export const useSettingsStore = defineStore('settings', () => {
   /** 内存里的当前设置，初值即 DEFAULTS，`load` 读库后整体替换。 */

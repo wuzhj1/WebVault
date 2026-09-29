@@ -4,7 +4,7 @@
  * 同步边界：全部是本机状态——不写 OPFS、不进 Gitee 同步；折叠目录、最近打开、置顶、
  * 快捷键绑定四组持久化到 Dexie 的 settings 表，其余项都是纯内存的一次性标记。
  *
- * - collapsedDirs：文件树里处于折叠态的目录路径集合，持久化 key 'ui-collapsed-dirs'。
+ * - collapsedDirs：文件树里处于折叠态的目录路径集合，持久化 key 见 `SETTING_KEYS.collapsedDirs`。
  *   首次运行（库里没有这个 key）以空集合起步，不预置任何目录，也不回写——
  *   与「推断结果永不落盘」纪律保持一致。
  * - recentPaths / pinnedPaths：侧栏笔记分区「置顶 / 最近」标签页里的「最近打开」与
@@ -19,13 +19,16 @@
 import { defineStore } from 'pinia'
 import { ref, shallowRef } from 'vue'
 import { getSetting, putSetting } from '@/core/db.ts'
+// 键名只在 core/vault/config-layout.ts 声明一次：那里要按键名把设置分流到
+// .webvault 的 app/hotkeys/workspace 三个文件，键散在 store 里迟早和分流规则对不上。
+import { SETTING_KEYS } from '@/core/vault/config-layout.ts'
 
 /** Dexie settings 表里存放折叠目录的键名；改名会让老用户的折叠状态丢失。 */
-const STORAGE_KEY = 'ui-collapsed-dirs'
+const STORAGE_KEY = SETTING_KEYS.collapsedDirs
 /** 「最近打开」的键名；同样只改名不删数据，丢的只是本机书签。 */
-const RECENT_KEY = 'ui-recent-paths'
+const RECENT_KEY = SETTING_KEYS.recentPaths
 /** 「置顶」的键名。 */
-const PINNED_KEY = 'ui-pinned-paths'
+const PINNED_KEY = SETTING_KEYS.pinnedPaths
 /** 最近打开只留这么多条：再多就不叫「最近」，而是第二棵文件树了。 */
 const RECENT_MAX = 10
 
@@ -41,7 +44,7 @@ export const SHORTCUT_COMMANDS: ReadonlyArray<{ id: ShortcutId; label: string; d
 ]
 
 /** 快捷键绑定在 settings 表里的键名。 */
-const SHORTCUT_KEY = 'ui-shortcut-bindings'
+const SHORTCUT_KEY = SETTING_KEYS.shortcutBindings
 
 /** 出厂绑定表；load 合并与「恢复默认」都以它打底，新增命令时它自动跟着 SHORTCUT_COMMANDS 走。 */
 const DEFAULT_BINDINGS: Record<ShortcutId, string> = Object.fromEntries(
