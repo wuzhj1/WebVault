@@ -746,6 +746,16 @@ defineExpose({ flushSave, insertLink })
   background-color: var(--bg);
 }
 
+/* Vditor 给 contenteditable=false 的正文画 opacity:.3 + not-allowed —— 它只把这当成
+   「表单控件被禁用」。但本库默认只读是**产品常态**而不是故障态:整篇正文掉到 30% 不透明,
+   底色再准也像凭空蒙了层灰膜,字重与抗锯齿一起糊掉,根本读不下去。
+   「当前不可编辑」由顶栏那把锁和右下角提示条表达,正文本身必须和可编辑时完全一致。
+   选择器带上 [contenteditable] 是为了和 Vditor 那条规则一一对应 —— 本条 (0,5,1) 稳赢它的
+   (0,3,1),不带也能赢,带上则一眼看出是冲着谁来的。 */
+.editor__host :deep(.vditor-ir pre.vditor-reset[contenteditable='false']) {
+  opacity: 1;
+}
+
 /* 原生复选框由 UA 上色:Chrome 按下时填近黑色、聚焦时描一圈,在本主题里看会闪。
    所有状态改为这里自绘。Vditor 自带的 margin/font-size/vertical-align 保持不动,免得列表布局位移。 */
 .editor__host :deep(.vditor-task input[type='checkbox']) {
