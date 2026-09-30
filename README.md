@@ -58,6 +58,26 @@ VAULT_BASE=/my-vault/
 
 > **Windows / Git Bash 注意**：不要用 `VAULT_BASE=/my-vault/ pnpm build` 这种命令行写法。MSYS 会把以 `/` 开头的参数改写成 Windows 路径（`/my-vault/` 变成 `D:/soft/Git/my-vault/`），构建结果全错。写进 `.env.local` 最稳妥；确实要用命令行就加 `MSYS_NO_PATHCONV=1`。`.env.local` 已被 `.gitignore` 的 `*.local` 规则忽略。
 
+### SEO 与分享卡片
+
+`index.html` 里的 canonical / `og:url` / `og:image`，以及构建时生成的 `robots.txt` / `sitemap.xml`，都需要**绝对地址**，由 `vite.config.ts` 的 `webvault:seo` 插件在构建期拼成 `<部署域名><base>`：
+
+```
+VAULT_ORIGIN=https://wuzhj1.github.io   # 部署域名，不含路径；默认值即当前线上站点
+```
+
+和 `VAULT_BASE` 一样写进 `.env.local` 即可；CI 里对应 `pages.yml` 的 `env`。`base` 那一半由插件现取，所以换到 Gitee Pages 子路径时地址会自动跟着对，这也是为什么这些文件不放在 `public/` —— 静态文件拿不到 `base`。
+
+三处文案是各自独立的副本，改一处记得同步：`index.html` 的 `<title>`/`meta description`、`index.html` 首屏那段静态文案（`<div class="boot">`）、以及 JSON-LD 里的 `description`。
+
+`public/og-cover.png`（链接分享图，1200×630）由 `scripts/og-cover.html` 经本机浏览器截图生成，**不挂在 `pnpm build` 上**（CI 的字体和本地不同，跑出来的图会漂）。改了源文件后在本机重新生成一次：
+
+```bash
+pnpm og     # 需要本机有 Chrome 或 Edge，可用 CHROME_PATH 指定
+```
+
+> 注意：爬虫只从**域名根**读 `robots.txt`。托管在 GitHub Pages 项目页这类子路径时，`dist/robots.txt` 落在 `https://<用户名>.github.io/<仓库名>/robots.txt`，爬虫不会去读它；要让它生效得去 `<用户名>.github.io` 用户站点仓库放一份。仓库里这份是为了换到自定义域名或根路径部署时开箱即用。
+
 ### Gitee Pages 流程
 
 1. 把 `dist/` 的内容提交到一个仓库（这个仓库可以和存笔记的仓库分开，也可以就是同一个仓库的 `gh-pages` 之类分支）。

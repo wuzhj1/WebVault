@@ -84,8 +84,10 @@ function formatClock(ts: number): string {
     <!-- 左区：侧栏开关 + 当前笔记标题（副行是完整路径）；与右区的全局动作之间靠 spacer 撑开 -->
     <div class="topbar__title">
       <span class="topbar__name">
-        <!-- 标题自己占一个 span：外层是 flex，文本节点会变成匿名 flex item，省略号不再生效 -->
-        <span class="topbar__name-text">{{ title }}</span>
+        <!-- 用 h1 而不是 span：这是整页唯一的文档标题（没有笔记时退回应用名），读屏与
+             抓取器都靠它定位「这一页在讲什么」；无选中笔记的初始状态下它就是「WebVault」。
+             字号字重必须显式继承，否则被 h1 的 UA 默认值（2em/bold/margin）顶掉。 -->
+        <h1 class="topbar__name-text">{{ title }}</h1>
         <!-- 徽标不参与截断：宁可把它挤掉（flex:none），也不能让标题把它顶出视野 -->
         <span
           v-if="saveLabel"
@@ -225,7 +227,12 @@ function formatClock(ts: number): string {
   font-weight: 600;
 }
 
+/* 外层是 flex，标题必须自带一个盒子，文本节点会变成匿名 flex item，省略号就不再生效。
+   font/margin 不能省：换成 h1 后 UA 默认的 2em/bold/0.67em margin 会把它撑爆。 */
 .topbar__name-text {
+  margin: 0;
+  font-size: inherit;
+  font-weight: inherit;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;

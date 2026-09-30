@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>WebVault — og-cover 源文件</title>
+    <!--
+      链接分享卡（og:image）的源文件。生成：node scripts/make-og-cover.mjs（或 pnpm og）
+      产物：public/og-cover.png，固定 1200x630 —— 各大平台 open graph 的推荐尺寸。
+
+      为什么是「截图」而不是代码画：文案里有中文，而仓库的 make-icons.mjs 那套自制光栅化器
+      只会画矢量图元、没有字体。这里交给本机浏览器渲染，文字就能用系统字体正常排版，
+      也因此**不要**挂进 pnpm build —— CI 上没有可依赖的字体，跑出来的图会和本地不一致。
+      需要改文案时改这个文件再手动重新生成一次即可。
+    -->
+    <style>
+      html,
+      body {
+        margin: 0;
+        overflow: hidden;
+      }
+
+      body {
+        box-sizing: border-box;
+        width: 1200px;
+        height: 630px;
+        position: relative;
+        display: flex;
+        align-items: center;
+        gap: 52px;
+        padding: 64px 76px 96px;
+        background: #15161b;
+        color: #e6e7ee;
+        font-family:
+          -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB',
+          'Microsoft YaHei', sans-serif;
+        -webkit-font-smoothing: antialiased;
+      }
+
+      /* 底部强调色渐变条：给画面一个收口，也把品牌两个色（图标里的紫 + 绿）都带上。 */
+      body::after {
+        content: '';
+        position: absolute;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        height: 6px;
+        background: linear-gradient(90deg, #8b7cf6, #a6e3a1);
+      }
+
+      .icon {
+        flex: none;
+        width: 196px;
+        height: 196px;
+      }
+
+      .icon img {
+        display: block;
+        width: 100%;
+        height: 100%;
+      }
+
+      .eyebrow {
+        margin: 0 0 14px;
+        font-size: 20px;
+        font-weight: 600;
+        letter-spacing: 4px;
+        color: #a6e3a1;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: 74px;
+        font-weight: 700;
+        letter-spacing: -1.5px;
+        line-height: 1.05;
+      }
+
+      .tagline {
+        display: block;
+        margin-top: 12px;
+        font-size: 31px;
+        font-weight: 500;
+        letter-spacing: 0;
+        color: #8b7cf6;
+      }
+
+      .desc {
+        margin: 20px 0 0;
+        max-width: 34ch;
+        font-size: 23px;
+        line-height: 1.65;
+        color: #9498a8;
+      }
+
+      .chips {
+        position: absolute;
+        left: 76px;
+        right: 76px;
+        bottom: 46px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 14px;
+        font-size: 18px;
+        color: #9498a8;
+      }
+
+      .chips ul {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin: 0;
+        padding: 0;
+        list-style: none;
+      }
+
+      .chips li {
+        padding: 4px 14px;
+        border: 1px solid #2c2f3a;
+        border-radius: 999px;
+        color: #b6bac7;
+        white-space: nowrap;
+      }
+
+      .url {
+        flex: none;
+        color: #6f7484;
+        letter-spacing: 0.5px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="icon"><img src="../public/pwa/pwa-512x512.png" alt="" /></div>
+    <div class="copy">
+      <p class="eyebrow">本地优先 · 无账号 · 无后端</p>
+      <h1>WebVault<span class="tagline">本地优先的 Markdown 双链笔记</span></h1>
+      <p class="desc">正文以明文存在本机，通过你自己的 Gitee 仓库在设备之间同步。</p>
+    </div>
+    <div class="chips">
+      <ul>
+        <li>双链与反链</li>
+        <li>中文全文搜索</li>
+        <li>关系图谱</li>
+        <li>Gitee 同步</li>
+        <li>离线 PWA</li>
+      </ul>
+      <span class="url">wuzhj1.github.io/WebVault</span>
+    </div>
+  </body>
+</html>

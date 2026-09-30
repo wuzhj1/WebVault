@@ -24,6 +24,9 @@ jobs:
     runs-on: ubuntu-latest
     env:
       VAULT_BASE: /WebVault/
+      # canonical / og:url / robots.txt / sitemap.xml 里的绝对地址用它拼；与 vite.config.ts 的默认值一致，
+      # 写出来是为了让「SEO 指向哪」这件事在流水线上可见，而不是埋在代码里。
+      VAULT_ORIGIN: https://wuzhj1.github.io
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4

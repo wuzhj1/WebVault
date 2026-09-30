@@ -10,14 +10,73 @@
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="apple-mobile-web-app-title" content="WebVault" />
+    <meta name="application-name" content="WebVault" />
+
+    <!-- —— 搜索引擎 —— 标题把产品名放最前（SERP 截断时先保住品牌），副标题带核心关键词。
+         描述控制在一条摘要能完整显示的长度内，第一句就说明「是什么 + 关键差异」。 -->
+    <title>WebVault — 本地优先的 Markdown 双链笔记</title>
     <meta
       name="description"
-      content="本地优先的 Markdown 双链笔记,正文存在本机,通过你自己的 Gitee 仓库同步。"
+      content="WebVault 是本地优先的 Markdown 双链笔记：正文以明文存在本机，通过你自己的 Gitee 仓库在设备之间同步，没有账号也没有后端。支持双链与反向链接、中文全文搜索、关系图谱，可安装为离线 PWA。"
     />
+    <!-- 单页应用没有可分页的深链，这里比 robots.txt 默认值更明确地放开抓取与大图预览。 -->
+    <meta name="robots" content="index,follow,max-image-preview:large,max-snippet:-1,max-video-preview:-1" />
+    <!-- Google 已声明忽略 keywords，Baidu / Yandex 仍会弱参考；面向中文用户，留着成本为零。 -->
+    <meta name="keywords" content="双链笔记,Markdown笔记,本地优先,知识管理,Gitee同步,离线笔记,双向链接,Obsidian替代" />
+    <!-- __SITE_URL__ 由 vite.config.ts 的 webvault:seo 插件在 transformIndexHtml 里
+         替换成「部署域名 + VAULT_BASE 子路径」。写死会让 Gitee Pages 子路径部署指错地址，
+         放 public/ 里也拿不到 base，所以只能在构建期注入。 -->
+    <link rel="canonical" href="__SITE_URL__" />
+
+    <!-- —— 链接分享（微信 / Twitter / Slack / iMessage 都不跑 JS，只读这里的 meta）—— -->
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="WebVault" />
+    <meta property="og:locale" content="zh_CN" />
+    <meta property="og:title" content="WebVault — 本地优先的 Markdown 双链笔记" />
+    <meta
+      property="og:description"
+      content="正文以明文存在本机，通过你自己的 Gitee 仓库在设备之间同步。双链、中文全文搜索、关系图谱，离线可用。"
+    />
+    <meta property="og:url" content="__SITE_URL__" />
+    <meta property="og:image" content="__SITE_URL__og-cover.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="WebVault — 本地优先的 Markdown 双链笔记" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="WebVault — 本地优先的 Markdown 双链笔记" />
+    <meta
+      name="twitter:description"
+      content="正文以明文存在本机，通过你自己的 Gitee 仓库在设备之间同步。双链、中文全文搜索、关系图谱，离线可用。"
+    />
+    <meta name="twitter:image" content="__SITE_URL__og-cover.png" />
+    <meta name="twitter:image:alt" content="WebVault — 本地优先的 Markdown 双链笔记" />
+
+    <!-- 结构化数据：单页应用就一个 URL，用 WebApplication 而不是 Article/Product，
+         声明免费、可在线使用，争取应用类富结果与知识面板。 -->
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "WebApplication",
+        "name": "WebVault",
+        "alternateName": "WebVault 笔记",
+        "description": "本地优先的 Markdown 双链笔记应用。正文以明文存在本机，通过你自己的 Gitee 仓库在设备之间同步，没有账号也没有后端。支持双链与反向链接、中文全文搜索、关系图谱，可安装为离线 PWA。",
+        "url": "__SITE_URL__",
+        "image": "__SITE_URL__og-cover.png",
+        "applicationCategory": "ProductivityApplication",
+        "operatingSystem": "Web",
+        "browserRequirements": "需要启用 JavaScript，并通过 HTTPS 或 localhost 访问",
+        "inLanguage": "zh-CN",
+        "isAccessibleForFree": true,
+        "offers": { "@type": "Offer", "price": "0", "priceCurrency": "CNY" },
+        "featureList": "双链 [[笔记]] 与反向链接、重命名自动改写引用、中文全文搜索、关系图谱、Gitee 单仓库同步、可安装离线 PWA、5 套主题 × 8 种强调色",
+        "sameAs": ["https://github.com/wuzhj1/WebVault"],
+        "softwareHelp": { "@type": "CreativeWork", "url": "https://github.com/wuzhj1/WebVault#readme" }
+      }
+    </script>
+
     <!-- %BASE_URL% 让子路径部署(VAULT_BASE=/my-vault/)下的图标同样带前缀；写死 / 会在子路径下 404。 -->
     <link rel="icon" href="%BASE_URL%icon.svg" type="image/svg+xml" />
     <link rel="apple-touch-icon" href="%BASE_URL%apple-touch-icon.png" />
-    <title>WebVault</title>
     <script>
       // 首帧之前把主题写到 <html>,否则浅色主题启动时会先闪一下深色。
       try {
@@ -33,9 +92,143 @@
         /* 存储不可用时用样式表里的默认主题 */
       }
     </script>
+
+    <!-- 首屏静态文案的样式必须内联：外链 CSS 在生产由 <link> 提前加载没问题，
+         但开发态是 JS 注入的，等它就晚了 —— 会先看到一段没有底色的裸文字。
+         颜色一律走主题令牌，themes.css 加载后自动跟随用户选的主题；var() 的
+         兜底值只在 CSS 还没到的那几毫秒里生效。 -->
+    <style>
+      .boot {
+        box-sizing: border-box;
+        min-height: 100vh;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 12px;
+        padding: 40px 24px;
+        text-align: center;
+        background: var(--bg, #15161b);
+        color: var(--text, #e6e7ee);
+        font-family:
+          -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB',
+          'Microsoft YaHei', sans-serif;
+        font-size: 14px;
+        line-height: 1.6;
+      }
+
+      .boot h1 {
+        margin: 0;
+        font-size: 30px;
+        font-weight: 650;
+        letter-spacing: 0.5px;
+        line-height: 1.3;
+      }
+
+      .boot__sub {
+        display: block;
+        margin-top: 6px;
+        font-size: 15px;
+        font-weight: 500;
+        letter-spacing: normal;
+        color: var(--accent, #6a58e8);
+      }
+
+      .boot__lead {
+        margin: 0;
+        max-width: 50ch;
+        font-size: 14px;
+        line-height: 1.85;
+        color: var(--text-muted, #9498a8);
+        text-wrap: pretty;
+      }
+
+      .boot__list {
+        margin: 4px 0 0;
+        padding: 0;
+        list-style: none;
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: center;
+        gap: 6px 8px;
+        max-width: 560px;
+        font-size: 13px;
+        color: var(--text-muted, #9498a8);
+      }
+
+      .boot__list li {
+        padding: 3px 11px;
+        border: 1px solid var(--border, #2c2f3a);
+        border-radius: 999px;
+        white-space: nowrap;
+      }
+
+      .boot__hint {
+        margin: 14px 0 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+        font-size: 13px;
+        color: var(--text-muted, #9498a8);
+      }
+
+      .boot__spinner {
+        width: 13px;
+        height: 13px;
+        border: 2px solid var(--border, #2c2f3a);
+        border-top-color: var(--accent, #6a58e8);
+        border-radius: 50%;
+        animation: boot-spin 0.8s linear infinite;
+      }
+
+      @keyframes boot-spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        .boot__spinner {
+          animation: none;
+        }
+      }
+    </style>
   </head>
   <body>
-    <div id="app"></div>
+    <!-- 首屏静态文案：在 Vue 挂载前由本文件直接渲染，`app.mount()` 第一步就是
+         `container.textContent = ""`，所以挂载瞬间整块会被清掉，不会残留。
+
+         它同时承担三件事：
+           1. 启动期间不是一片空白，直接就能看出这是什么应用（与 App.vue 的启动屏同构，过渡不突兀）；
+           2. 给不执行 JS 的抓取器/分享卡片解析器一段真正可收录的正文（纯 SPA 的 #app 平时是空的）；
+           3. 给禁用 JS 的访客一个说得通的页面，而不是一个空壳。
+         文案一旦改动，og:description / JSON-LD 里那份也要同步 —— 它们是三处独立的副本。 -->
+    <div id="app">
+      <div class="boot">
+        <h1>
+          WebVault
+          <span class="boot__sub">本地优先的 Markdown 双链笔记</span>
+        </h1>
+        <p class="boot__lead">
+          正文以明文存在本机，通过你自己的 Gitee 仓库在设备之间同步 —— 没有账号，没有后端，笔记的归属权一直在你手里。
+        </p>
+        <ul class="boot__list">
+          <li>双链与反向链接</li>
+          <li>重命名自动改写引用</li>
+          <li>中文全文搜索</li>
+          <li>关系图谱</li>
+          <li>Gitee 同步</li>
+          <li>离线 PWA</li>
+        </ul>
+        <p class="boot__hint"><span class="boot__spinner" aria-hidden="true"></span>正在读取本机笔记库…</p>
+        <noscript>
+          <p class="boot__lead">
+            WebVault 是纯前端应用，需要启用 JavaScript 才能运行。已开启时，上方内容会在应用启动后自动消失。
+          </p>
+        </noscript>
+      </div>
+    </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
