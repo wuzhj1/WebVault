@@ -4,9 +4,9 @@
  * - 本地文件头 / 中央目录 / EOCD 三段的字段（魔数、方法、标志位、尺寸、偏移、条目数）
  *   按 ZIP 规范用一套**独立的读取路径**反读回来，与构造器互为对照；
  * - deflate 产物必须能被 `zlib.inflateRawSync` 解回原文 —— 压缩流的正确性由外部实现裁决；
- * - 最终交给外部解压器（Windows/macOS 的 bsdtar 或 Linux 的 unzip）真正解压一次，
- *   逐字节比对正文并核对还原的修改时间 —— 这是完全外部的解压端；store 与 deflate
- *   两条路径都要过这一关；
+ * - 最终交给外部解压器（Windows/macOS 的 bsdtar、7z，或 Linux 的 python3 zipfile）
+ *   真正解压一次，逐字节比对正文并核对还原的修改时间 —— 这是完全外部的解压端；store
+ *   与 deflate 两条路径都要过这一关；
  * - 护栏：绝对路径、`..`、反斜杠、空段、重复条目、超量条目一律拒绝（zip slip 防护）。
  *
  * 运行：pnpm verify（第 13 个套件；裸 node 直跑本文件）。全部通过退出码 0，否则 1。
@@ -297,25 +297,48 @@ ok('rejects more than 65534 entries', tooManyThrew)
 // ---------------------------------------------------------------------------
 
 /**
- * 挑一个真能解 zip 的外部命令。`tar -xf` 只在 bsdtar（Windows 自带的
- * libarchive、macOS 的 bsdtar）下可用 —— Ubuntu 的 GNU tar 认不了 zip，
- * 会报 "This does not look like a tar archive"。所以先试 tar，失败回退 unzip
- * （Info-ZIP，Ubuntu runner 自带）。两者都会还原打包时写入的 mtime，
- * 下面的 mtime 断言因此对两个实现都成立；python3 的 zipfile 不还原 mtime，
- * 故意不纳入候选。
+ * 挑一个真能解 zip 的外部命令，按序试：
+ *
+ * 1. `tar -xf` —— 只在 bsdtar（Windows 自带的 libarchive、macOS）下认 zip；
+ *    Ubuntu 的 GNU tar 报 "This does not look like a tar archive"，自动落到下一个。
+ * 2. `7z` —— 保留 mtime，多数 runner 没装，试一下不亏。
+ * 3. `python3 -m` 风格的 zipfile —— Ubuntu runner 必有，且**正确处理 UTF-8 文件名标志**。
+ *
+ * 刻意不用 Info-ZIP 的 `unzip`：它不认 ZIP 的 UTF-8 名字标志（bit 11），把我们写入的
+ * UTF-8 字节当 CP437 再转成 locale 编码 —— 「很长」6 字节能膨胀成 18 字节，60 字的中文名
+ * 越过 255 字节上限报 ENAMETOOLONG，短中文目录也会被建成乱码目录、随后读正文 ENOENT。
+ * 这不是我们 zip 的问题，是解压端的编码缺陷，所以排除掉。
+ *
+ * `restoresMtime`：bsdtar/7z 会把打包时写入的 DOS 时间还原到文件系统，python3 的
+ * extractall 不还原（写成当前时间）。mtime 断言只在能还原的工具上做。
  */
-function extractZip(zipPath: string, outDir: string): string {
-  const attempts: [cmd: string, args: string[]][] = [
-    ['tar', ['-xf', zipPath, '-C', outDir]],
-    ['unzip', ['-o', '-q', zipPath, '-d', outDir]],
+function extractZip(zipPath: string, outDir: string): { tool: string; restoresMtime: boolean } {
+  const attempts: { tool: string; restoresMtime: boolean; run: () => void }[] = [
+    {
+      tool: 'tar',
+      restoresMtime: true,
+      run: () => execFileSync('tar', ['-xf', zipPath, '-C', outDir], { stdio: 'pipe' }),
+    },
+    {
+      tool: '7z',
+      restoresMtime: true,
+      run: () => execFileSync('7z', ['x', '-y', `-o${outDir}`, zipPath], { stdio: 'pipe' }),
+    },
+    {
+      tool: 'python3-zipfile',
+      restoresMtime: false,
+      // `python3 -m zipfile -e` 是 CPython 自带的命令行解压接口（3.3+），底层即
+      // ZipFile.extractall：按 ZIP 的 UTF-8 名字标志解码，中文名原样落盘。
+      run: () => execFileSync('python3', ['-m', 'zipfile', '-e', zipPath, outDir], { stdio: 'pipe' }),
+    },
   ]
   const errors: string[] = []
-  for (const [cmd, args] of attempts) {
+  for (const a of attempts) {
     try {
-      execFileSync(cmd, args, { stdio: 'pipe' })
-      return cmd
+      a.run()
+      return { tool: a.tool, restoresMtime: a.restoresMtime }
     } catch (err) {
-      errors.push(`${cmd}: ${String(err)}`)
+      errors.push(`${a.tool}: ${String(err)}`)
     }
   }
   throw new Error(`没有可用的 zip 解压器\n  ${errors.join('\n  ')}`)
@@ -334,12 +357,18 @@ try {
     await mkdir(outDir, { recursive: true })
     let extracted = true
     let tool = ''
+    let restoresMtime = false
     try {
-      tool = extractZip(zipPath, outDir)
+      const r = extractZip(zipPath, outDir)
+      tool = r.tool
+      restoresMtime = r.restoresMtime
     } catch (err) {
       extracted = false
       fail++
-      console.log(`FAIL ${label}: 无法解压\n  ${String(err)}`)
+      // 文件名字节数用 Buffer.byteLength 直接量，不受日志编码影响 —— 失败时能一眼
+      // 判断是不是撞了 255 字节的文件名上限。
+      const lens = cases.map((c) => `${Buffer.byteLength(c.path.split('/').pop()!)}B`).join(' ')
+      console.log(`FAIL ${label}: 无法解压 (名字字节数: ${lens})\n  ${String(err)}`)
     }
     if (!extracted) continue
 
@@ -349,8 +378,12 @@ try {
     }
     if (label === 'store') {
       // DOS 时间是本地时间、2 秒精度 —— 容差取 3 秒，超了就是时间字段编错了。
-      const restored = (await stat(join(outDir, 'root.md'))).mtimeMs
-      ok(`${tool} restores the mtime we packed`, Math.abs(restored - STAMP_MS) < 3000, `restored=${restored} packed=${STAMP_MS}`)
+      if (!restoresMtime) {
+        console.log(`SKIP ${label} mtime: ${tool} 不还原修改时间（结构与字节已由上面的断言覆盖）`)
+      } else {
+        const restored = (await stat(join(outDir, 'root.md'))).mtimeMs
+        ok(`${tool} restores the mtime we packed`, Math.abs(restored - STAMP_MS) < 3000, `restored=${restored} packed=${STAMP_MS}`)
+      }
     }
   }
 } finally {
