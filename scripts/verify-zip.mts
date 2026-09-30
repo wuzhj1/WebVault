@@ -4,8 +4,9 @@
  * - 本地文件头 / 中央目录 / EOCD 三段的字段（魔数、方法、标志位、尺寸、偏移、条目数）
  *   按 ZIP 规范用一套**独立的读取路径**反读回来，与构造器互为对照；
  * - deflate 产物必须能被 `zlib.inflateRawSync` 解回原文 —— 压缩流的正确性由外部实现裁决；
- * - 最终交给 bsdtar（Windows 自带的 libarchive）真正解压一次，逐字节比对正文并核对还原的
- *   修改时间 —— 这是完全外部的解压端；store 与 deflate 两条路径都要过这一关；
+ * - 最终交给外部解压器（Windows/macOS 的 bsdtar 或 Linux 的 unzip）真正解压一次，
+ *   逐字节比对正文并核对还原的修改时间 —— 这是完全外部的解压端；store 与 deflate
+ *   两条路径都要过这一关；
  * - 护栏：绝对路径、`..`、反斜杠、空段、重复条目、超量条目一律拒绝（zip slip 防护）。
  *
  * 运行：pnpm verify（第 13 个套件；裸 node 直跑本文件）。全部通过退出码 0，否则 1。
@@ -289,8 +290,33 @@ try {
 ok('rejects more than 65534 entries', tooManyThrew)
 
 // ---------------------------------------------------------------------------
-// 端到端：交给 bsdtar 真正解压，逐字节比对
+// 端到端：交给外部解压器真正解压，逐字节比对
 // ---------------------------------------------------------------------------
+
+/**
+ * 挑一个真能解 zip 的外部命令。`tar -xf` 只在 bsdtar（Windows 自带的
+ * libarchive、macOS 的 bsdtar）下可用 —— Ubuntu 的 GNU tar 认不了 zip，
+ * 会报 "This does not look like a tar archive"。所以先试 tar，失败回退 unzip
+ * （Info-ZIP，Ubuntu runner 自带）。两者都会还原打包时写入的 mtime，
+ * 下面的 mtime 断言因此对两个实现都成立；python3 的 zipfile 不还原 mtime，
+ * 故意不纳入候选。
+ */
+function extractZip(zipPath: string, outDir: string): string {
+  const attempts: [cmd: string, args: string[]][] = [
+    ['tar', ['-xf', zipPath, '-C', outDir]],
+    ['unzip', ['-o', '-q', zipPath, '-d', outDir]],
+  ]
+  const errors: string[] = []
+  for (const [cmd, args] of attempts) {
+    try {
+      execFileSync(cmd, args, { stdio: 'pipe' })
+      return cmd
+    } catch (err) {
+      errors.push(`${cmd}: ${String(err)}`)
+    }
+  }
+  throw new Error(`没有可用的 zip 解压器\n  ${errors.join('\n  ')}`)
+}
 
 const root = await mkdtemp(join(tmpdir(), 'webvault-zip-'))
 try {
@@ -304,23 +330,24 @@ try {
     await writeFile(zipPath, Buffer.from(bytes))
     await mkdir(outDir, { recursive: true })
     let extracted = true
+    let tool = ''
     try {
-      execFileSync('tar', ['-xf', zipPath, '-C', outDir], { stdio: 'pipe' })
+      tool = extractZip(zipPath, outDir)
     } catch (err) {
       extracted = false
       fail++
-      console.log(`FAIL ${label}: bsdtar 无法解压\n  ${String(err)}`)
+      console.log(`FAIL ${label}: 无法解压\n  ${String(err)}`)
     }
     if (!extracted) continue
 
     for (const c of cases) {
       const text = await readFile(join(outDir, ...c.path.split('/')), 'utf8')
-      check(`${label} bsdtar extracts ${c.path} byte-identical`, text, dec.decode(c.data))
+      check(`${label} (${tool}) extracts ${c.path} byte-identical`, text, dec.decode(c.data))
     }
     if (label === 'store') {
       // DOS 时间是本地时间、2 秒精度 —— 容差取 3 秒，超了就是时间字段编错了。
       const restored = (await stat(join(outDir, 'root.md'))).mtimeMs
-      ok('bsdtar restores the mtime we packed', Math.abs(restored - STAMP_MS) < 3000, `restored=${restored} packed=${STAMP_MS}`)
+      ok(`${tool} restores the mtime we packed`, Math.abs(restored - STAMP_MS) < 3000, `restored=${restored} packed=${STAMP_MS}`)
     }
   }
 } finally {
