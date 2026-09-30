@@ -18,6 +18,7 @@ import { SETTING_KEYS } from './core/vault/config-layout.ts'
 import { dropPendingSave, readPendingSave, snapshotPendingSave } from './core/editor/pending-save.ts'
 import { onFlushError } from './core/vault/datafiles.ts'
 import { bindingOfEvent, hasMod, isTypingTarget } from './core/hotkeys.ts'
+import { registerAppSW } from './core/pwa.ts'
 import { titleOf } from './core/vault/paths.ts'
 import { useSyncStore } from './stores/sync.ts'
 import { useUiStore, type ShortcutId } from './stores/ui.ts'
@@ -50,6 +51,11 @@ const sidebarOpen = ref(true)
 const rightOpen = ref(true)
 /** 启动流程是否完成，透传给编辑器控制空态占位页何时可见。 */
 const startupDone = ref(false)
+/**
+ * 新版 Service Worker 已接管、但页面还没换版本。只有在「正文尚未落盘、不能直接刷新」时才会置位，
+ * 改由顶栏下方的提示条等用户点头；能安全刷新时是直接刷掉的，不会走到这里。
+ */
+const updateReady = ref(false)
 
 /** 窄屏媒体查询；为 null（非浏览器环境兜底）时抽屉相关逻辑整体退化。 */
 const narrow = typeof window !== 'undefined' ? window.matchMedia('(max-width: 959px)') : null
@@ -220,6 +226,34 @@ const offFlushError = onFlushError((file, err) => {
   )
 })
 
+/**
+ * 新版 SW 已接管（skipWaiting + clientsClaim 已生效），此刻页面跑的还是旧 JS，必须刷新一次才换得到新版本。
+ * - 没有待写内容：直接刷。这次刷新只是把已经装好的新版本换上来，用户感知不到，
+ *   也正是「装成本地应用却一直停在旧版本」这个老问题的正解。
+ * - 有未落盘的修改（dirty / saving / error）：绝不打断输入，只挂出提示条等用户自己点。
+ *   防抖窗口内的那几个字一旦被 reload 冲掉是找不回来的，宁可让用户晚几秒拿到新版本。
+ */
+function onSWNeedReload(): void {
+  const pending =
+    vault.saveState === 'dirty' || vault.saveState === 'saving' || vault.saveState === 'error'
+  if (pending) {
+    updateReady.value = true
+    return
+  }
+  window.location.reload()
+}
+
+/**
+ * 用户点了提示条上的「立即刷新」：先 await 强制落盘再刷，别把最后几个字交给 beforeunload 去赌
+ * （快照确实兜得住，但能真写进 OPFS 就不该退而求其次）。
+ * flushSave 失败时会自己把正文放回 pendingValue 并报错，这里照样刷新 ——
+ * localStorage 快照 + 下次启动回灌（recoverPendingSave）是它的兜底。
+ */
+async function reloadForUpdate(): Promise<void> {
+  await editorRef.value?.flushSave()
+  window.location.reload()
+}
+
 onMounted(async () => {
   if (window.innerWidth < 1200) rightOpen.value = false
   syncDrawerState()
@@ -227,6 +261,9 @@ onMounted(async () => {
   window.addEventListener('keydown', onKeydown)
   window.addEventListener('beforeunload', flush)
   document.addEventListener('visibilitychange', onVisibility)
+
+  // 必须赶在下面的 await 之前：SW 注册拖到 vault.init() 之后，更新检测会跟着一起被阻塞。
+  registerAppSW(onSWNeedReload)
 
   // 启动顺序有意为之：vault 初始化失败时置 fatal 并短路整个界面；
   // 索引在后台预热（不 await），用户先看到界面，随后才做回灌、启动定位与同步。
@@ -260,6 +297,16 @@ onBeforeUnmount(() => {
       @graph="show('graph')"
       @settings="show('settings')"
     />
+
+    <!-- 新版 SW 已接管但还没换版本：只有正文没落盘时才会挂出来（能安全刷就直接刷了）。
+         放在 v-if/v-else 之外，启动屏、fatal 屏上同样可见 —— 提示条在这几种状态下都不碍事。 -->
+    <div v-if="updateReady" class="banner banner--update">
+      <span class="banner__text">新版本已就绪,刷新后生效。</span>
+      <button class="banner__btn banner__btn--primary" type="button" @click="reloadForUpdate">
+        立即刷新
+      </button>
+      <button class="banner__btn" type="button" @click="updateReady = false">稍后</button>
+    </div>
 
     <!-- 启动失败：OPFS 不可用（无痕窗口 / 禁用站点数据）时的整屏兜底 -->
     <div v-if="vault.fatal" class="screen">
@@ -483,6 +530,43 @@ onBeforeUnmount(() => {
   color: var(--warn);
   font-size: 12.5px;
   line-height: 1.6;
+}
+
+/* 新版提示条：沿用 .banner 的位置与尺寸，但换成强调色 —— 这是更新而不是故障，不该用警示色。 */
+.banner--update {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  background: var(--accent-soft);
+  border-bottom-color: var(--accent);
+  color: var(--accent-text);
+}
+
+.banner__text {
+  margin-right: auto;
+}
+
+/* 按钮配色照抄 .screen__btn：强调色填充主按钮 + 中性次按钮，明暗两套主题下都靠变量兜底。 */
+.banner__btn {
+  padding: 3px 12px;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.banner__btn:hover {
+  background: var(--bg-hover);
+}
+
+.banner__btn--primary {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent-text);
 }
 
 .spinner {
