@@ -165,7 +165,10 @@ const STORE_CASES = [
   entry('root.md', '# 根笔记\n', STAMP_MS),
   entry('notes/想法/双链.md', '# 双链\n\n正文里带 [[另一篇]]。\n'),
   entry('notes/empty.md', ''),
-  entry(`notes/中文目录/${'很长'.repeat(40)}.md`, '重复段落验证长路径\n'.repeat(30)),
+  // 长路径要真能落到文件系统上：Linux 单个文件名组件限 255 **字节**（中文 UTF-8 每字
+  // 3 字节），Windows 限 255 字符 —— 按两边都过取 60 字。超了外部解压器会 ENAMETOOLONG，
+  // 整组字节比对与 mtime 断言都被跳过，覆盖率悄悄下降。
+  entry(`notes/中文目录/${'很长'.repeat(30)}.md`, '重复段落验证长路径\n'.repeat(30)),
 ]
 
 const storeZip = await buildZip(STORE_CASES, { deflate: false })
