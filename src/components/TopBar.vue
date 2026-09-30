@@ -61,6 +61,12 @@ function onSync(): void {
   void sync.syncNow()
 }
 
+/** 锁/解锁当前笔记。库里默认只读，这一下是除「新建笔记」外唯一能进入编辑的入口。 */
+function toggleLock(): void {
+  if (!vault.activePath) return
+  vault.editable = !vault.editable
+}
+
 /** 时刻 → `HH:mm`（24 小时制）；徽标里只需要时分，日期对"刚存过"这件事没意义。 */
 function formatClock(ts: number): string {
   return new Date(ts).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })
@@ -89,6 +95,31 @@ function formatClock(ts: number): string {
         >
           {{ saveLabel }}
         </span>
+        <!-- 锁：库里默认只读，这是除「新建笔记」外唯一能进入编辑的入口。文案本身说明当前状态，
+             点它是在切换，所以 title 写清楚点下去会发生什么。 -->
+        <button
+          v-if="vault.activePath"
+          class="lockbtn"
+          :class="{ 'lockbtn--on': vault.editable }"
+          :title="vault.editable ? '锁定本篇，恢复只读' : '本篇为只读，点击解锁后可编辑'"
+          :aria-label="vault.editable ? '锁定本篇，恢复只读' : '本篇为只读，点击解锁后可编辑'"
+          :aria-pressed="vault.editable ? 'true' : 'false'"
+          type="button"
+          @click="toggleLock"
+        >
+          <svg viewBox="0 0 16 16" width="11" height="11" aria-hidden="true">
+            <rect x="3.5" y="7" width="9" height="6.5" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.5" />
+            <!-- 锁梁少一条腿就是开锁；两条腿都落在锁体上就是闭锁 -->
+            <path
+              :d="vault.editable ? 'M5.7 7V5.1a2.3 2.3 0 014.6 0' : 'M5.7 7V5.1a2.3 2.3 0 014.6 0V7'"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.5"
+              stroke-linecap="round"
+            />
+          </svg>
+          <span class="lockbtn__label">{{ vault.editable ? '编辑中' : '只读' }}</span>
+        </button>
       </span>
       <span v-if="vault.activePath" class="topbar__path">{{ vault.activePath }}</span>
     </div>
@@ -228,6 +259,45 @@ function formatClock(ts: number): string {
   background: var(--danger-soft);
 }
 
+/* —— 读写锁：只读态是中性灰，解锁后亮成强调色 ——
+   与 saveflag 同级同尺寸，两者并排时靠 flex:none 保住自己、把标题挤窄。 */
+.lockbtn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  height: 20px;
+  padding: 0 7px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-hover);
+  color: var(--text-muted);
+  font-size: 10.5px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    color 0.15s,
+    border-color 0.15s,
+    background 0.15s;
+}
+
+.lockbtn:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.lockbtn--on {
+  border-color: transparent;
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+
+.lockbtn--on:hover {
+  color: var(--accent-text);
+}
+
 .topbar__path {
   font-size: 10.5px;
   color: var(--text-muted);
@@ -322,6 +392,15 @@ function formatClock(ts: number): string {
 
   .topbar__path {
     display: none;
+  }
+
+  /* 窄屏只剩图标：锁的形状（开/闭）已经把状态说清了，文字标签只会把标题挤没 */
+  .lockbtn__label {
+    display: none;
+  }
+
+  .lockbtn {
+    padding: 0 6px;
   }
 }
 </style>

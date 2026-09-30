@@ -176,6 +176,19 @@ function setContent(body: string, enabled: boolean): void {
 }
 
 /**
+ * 把锁态落到 Vditor 上(只翻 contenteditable,不动正文):锁与解锁都由它收口,
+ * 换文、正文外部改写则走 `setContent` 一并带上当前锁态。
+ * 空态/加载态没有可编辑的东西,交给随后的 `loadActive` 补一次即可。
+ */
+function applyEditable(): void {
+  if (!editorReady || state.value !== 'ready') return
+  suppressInput = true
+  if (vault.editable) editor?.enable()
+  else editor?.disabled()
+  suppressInput = false
+}
+
+/**
  * 把 `vault.activePath` 那篇笔记读进编辑器:换文、外部改正文(bodyRevision 变了)、sync 拉到远端正文
  * 都会走这里。开头先 flushSave,否则上一份未落盘的防抖内容会写进新激活的文件里。
  */
@@ -216,8 +229,12 @@ async function loadActive(): Promise<void> {
   loadedFm = block
   state.value = 'ready'
   // 同一篇且正文一字未改就别 setValue:重建 IR DOM 会把光标弹回开头。
-  if (path === prevPath && body === renderedBody) return
-  setContent(body, true)
+  // 但正文没变不等于锁态没变(比如 loading 期间用户点了解锁),这里补一次落锁。
+  if (path === prevPath && body === renderedBody) {
+    applyEditable()
+    return
+  }
+  setContent(body, vault.editable)
 }
 
 /** wikilink 高亮要的判断:附件不解析、命中是 note、没命中是待建的 new。 */
@@ -328,6 +345,11 @@ function onEditorClick(event: MouseEvent): void {
   }
 
   if (isTaskCheckbox(event.target)) {
+    // 只读下不许勾选:勾一下就是一次正文改动,会绕过顶栏的锁直接进防抖落盘。
+    if (!vault.editable) {
+      event.preventDefault()
+      return
+    }
     // detail > 0 说明是真用鼠标点的;Tab 键聚焦进来的复选框要保留它自己的焦点环。
     if (event.detail > 0) event.target.blur()
     releaseCheckboxSelection(event.target)
@@ -495,8 +517,16 @@ function applySlashCaret(): void {
 
 /** 走 Vditor 自己的插入 API:IR 模式下安全,直接改 contenteditable 的 DOM 则不行。 */
 function insertLink(target: string): void {
+  // 从选择器插入是条明确的编辑指令,只读时替用户解锁(顶栏徽标同步翻成「编辑中」),
+  // 否则链接会被 contenteditable 悄悄挡掉、界面上看不出任何反应。
+  if (!vault.editable) vault.editable = true
   editor?.insertValue(`[[${target}]]`, true)
   editor?.focus()
+}
+
+/** 只读提示条的解锁入口;与顶栏那把锁写的是同一个 vault.editable。 */
+function unlock(): void {
+  vault.editable = true
 }
 
 /** 挂上装饰管线:定位 IR 根、起 MutationObserver、监听 selectionchange,并先跑一轮兜底装饰。 */
@@ -589,6 +619,14 @@ watch(
   },
 )
 
+/** 顶栏锁/解锁:只翻 contenteditable,不重排正文,否则每次解锁都把光标弹回开头。 */
+watch(
+  () => vault.editable,
+  () => {
+    applyEditable()
+  },
+)
+
 /** 网络/凭据就绪后,把还停在 loading 的那篇正文补拉下来。 */
 watch(
   () => sync.available,
@@ -634,6 +672,26 @@ defineExpose({ flushSave, insertLink })
       <span class="spinner"></span>
       正在从 Gitee 下载这篇笔记…
     </div>
+    <!-- 只读提示:正文打不进去时唯一能解释「为什么没反应」的地方,顺手当解锁入口 -->
+    <button
+      v-if="state === 'ready' && !vault.editable"
+      class="editor__lockhint"
+      type="button"
+      title="本篇处于只读,点击解锁后可编辑"
+      @click="unlock"
+    >
+      <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
+        <rect x="3.5" y="7" width="9" height="6.5" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.4" />
+        <path
+          d="M5.7 7V5.1a2.3 2.3 0 014.6 0"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.4"
+          stroke-linecap="round"
+        />
+      </svg>
+      只读 · 点击解锁编辑
+    </button>
   </div>
 </template>
 
@@ -849,6 +907,35 @@ defineExpose({ flushSave, insertLink })
   border-top: 1px solid var(--border);
   color: var(--text-muted);
   font-size: 13px;
+}
+
+/* 只读提示条:浮在正文右下角、不随内容滚动。正文打不进去时它是唯一的解释,
+   顺手兼任解锁入口 —— 与顶栏那把锁改的是同一个 vault.editable。 */
+.editor__lockhint {
+  position: absolute;
+  right: 16px;
+  bottom: 14px;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 11px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-elevated);
+  box-shadow: 0 2px 10px var(--shadow-color);
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.4;
+  cursor: pointer;
+  transition:
+    color 0.15s,
+    border-color 0.15s;
+}
+
+.editor__lockhint:hover {
+  border-color: var(--accent);
+  color: var(--text);
 }
 
 .spinner {

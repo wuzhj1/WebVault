@@ -196,6 +196,16 @@ export const useVaultStore = defineStore('vault', () => {
   const saveState = ref<'idle' | 'dirty' | 'saving' | 'saved' | 'error'>('idle')
   /** 最近一次成功落盘的时刻；顶栏显示「已保存 14:03」用，null = 本会话还没保存过。 */
   const savedAt = ref<number | null>(null)
+  /**
+   * 当前这篇是否已解锁可编辑 —— **库默认只读**，打开已有笔记一律上锁。
+   *
+   * 只有两条路能置真：`createNote` 刚真正写出的新笔记（走 `unlockOnOpen`）、用户在顶栏手动解锁。
+   * 它是单篇状态：换文即上锁，不持久化、不同步、刷新页面回到只读 —— 一次手滑最多只碰坏一篇。
+   * 写路径（saveBody / 同步 / 重命名）不认识这个开关，它只约束「编辑器是否可输入」。
+   */
+  const editable = ref(false)
+  /** `createNote` 刚真正建出的路径；下一次 `openNote` 命中它才放行，否则按默认只读上锁。 */
+  let unlockOnOpen: string | null = null
 
   /** path/标题/zid → 笔记的解析器，随 notes/cards 变化重建。 */
   const resolver = computed<Resolver>(() => buildResolver(notes.value, cards.value))
@@ -704,6 +714,12 @@ export const useVaultStore = defineStore('vault', () => {
 
   /** 打开笔记：切换 activePath、刷新双链，并防抖 400ms 落盘「上次打开路径」。 */
   async function openNote(path: string): Promise<void> {
+    // 默认只读：换文一律上锁，只有刚 createNote 出来的那篇（unlockOnOpen 命中）按「新建即可编辑」放行。
+    // 同一篇重复打开不改变锁态 —— 正编辑着误点了侧栏同一行，不该被打断回只读。
+    const fresh = unlockOnOpen === path
+    unlockOnOpen = null
+    if (path !== activePath.value) editable.value = fresh
+    else if (fresh) editable.value = true
     activePath.value = path
     // 所有打开入口（侧栏/搜索/图谱/右栏/启动定位）都汇到这里，「最近打开」只在此记一次账。
     ui.addRecent(path)
@@ -802,6 +818,9 @@ export const useVaultStore = defineStore('vault', () => {
     await reindexContent(path, content)
     notes.value = replaceMeta(notes.value, meta)
     await refreshDerived()
+    // 新建即可编辑：这次是真正写出的文件，紧随其后的 openNote 据此放行。
+    // 走到「路径已被占用」早退分支的不算新建，那里不设这个标记。
+    unlockOnOpen = path
     return path
   }
 
@@ -1048,6 +1067,7 @@ export const useVaultStore = defineStore('vault', () => {
     bodyRevision,
     saveState,
     savedAt,
+    editable,
     resolver,
     byPath,
     init,
