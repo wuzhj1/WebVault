@@ -378,6 +378,121 @@ function releaseCheckboxSelection(box: HTMLInputElement): void {
   selection.addRange(caret)
 }
 
+/** 一次待处理的斜杠命令回车:回车前光标所在块的下标、它的原文、以及整篇当时的块数。 */
+let slashFill: { index: number; text: string; count: number } | null = null
+
+/**
+ * 提示层当前展示的是 `/` 命令菜单。`[[` 链接与 `:` 表情两条提示的 HTML 里都没有 `.slash-hint__alias`,
+ * 拿它当判据就不会把链接补全的回车也当成斜杠命令处理。
+ */
+function slashMenuOpen(): boolean {
+  const hint = document.querySelector<HTMLElement>('.vditor-hint')
+  return !!hint && hint.style.display === 'block' && !!hint.querySelector('.slash-hint__alias')
+}
+
+/** 光标所在块在 IR 根下的下标;光标不在编辑器里时返回 -1。 */
+function caretBlockIndex(): number {
+  if (!irRoot) return -1
+  const selection = window.getSelection()
+  if (!selection || selection.rangeCount === 0) return -1
+  const node = selection.getRangeAt(0).startContainer
+  let block: Element | null = node instanceof Element ? node : node.parentElement
+  while (block && block.parentElement !== irRoot) block = block.parentElement
+  if (!block) return -1
+  return Array.from(irRoot.children).indexOf(block)
+}
+
+/** 回车落进 `/` 提示层时记下现场,排一个微任务在校正——它排在整轮事件派发之后,届时块已经插完。 */
+function onEditorKeydownCapture(event: KeyboardEvent): void {
+  if (event.key !== 'Enter' || event.isComposing) return
+  if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return
+  if (!irRoot || !irRoot.contains(event.target as Node)) return
+  if (!slashMenuOpen()) return
+  const index = caretBlockIndex()
+  if (index < 0) return
+  slashFill = {
+    index,
+    text: irRoot.children[index].textContent ?? '',
+    count: irRoot.children.length,
+  }
+  queueMicrotask(applySlashCaret)
+}
+
+/**
+ * 把光标放到 `node` 内容的首/末,并一路深入到最后一个可写字节点:
+ * 元素级落点(`<ul>` 的子节点下标之类)会被浏览器重新解释,只有落到文本节点上才是确定的。
+ */
+function setRangeAt(node: Node, atStart: boolean): void {
+  let target: Node = node
+  for (;;) {
+    const next = atStart ? target.firstChild : target.lastChild
+    if (!next) break
+    target = next
+  }
+  const range = document.createRange()
+  if (target.nodeType === Node.TEXT_NODE) {
+    range.setStart(target, atStart ? 0 : (target.nodeValue?.length ?? 0))
+  } else {
+    range.selectNodeContents(target)
+  }
+  range.collapse(atStart)
+  const selection = window.getSelection()
+  if (!selection) return
+  selection.removeAllRanges()
+  selection.addRange(range)
+}
+
+/** 表格/分割线块内没有可续写的落点:块后复用一段,没有就新起一段,光标放到它的开头。 */
+function setCaretAfterBlock(block: HTMLElement): void {
+  let tail = block.nextElementSibling as HTMLElement | null
+  if (!tail || tail.tagName !== 'P') {
+    tail = document.createElement('p')
+    tail.setAttribute('data-block', '0')
+    block.after(tail)
+  }
+  setRangeAt(tail, true)
+}
+
+/**
+ * 斜杠命令回车后的光标接管:按块类型把光标摆到确定位置,并回收被删空的 `/xxx` 原段落。
+ *
+ * Vditor 的 `Hint.fillEmoji` 先把 `/xxx` 从原段落里删掉,再让 `insertHTML` 走「块内容插到当前块之后」
+ * 的分支(`util/selection.ts`),最后靠塞在插入内容末尾的 `<wbr>` 把光标找回来。这条路径有三个毛病:
+ * 1. `<table>`/`<hr>` 这类不能有子节点的元素会把那个 `<wbr>` 丢给解析器,`setRangeByWbr` 找不到就回落到
+ *    旧位置 —— 光标停在新块**前面**的空段落里,接着打字写到块上方去了;
+ * 2. 标题/列表/引用拿到的是元素级光标(比如 `<ul>` 的子节点下标),语义含糊,第一次输入要靠浏览器自己归位;
+ * 3. `/xxx` 被删空的原段落不会被回收,新块上面永远顶着一个空行。
+ *
+ * 所以能续写的块 → 块内最后一个可写字节点的末尾;表格/分割线这类块内没有落点的 → 块后新起一段;
+ * 代码块不动(Vditor 已经把光标放进代码体了)。原段落删空了就一并回收 —— 有文字(如 `前文 /xx`)则原样留着。
+ *
+ * 硬约束:只增删块位置与光标,绝不改写任何原文字符。
+ */
+function applySlashCaret(): void {
+  const pending = slashFill
+  slashFill = null
+  if (!pending || !irRoot) return
+  const source = irRoot.children[pending.index] as HTMLElement | undefined
+  //回车没被提示层吃掉(正常换行)时原段落一个字没动;块数对不上说明结构不是「插了一个块」。
+  //两种情况都交给 Vditor 自己,宁可不动也不要把光标摆错地方。
+  if (!source || irRoot.children.length !== pending.count + 1) return
+  if (source.textContent === pending.text) return
+  const block = source.nextElementSibling as HTMLElement | null
+  if (!block || !irRoot.contains(block)) return
+
+  const type = block.dataset.type
+  if (type === 'code-block') {
+    // 代码块:Vditor 已经把光标放进代码体了,这里不碰。
+  } else if (block.tagName === 'TABLE' || block.tagName === 'HR' || type === 'yaml-front-matter') {
+    setCaretAfterBlock(block)
+  } else {
+    setRangeAt(block, false)
+  }
+
+  if (source.textContent?.trim() === '') source.remove()
+  queueDecorate()
+}
+
 /** 走 Vditor 自己的插入 API:IR 模式下安全,直接改 contenteditable 的 DOM 则不行。 */
 function insertLink(target: string): void {
   editor?.insertValue(`[[${target}]]`, true)
@@ -446,6 +561,7 @@ onMounted(async () => {
       editorReady = true
       host.value?.addEventListener('mousedown', onEditorMouseDown, true)
       host.value?.addEventListener('click', onEditorClick, true)
+      host.value?.addEventListener('keydown', onEditorKeydownCapture, true)
       startDecorating()
       void loadActive()
     },
@@ -455,8 +571,10 @@ onMounted(async () => {
 
 onBeforeUnmount(async () => {
   stopDecorating()
+  slashFill = null
   host.value?.removeEventListener('mousedown', onEditorMouseDown, true)
   host.value?.removeEventListener('click', onEditorClick, true)
+  host.value?.removeEventListener('keydown', onEditorKeydownCapture, true)
   await flushSave()
   editor?.destroy()
   editor = null

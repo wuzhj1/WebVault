@@ -29,7 +29,10 @@ export const COMMANDS: SlashCommand[] = [
   { label: '引用', alias: 'quote', insert: '>' },
   { label: '代码块', alias: 'code', insert: '```' },
   { label: '表格', alias: 'table', insert: '| 列 1 | 列 2 |\n| --- | --- |\n|  |  |' },
-  { label: '分割线', alias: 'hr', insert: '---' },
+  // 分隔线不能写 `---`:Lute 会把它当成 YAML frontmatter 的开闭标记
+  // (`SpinVditorIRDOM('---')` → `<div data-type="yaml-front-matter">`),整块会变成前言块。
+  // `***` 才落到 `<hr data-block="0">`,而 `<hr>` 回序列化成 markdown 正是 `---`,落盘依旧是标准分隔线。
+  { label: '分割线', alias: 'hr', insert: '***' },
   { label: '今天日期', alias: 'date', insert: () => new Date().toISOString().slice(0, 10) },
 ]
 
