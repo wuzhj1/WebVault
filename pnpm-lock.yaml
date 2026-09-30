@@ -26,6 +26,9 @@ importers:
       vue:
         specifier: ^3.5.42
         version: 3.5.42(typescript@5.9.3)
+      workbox-window:
+        specifier: ^7.4.1
+        version: 7.4.1
     devDependencies:
       '@types/node':
         specifier: ^26.5.1
