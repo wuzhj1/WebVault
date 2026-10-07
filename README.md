@@ -1,6 +1,13 @@
 # WebVault
 
+[![CI](https://github.com/wuzhj1/WebVault/actions/workflows/ci.yml/badge.svg)](https://github.com/wuzhj1/WebVault/actions/workflows/ci.yml)
+[![Deploy GitHub Pages](https://github.com/wuzhj1/WebVault/actions/workflows/pages.yml/badge.svg)](https://github.com/wuzhj1/WebVault/actions/workflows/pages.yml)
+
 本地优先的 Markdown 双链笔记。纯静态单页应用，没有账号、没有后端：正文以明文 `.md` 存在浏览器里，通过**你自己的 Gitee 仓库**在设备之间同步。
+
+**在线使用：<https://wuzhj1.github.io/WebVault/>**
+
+> 站点只是个静态壳，不接收、也不存储任何数据——笔记始终只存在你自己的设备和 Gitee 仓库里。推到 `main` 由 [`pages.yml`](.github/workflows/pages.yml) 自动构建部署。
 
 - 双链 `[[笔记]]`、别名 `[[路径|显示名]]`；`[[笔记#小节]]`、`[[笔记#^block]]`、`![[笔记]]` 会被解析并索引，在反链面板上标注出来，重命名时原样保留
 - 编辑器里的双链**直接渲染成可点击的链接**：方括号和别名前的路径隐藏，只显示你要读的那段文字；已存在的笔记是实色胶囊，还没创建的目标是虚线灰字（点一下就建），附件用点线区分。光标进入某一行时该行自动展开成原始 markdown，方便改写链接本身
@@ -45,6 +52,19 @@ pnpm build         # 类型检查 → 生成 PWA 图标与 vditor 静态资源 �
 `pnpm build` 产出 `dist/`，丢到任意静态托管即可：Nginx、Vercel、Netlify、Cloudflare Pages、GitHub Pages、Gitee Pages。
 
 Service Worker 已配置 `navigateFallback`，深链接刷新能回到应用；托管侧最好也把未知路径重写到 `index.html`。`gitee.com` 的请求被强制设为 `NetworkOnly`，同步的正确性依赖每次拿到最新的 sha，绝不能吃缓存。
+
+### GitHub Pages（当前线上）
+
+线上地址：<https://wuzhj1.github.io/WebVault/>
+
+推到 `main` 后由 [`pages.yml`](.github/workflows/pages.yml) 自动构建部署：产物经 `upload-pages-artifact` + `deploy-pages` 走 Actions 制品，**不往版本库提交 `dist`**。两个环境变量钉在 workflow 的 `env` 里：
+
+| 变量 | 值 | 作用 |
+| --- | --- | --- |
+| `VAULT_BASE` | `/WebVault/` | Vite 的 `base`；静态资源路径、PWA 的 `scope` / `start_url` 跟着带前缀 |
+| `VAULT_ORIGIN` | `https://wuzhj1.github.io` | canonical、`og:url`、`robots.txt`、`sitemap.xml` 的域名部分 |
+
+几点前提：仓库 Settings → Pages 的 Source 要选 **GitHub Actions**（`deploy-pages` 只认这个来源）；`concurrency` 用的是 `cancel-in-progress: false`，后一次部署不会打断进行中的那次；`workflow_dispatch` 可以手动触发。下面两节讲的是这两个变量背后的通用做法——换到别的托管商时照那两节配。
 
 ### 子路径部署（Gitee Pages / GitHub Pages 项目页）
 
