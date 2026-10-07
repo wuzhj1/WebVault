@@ -1,4 +1,4 @@
-# 每次 push / PR 跑一遍本地同款自检:类型检查 → 11 个验证套件 → 构建(含 typecheck)。
+# 每次 push / PR 跑一遍本地同款自检:类型检查 → 15 个验证套件 → 构建(含 typecheck)。
 # 包管理器与仓库一致:pnpm-lock.yaml 为准(pnpm-workspace.yaml 也钉了 pnpm 配置),
 # package-lock.json 已从版本库移除并进 .gitignore。
 name: CI
