@@ -338,7 +338,9 @@ const view = computed(() => {
 }
 
 .row:hover .row__more,
-.row--active .row__more {
+.row--active .row__more,
+/* 键盘 Tab 到 ⋯ 上时同样要露出来:焦点环画在 opacity:0 的按钮上等于没画 */
+.row__more:focus-visible {
   opacity: 1;
 }
 

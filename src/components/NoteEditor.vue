@@ -20,7 +20,7 @@
 // vditor 连同它的样式表是编辑器专属的大块头:类型照旧从包里取(编译期擦除),
 // 运行时改成组件挂载时动态引入,首屏要解析的 JS 少一大截。
 import type Vditor from 'vditor'
-import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   chipFromEvent,
   decorateWikilinks,
@@ -527,6 +527,10 @@ function insertLink(target: string): void {
 /** 只读提示条的解锁入口;与顶栏那把锁写的是同一个 vault.editable。 */
 function unlock(): void {
   vault.editable = true
+  // 提示条随 editable 翻真而卸载,焦点会掉回 body —— 键盘用户点完就没处可打了,
+  // 还得重新 Tab 一遍才能找回编辑区。等渲染落定接管到编辑器:上面那个 editable 的
+  // watcher 走的是 pre 刷新,此刻早已 applyEditable 把 contenteditable 打开了。
+  void nextTick(() => editor?.focus())
 }
 
 /** 挂上装饰管线:定位 IR 根、起 MutationObserver、监听 selectionchange,并先跑一轮兜底装饰。 */

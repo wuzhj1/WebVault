@@ -588,7 +588,12 @@ onBeforeUnmount(() => {
   }
 }
 
-/* 窄屏（<960px）：左右栏改为绝对定位的浮层抽屉，用遮罩承接点击关闭 */
+/* 窄屏（<960px）：左右栏改为绝对定位的浮层抽屉，用遮罩承接点击关闭。
+   收起态原本只靠 transform 把抽屉挪到屏外，元素本身还在原位——Tab 照样能命中里面
+   的按钮（会盲点到看不见的界面上），读屏也照读。visibility 把它彻底摘出焦点顺序与
+   无障碍树，只在本媒体查询内生效：宽屏走下面的 display:none。
+   visibility 是离散插值，且只要有一端是 visible 中间值就取 visible，所以开时立刻
+   显形、滑入动画照常，关时先滑完 0.18s 才隐身，不会把滑出过程截断。 */
 @media (max-width: 959px) {
   .app__side,
   .app__right {
@@ -598,23 +603,26 @@ onBeforeUnmount(() => {
     z-index: 50;
     width: min(var(--sidebar-w), 86vw);
     box-shadow: 0 0 30px var(--shadow-color);
-    transition: transform 0.18s ease;
+    transition: transform 0.18s ease, visibility 0.18s ease;
   }
 
   .app__side {
     left: 0;
     transform: translateX(-101%);
+    visibility: hidden;
   }
 
   .app__right {
     right: 0;
     width: min(var(--right-w), 86vw);
     transform: translateX(101%);
+    visibility: hidden;
   }
 
   .app__side--open,
   .app__right--open {
     transform: none;
+    visibility: visible;
   }
 
   .scrim {

@@ -148,9 +148,11 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKeydown))
           <p v-if="rows.length === 0" class="tip">
             输入名称后会创建一篇新笔记。留空可浏览全部笔记。
           </p>
-          <!-- 候选行：click 打开、mouseenter 同步高亮（与键盘 cursor 保持同一行）；
-               「插入」按钮 .stop 防止冒泡变成打开 -->
-          <button
+          <!-- 候选行：整行 div 承接鼠标点击与 hover，高亮与键盘 cursor 共用 cursor。
+               行不能再是 <button> —— HTML 不允许 button 嵌套，那样「插入」就没法做成
+               真按钮。键盘路径走输入框里的 ↑/↓ + Enter / Ctrl+Enter，行本身不必再抢一个
+               Tab 停靠点；只有「插入」必须是可聚焦的 button，否则鼠标才够得着。 -->
+          <div
             v-for="(r, i) in rows"
             :key="r.target"
             class="pick__row"
@@ -163,8 +165,9 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKeydown))
               <span v-if="!r.exists" class="pick__badge">新建</span>
               {{ r.target }}
             </span>
-            <span class="pick__insert" @click.stop="insert(r)">插入</span>
-          </button>
+            <!-- .stop 防止冒泡变成打开 -->
+            <button type="button" class="pick__insert" @click.stop="insert(r)">插入</button>
+          </div>
         </div>
       </div>
     </div>
@@ -265,6 +268,8 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKeydown))
   padding: 7px 10px;
   border-radius: 7px;
   text-align: left;
+  /* 行从 button 降级成 div 之后,手型不再由全局 `button { cursor: pointer }` 送来,这里补上 */
+  cursor: pointer;
 }
 
 .pick--on {
