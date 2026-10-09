@@ -760,6 +760,24 @@ watch(
   },
 )
 
+/**
+ * `editable` 恒为 `state === 'ready'` 的子集 —— 这条不变量是「解锁了却不能编辑」的总闸。
+ *
+ * `applyEditable` 见 `state !== 'ready'` 会把解锁原样丢掉,所以任何路径(顶栏那把锁、
+ * 只读提示条、AI 面板的 `insertMarkdown`)在正文没就绪时把 `editable` 翻真,都只会得到
+ * 一个假的「编辑中」:顶栏据此禁用锁并写明原因,这里则在正文掉出 ready 时把锁态一并收回。
+ * `NoteEditor` 不带 v-if、整个生命周期只挂载一次,immediate 只是让初始空态与默认值对齐;
+ * 「新建即可编辑」走的是直达 ready 的路,中途不经过 ready 之外的状态,不会被这条收回。
+ */
+watch(
+  state,
+  (s) => {
+    vault.bodyReady = s === 'ready'
+    if (s !== 'ready' && vault.editable) vault.editable = false
+  },
+  { immediate: true },
+)
+
 /** 网络/凭据就绪后,把还停在 loading 的那篇正文补拉下来。 */
 watch(
   () => sync.available,
@@ -808,10 +826,15 @@ defineExpose({ flushSave, insertLink, insertMarkdown })
       @insert="(payload) => insertMarkdown(payload.markdown, payload.mode)"
       @open-settings="emit('open-ai-settings')"
     />
-    <!-- 云端正文未就绪时的下载提示,盖在编辑区底部而不是替换它 -->
+    <!-- 云端正文未就绪时的提示,盖在编辑区底部而不是替换它。
+         sync 不可用时 fetchBody 压根没被调用(上面那句 `if (sync.available)` 走不进去),
+         这条状态永远不会自己走出去 —— 那就别挂一句「正在下载」骗人,说清原因与恢复条件。 -->
     <div v-if="state === 'loading'" class="editor__loading">
-      <span class="spinner"></span>
-      正在从 Gitee 下载这篇笔记…
+      <template v-if="sync.available">
+        <span class="spinner"></span>
+        正在从 Gitee 下载这篇笔记…
+      </template>
+      <template v-else>本篇正文不在本机,离线或未配置同步,暂时无法恢复</template>
     </div>
     <!-- 只读提示:正文打不进去时唯一能解释「为什么没反应」的地方,顺手当解锁入口 -->
     <button

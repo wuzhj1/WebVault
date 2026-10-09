@@ -197,6 +197,15 @@ export const useVaultStore = defineStore('vault', () => {
   /** 最近一次成功落盘的时刻；顶栏显示「已保存 14:03」用，null = 本会话还没保存过。 */
   const savedAt = ref<number | null>(null)
   /**
+   * 当前这篇的正文是否已在本机就位 —— 归编辑器写、顶栏读，与 `saveState` 同款分工。
+   *
+   * `readBody` 拿不到正文（`cached=0`，本机只有云端 stub）时编辑器会停在 loading，
+   * 而 `applyEditable()` 见 `state !== 'ready'` 会把解锁原样丢掉。此时顶栏那把锁若照常翻转，
+   * 徽标就会显示「编辑中」而正文一个字也打不进去 —— 这是「解锁了却不能编辑」的唯一来源。
+   * 顶栏据此禁用锁、并把原因写进 title。
+   */
+  const bodyReady = ref(false)
+  /**
    * 当前这篇是否已解锁可编辑 —— **库默认只读**，打开已有笔记一律上锁。
    *
    * 只有两条路能置真：`createNote` 刚真正写出的新笔记（走 `unlockOnOpen`）、用户在顶栏手动解锁。
@@ -1067,6 +1076,7 @@ export const useVaultStore = defineStore('vault', () => {
     bodyRevision,
     saveState,
     savedAt,
+    bodyReady,
     editable,
     resolver,
     byPath,

@@ -63,9 +63,20 @@ function onSync(): void {
 
 /** 锁/解锁当前笔记。库里默认只读，这一下是除「新建笔记」外唯一能进入编辑的入口。 */
 function toggleLock(): void {
-  if (!vault.activePath) return
+  // 正文没就绪时 applyEditable 会把解锁原样丢掉，这里再翻一次只会得到一个假的「编辑中」。
+  if (!vault.activePath || !vault.bodyReady) return
   vault.editable = !vault.editable
 }
+
+/**
+ * 锁的 title/aria-label：能编辑时说清点下去会发生什么；正文没就绪时说清为什么点不动。
+ * 编辑区那条「只读·点击解锁」提示条只在 ready 态渲染，所以正文缺失时这里是唯一能
+ * 解释「为什么解锁没反应」的地方。
+ */
+const lockTitle = computed(() => {
+  if (!vault.bodyReady) return '本篇正文尚未就绪，暂时无法编辑'
+  return vault.editable ? '锁定本篇，恢复只读' : '本篇为只读，点击解锁后可编辑'
+})
 
 /** 时刻 → `HH:mm`（24 小时制）；徽标里只需要时分，日期对"刚存过"这件事没意义。 */
 function formatClock(ts: number): string {
@@ -103,8 +114,9 @@ function formatClock(ts: number): string {
           v-if="vault.activePath"
           class="lockbtn"
           :class="{ 'lockbtn--on': vault.editable }"
-          :title="vault.editable ? '锁定本篇，恢复只读' : '本篇为只读，点击解锁后可编辑'"
-          :aria-label="vault.editable ? '锁定本篇，恢复只读' : '本篇为只读，点击解锁后可编辑'"
+          :disabled="!vault.bodyReady"
+          :title="lockTitle"
+          :aria-label="lockTitle"
           :aria-pressed="vault.editable ? 'true' : 'false'"
           type="button"
           @click="toggleLock"
@@ -293,6 +305,21 @@ function formatClock(ts: number): string {
 .lockbtn:hover {
   border-color: var(--accent);
   color: var(--text);
+}
+
+/* 正文没就绪时锁是禁用的:光有 title 不够,视觉上也得看得出「现在点不动」,
+   否则又回到「点了没反应」的困惑。opacity 沿用同文件的 .tb:disabled;
+   cursor 特意用 not-allowed 而非它的 default —— 这把锁平时带着 pointer,
+   「点不动」必须一眼可辨。:disabled 与 :hover 同为 (0,2,0),故 hover 那条要带上
+   :disabled 才压得住,不然禁用时一悬停又亮出强调色。 */
+.lockbtn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.lockbtn:disabled:hover {
+  border-color: var(--border);
+  color: var(--text-muted);
 }
 
 .lockbtn--on {
