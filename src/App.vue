@@ -15,11 +15,14 @@ import SideBar from './components/SideBar.vue'
 import TopBar from './components/TopBar.vue'
 import { getSetting } from './core/db.ts'
 import { SETTING_KEYS } from './core/vault/config-layout.ts'
+import { splitFrontmatter } from './core/parse/frontmatter.ts'
 import { dropPendingSave, readPendingSave, snapshotPendingSave } from './core/editor/pending-save.ts'
 import { onFlushError } from './core/vault/datafiles.ts'
 import { bindingOfEvent, hasMod, isTypingTarget } from './core/hotkeys.ts'
 import { registerAppSW } from './core/pwa.ts'
 import { titleOf } from './core/vault/paths.ts'
+import { useAiSettingsStore } from './stores/aiSettings.ts'
+import { useAiStore } from './stores/ai.ts'
 import { useSyncStore } from './stores/sync.ts'
 import { useUiStore, type ShortcutId } from './stores/ui.ts'
 import { useVaultStore } from './stores/vault.ts'
@@ -39,9 +42,15 @@ const SettingsDialog = defineAsyncComponent(() => import('./components/SettingsD
 const vault = useVaultStore()
 const sync = useSyncStore()
 const ui = useUiStore()
+/** AI 配置（启动时 load 一次；设置页与面板里的 load 都带重入守卫，只是兜底）。 */
+const aiSettings = useAiSettingsStore()
+/** AI 对话（quoteNote 往里放引用芯片；历史也在启动时读一次）。 */
+const aiStore = useAiStore()
 
 /** NoteEditor 实例：插入 [[链接]] 与强制落盘（flushSave）都经由它转发。 */
 const editorRef = ref<InstanceType<typeof NoteEditor> | null>(null)
+/** 侧栏实例:快捷键要透过它把分区切到 AI(section 是 SideBar 的本地状态)。 */
+const sidebarRef = ref<InstanceType<typeof SideBar> | null>(null)
 /** 当前挂载的浮层，同一时刻至多一个。 */
 const overlay = ref<Overlay>(null)
 /** 打开搜索面板时带上的初始查询（侧栏点标签就是走这条路）。 */
@@ -105,14 +114,14 @@ function closeDrawers(): void {
   syncDrawerState()
 }
 
+/** 设置对话框可落位的页签；与 SettingsDialog 的 TABS 保持一致（那边是权威定义）。 */
+type SettingsTab = 'sync' | 'ai' | 'appearance' | 'data' | 'shortcuts' | 'about'
+
 /** 设置对话框打开时落位的页签：'?' 直达「快捷键」页，常规入口始终回同步页。 */
-const settingsInitial = ref<'sync' | 'appearance' | 'data' | 'shortcuts' | 'about'>('sync')
+const settingsInitial = ref<SettingsTab>('sync')
 
 /** 显示指定浮层；传 null 即关闭当前浮层。settingsTab 只在打开设置时生效，决定落位页签。 */
-function show(
-  next: Overlay,
-  settingsTab: 'sync' | 'appearance' | 'data' | 'shortcuts' | 'about' = 'sync',
-): void {
+function show(next: Overlay, settingsTab: SettingsTab = 'sync'): void {
   if (next === 'search') searchQuery.value = ''
   if (next === 'settings') settingsInitial.value = settingsTab
   overlay.value = next
@@ -132,6 +141,40 @@ function insertLink(target: string): void {
   editorRef.value?.insertLink(target)
 }
 
+/** AI 面板「插入到笔记」：内容已在面板侧包好 🤖 引用块，这里只负责交给编辑器。 */
+function insertAiMarkdown(markdown: string): void {
+  editorRef.value?.insertMarkdown(markdown)
+}
+
+/**
+ * AI 面板「引用当前笔记」：先强制落盘（编辑器防抖窗口里的输入必须先成为正文），
+ * 再取正文、剥 frontmatter（模型不需要、也不该看到元数据块），交给 ai store 做裁剪与芯片。
+ */
+async function quoteNote(): Promise<void> {
+  const path = vault.activePath
+  if (!path) return
+  await editorRef.value?.flushSave()
+  const body = await vault.readBody(path)
+  if (body === null) {
+    sync.notify('warn', '正文还没下载到本机,暂时无法引用这篇笔记。')
+    return
+  }
+  aiStore.setQuote(path, splitFrontmatter(body).body)
+}
+
+/**
+ * 打开侧栏 AI 分区（快捷键与顶栏入口共用）：窄屏下两侧是互斥抽屉，先关右栏、开左栏，
+ * 再让 SideBar 把 section 切过去——section 是 SideBar 的本地状态，走它暴露的 showSection。
+ */
+function openAiPanel(): void {
+  if (narrow?.matches) {
+    sidebarOpen.value = true
+    rightOpen.value = false
+    syncDrawerState()
+  }
+  sidebarRef.value?.showSection('ai')
+}
+
 /**
  * 可改快捷键的命令 id → 动作分发。这里不认识任何具体按键：具体组合存在 ui.bindings
  * 里（设置 → 快捷键 页可改），新增命令时与 ui.SHORTCUT_COMMANDS 各加一行即可。
@@ -142,6 +185,7 @@ const ACTIONS: Record<ShortcutId, () => void> = {
   settings: () => show('settings'),
   cheatsheet: () => show('settings', 'shortcuts'),
   graph: () => show('graph'),
+  ai: openAiPanel,
 }
 
 /**
@@ -273,6 +317,9 @@ onMounted(async () => {
   await recoverPendingSave()
   await locateLastNote()
   await ui.load()
+  // AI 配置与对话历史都存 settings 表，早于面板挂载读完，面板/设置页的 load 只是幂等兜底。
+  await aiSettings.load()
+  await aiStore.load()
   await sync.init()
   startupDone.value = true
 })
@@ -367,7 +414,14 @@ onBeforeUnmount(() => {
         ></div>
 
         <aside class="app__side" :class="{ 'app__side--open': sidebarOpen }">
-          <SideBar @open="openNote" @search="showSearch" />
+          <SideBar
+            ref="sidebarRef"
+            @open="openNote"
+            @search="showSearch"
+            @quote-note="quoteNote"
+            @insert="insertAiMarkdown"
+            @open-ai-settings="show('settings', 'ai')"
+          />
         </aside>
 
         <!-- 主区是 flex column：编辑器占满整个主区（曾经贴底停靠的收集箱面板已随卡片盒移除） -->
@@ -376,6 +430,7 @@ onBeforeUnmount(() => {
             ref="editorRef"
             @open-link="openNote"
             @pick-link="show('picker')"
+            @open-ai-settings="show('settings', 'ai')"
             :startup-done="startupDone"
           />
         </main>

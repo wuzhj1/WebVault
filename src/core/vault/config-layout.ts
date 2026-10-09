@@ -4,7 +4,8 @@
  * 形状对齐 Obsidian 的 `.obsidian/` —— 库根只放 `.md` 与子目录，全部元数据、索引、设置收进一个
  * 隐藏配置目录；配置再按职责拆成多个小文件，而不是挤在一个 `settings.json` 里：高频变动的工作区
  * 状态（打开的文件、最近、置顶、折叠）单独一个 `workspace.json`，静态配置进 `app.json`，
- * 含明文令牌的同步配置单独成 `sync.json` —— 共享整个库之前只需清这一个文件。
+ * 含明文令牌的同步配置单独成 `sync.json`、AI 的明文 apiKey 与对话记录各自单独成 `ai.json` /
+ * `ai-chats.json` —— 共享整个库之前只需清凭据那两个文件。
  *
  * 单独成模块、不写死在 datafiles 里的三条理由：
  * - datafiles 依赖 Dexie + OPFS，验证脚本裸 node 跑不起来；本模块纯函数、只用相对导入，
@@ -23,7 +24,7 @@ export const CONFIG_DIR = '.webvault'
 /** 旧版配置目录名。启动时一次性搬迁进 `CONFIG_DIR` 后删掉，见 datafiles 的 migrateLegacyConfigDir。 */
 export const LEGACY_CONFIG_DIR = '.config'
 
-/** 旧版把全部设置挤在一个文件里；搬迁时按 `settingsFileOf` 拆成下面四个。 */
+/** 旧版把全部设置挤在一个文件里；搬迁时按 `settingsFileOf` 拆成下面若干个小文件。 */
 export const LEGACY_SETTINGS_FILE = 'settings.json'
 
 /**
@@ -43,6 +44,10 @@ export const SETTING_KEYS = {
   collapsedDirs: 'ui-collapsed-dirs',
   /** 可改快捷键的绑定（stores/ui.ts）。 */
   shortcutBindings: 'ui-shortcut-bindings',
+  /** AI 连接配置，value 里裹着明文 apiKey（stores/aiSettings.ts）。 */
+  aiSettings: 'ai-settings',
+  /** AI 对话历史，value 是全部会话合成的一个 JSON（stores/ai.ts）。 */
+  aiChatHistory: 'ai-chat-history',
 } as const
 
 /**
@@ -57,7 +62,7 @@ export const TABLE_FILES: readonly (readonly [table: string, files: readonly str
   ['links', ['links.json']],
   ['tags', ['tags.json']],
   ['cards', ['cards.json']],
-  ['settings', ['sync.json', 'app.json', 'hotkeys.json', 'workspace.json']],
+  ['settings', ['sync.json', 'app.json', 'hotkeys.json', 'workspace.json', 'ai.json', 'ai-chats.json']],
   ['syncLog', ['sync-log.json']],
 ]
 
@@ -76,6 +81,10 @@ const WORKSPACE_KEYS: ReadonlySet<string> = new Set([
 export function settingsFileOf(key: string): string {
   if (key === SETTING_KEYS.syncSettings) return 'sync.json'
   if (key === SETTING_KEYS.shortcutBindings) return 'hotkeys.json'
+  // AI 的两档各自单独成文件：ai.json 裹着 apiKey，共享库前只清它即可；
+  // 对话记录是可删的个人数据，与凭据分开才不会「清 key 顺手把对话也清了」。
+  if (key === SETTING_KEYS.aiSettings) return 'ai.json'
+  if (key === SETTING_KEYS.aiChatHistory) return 'ai-chats.json'
   if (WORKSPACE_KEYS.has(key)) return 'workspace.json'
   return 'app.json'
 }

@@ -1,15 +1,16 @@
 <script setup lang="ts">
 /**
- * 设置对话框:Gitee 同步、外观、数据与日志、快捷键、关于五个标签页。
+ * 设置对话框：Gitee 同步、AI、外观、数据与日志、快捷键、关于六个标签页。
  *
  * emits `close` —— 焦点陷阱、ESC 关闭、遮罩点击都由外层 Modal.vue 负责，本组件只提供内容区。
- * 依赖 settings(同步配置)、sync(连接/同步/日志)、vault(笔记索引)、appearance(主题与强调色)、
- * ui(快捷键绑定:可改的全局键存在 ui.bindings,本组件负责录键、冲突提示与恢复默认)。
+ * 依赖 settings(同步配置)、aiSettings(AI 连接)、sync(连接/同步/日志)、vault(笔记索引)、
+ * appearance(主题与强调色)、ui(快捷键绑定:可改的全局键存在 ui.bindings,本组件负责录键、冲突提示与恢复默认)。
  *
  * 关键约束：表单改的是 draft 副本，点「保存」才落盘，dirty 用来决定按钮是否可点；
  * 外观页是唯一例外——选项点击即写入本机存储、立刻生效，没有草稿也没有保存按钮。
  * Gitee token 只落在本机(未绑定目录时是浏览器 IndexedDB,绑定后是正文目录的 .webvault/sync.json),
  * 不会随笔记上传,也不会同步到其他设备(故 sync tab 顶部有醒目警告)。
+ * AI 的 apiKey 同等待遇：明文存本机 `.webvault/ai.json`，只发往用户自己填的地址（ai tab 顶部同款警告）。
  */
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { bindingOfEvent, displayOfBinding } from '@/core/hotkeys.ts'
@@ -19,6 +20,9 @@ import * as opfs from '@/core/vault/opfs.ts'
 import { buildBackup, downloadZip } from '@/core/vault/backup.ts'
 import { ACCENTS, THEMES } from '@/core/theme/themes.ts'
 import { useAppearanceStore } from '@/stores/appearance.ts'
+import { useAiSettingsStore } from '@/stores/aiSettings.ts'
+// AI 预设与探活都在 core/ai/client.ts；本组件只管按钮、草稿与回执。
+import { AI_PRESETS, normalizeAiConfig, testAiConnection, type AiConfig, type AiPreset } from '@/core/ai/client.ts'
 import { useSettingsStore, type SyncSettings } from '@/stores/settings.ts'
 import { useSyncStore } from '@/stores/sync.ts'
 import { SHORTCUT_COMMANDS, useUiStore, type ShortcutId } from '@/stores/ui.ts'
@@ -32,18 +36,20 @@ const emit = defineEmits<{ (e: 'close'): void }>()
 const props = defineProps<{ initialTab?: Tab }>()
 
 const settings = useSettingsStore()
+const aiSettings = useAiSettingsStore()
 const sync = useSyncStore()
 const vault = useVaultStore()
 const appearance = useAppearanceStore()
 const ui = useUiStore()
 
 /** 标签页 id，顺序即导航栏顺序；`Tab` 由数组字面量推导出联合类型，避免和模板里的 v-if 拼错。 */
-const TABS = ['sync', 'appearance', 'data', 'shortcuts', 'about'] as const
+const TABS = ['sync', 'ai', 'appearance', 'data', 'shortcuts', 'about'] as const
 type Tab = (typeof TABS)[number]
 
 /** 标签页显示名，只在导航按钮上用，正文各段自带小标题。 */
 const TAB_LABELS: Record<Tab, string> = {
   sync: 'Gitee 同步',
+  ai: 'AI',
   appearance: '外观',
   data: '数据与日志',
   shortcuts: '快捷键',
@@ -56,6 +62,19 @@ const tab = ref<Tab>(props.initialTab ?? 'sync')
 const draft = ref<SyncSettings>({ ...settings.settings })
 /** token 输入框是否在 text / password 之间切成明文，仅为当场核对粘贴对不对。 */
 const showToken = ref(false)
+
+// ---- AI 标签页的状态：与同步页同构（草稿 + 脏标记 + 保存/测试），但独立一套，互不吞草稿 ----
+/** AI 设置的编辑副本：点「保存」才写回 aiSettings store。 */
+const aiDraft = ref<AiConfig>({ ...aiSettings.settings })
+/** apiKey 输入框的明暗切换，理由同 showToken。 */
+const showAiKey = ref(false)
+/** 探活进行中；按钮文案与 disabled 都靠它。 */
+const aiBusy = ref(false)
+/** 测试/保存的回执；`aiOk` 决定渲染成成功色还是错误色。 */
+const aiInfo = ref<string | null>(null)
+const aiOk = ref(false)
+/** 「已保存」闪现，与同步页的 saved 各管各的。 */
+const aiSaved = ref(false)
 /** 「已保存」提示的闪现开关，由 save() 里的定时器收回。 */
 const saved = ref(false)
 /** 保存、清空正文或目录操作抛出的错误文案；下次动作开始时会清掉，防止旧错误一直挂着。 */
@@ -274,6 +293,10 @@ const backendLabel = computed(() => {
 
 /** 草稿是否偏离了 store：用序列化比较代替逐字段比对；脏的时候才允许保存，也用来阻止外部值覆盖。 */
 const dirty = computed(() => JSON.stringify(draft.value) !== JSON.stringify(settings.settings))
+/** AI 草稿的同款判定，与同步页的 dirty 互不影响。 */
+const aiDirty = computed(
+  () => JSON.stringify(aiDraft.value) !== JSON.stringify(aiSettings.settings),
+)
 
 /** 读取浏览器存储配额与持久化授权；API 缺失时给出说明文本而不是抛错（部分浏览器不实现 estimate）。 */
 async function refreshUsage(): Promise<void> {
@@ -336,6 +359,58 @@ async function test(): Promise<void> {
     return
   }
   await sync.checkConnection()
+}
+
+/** 回填供应商预设；「自定义」只清地址与模型、保留已填的 Key，免得清个地址把凭据也清没了。 */
+function applyPreset(p: AiPreset | null): void {
+  aiDraft.value = p
+    ? { ...aiDraft.value, baseUrl: p.baseUrl, model: p.model }
+    : { ...aiDraft.value, baseUrl: '', model: '' }
+  aiInfo.value = null
+}
+
+/** 把 AI 草稿交给 store 落盘（规范化在 store 里做），成功后用规范化结果回填，aiDirty 才归位。 */
+async function saveAi(): Promise<void> {
+  aiInfo.value = null
+  try {
+    await aiSettings.save({ ...aiDraft.value })
+    aiDraft.value = { ...aiSettings.settings }
+    aiSaved.value = true
+    setTimeout(() => {
+      aiSaved.value = false
+    }, 2000)
+  } catch (err) {
+    aiOk.value = false
+    aiInfo.value = `保存失败:${err instanceof Error ? err.message : String(err)}`
+  }
+}
+
+/**
+ * AI 的「测试连接」：直接拿当前草稿探活，**不先保存**——与同步页不同，
+ * AI 请求只用本地凭据，没有「不存下来就测不了」的约束；用户改了地址想先试通再保存。
+ *
+ * 回执刻意把三类失败分开写：网络/CORS（换供应商或自建中转）、401（改 Key）、
+ * 429/5xx（稍后重试）——分类逻辑在 core/ai/client.ts，这里只负责如实转达。
+ */
+async function testAi(): Promise<void> {
+  const cfg = normalizeAiConfig(aiDraft.value)
+  if (cfg.baseUrl === '' || cfg.apiKey === '' || cfg.model === '') {
+    aiOk.value = false
+    aiInfo.value = '连接失败:接口地址、API Key、模型名三项都要填。'
+    return
+  }
+  aiBusy.value = true
+  aiInfo.value = null
+  try {
+    const r = await testAiConnection(cfg)
+    aiOk.value = true
+    aiInfo.value = `连接成功(HTTP 200),响应回显模型「${r.model}」。点「保存」后即可在侧栏 AI 分区使用。`
+  } catch (err) {
+    aiOk.value = false
+    aiInfo.value = `连接失败:${err instanceof Error ? err.message : String(err)}`
+  } finally {
+    aiBusy.value = false
+  }
 }
 
 /**
@@ -478,6 +553,11 @@ watch(
 /** 打开时重取草稿（父组件每次都是新挂载，但要防 store 在挂载前刚被改过），并拉存储用量与同步日志。 */
 onMounted(() => {
   draft.value = { ...settings.settings }
+  aiDraft.value = { ...aiSettings.settings }
+  // AI 配置的读库可能还没结束（启动后立刻开设置页）；读完回填，但不覆盖用户此刻已敲的内容。
+  void aiSettings.load().then(() => {
+    if (!aiDirty.value) aiDraft.value = { ...aiSettings.settings }
+  })
   void refreshUsage()
   void sync.refreshLog()
 })
@@ -485,7 +565,7 @@ onMounted(() => {
 
 <template>
   <Modal title="设置" wide @close="emit('close')">
-    <!-- 五个标签页共用一个 tab 状态，切换不销毁已填的草稿 -->
+    <!-- 六个标签页共用一个 tab 状态，切换不销毁已填的草稿 -->
     <nav class="tabs">
       <button
         v-for="t in TABS"
@@ -592,6 +672,91 @@ onMounted(() => {
       <p class="field__tip">同步中会显示进度;失败时具体原因会写在「数据与日志」标签页。</p>
     </template>
 
+    <!-- AI：第二份明文凭据的一页，与同步页同款先警告、后表单的结构 -->
+    <template v-else-if="tab === 'ai'">
+      <div class="callout callout--warn">
+        <strong>先看清楚:</strong> API Key 会<strong>明文</strong>保存在本机(未绑定目录时是浏览器数据库
+        <code>IndexedDB</code>,绑定后写入正文目录的 <code>.webvault/ai.json</code>),
+        <strong>只会发往下面你填写的接口地址</strong>。本项目是纯静态应用、没有后端,
+        笔记内容只有在你显式「引用笔记 / 存为笔记」时才会作为请求的一部分发给该地址。
+        导出备份时这个字段会被自动抹空;共享整个文件夹前请把 <code>ai.json</code> 一并清掉。
+      </div>
+
+      <div class="row">
+        <button
+          v-for="p in AI_PRESETS"
+          :key="p.name"
+          class="btn btn--ghost"
+          type="button"
+          @click="applyPreset(p)"
+        >
+          {{ p.name }}
+        </button>
+        <button class="btn btn--ghost" type="button" @click="applyPreset(null)">自定义</button>
+      </div>
+      <p class="field__tip">
+        预设只回填接口地址与一个可用的模型名建议(都能再改),能不能用以「测试连接」为准。
+      </p>
+
+      <div class="grid">
+        <label class="field__wrap">
+          <span class="field__label">接口地址 baseUrl(OpenAI 兼容,自动补 /chat/completions)</span>
+          <input
+            v-model="aiDraft.baseUrl"
+            class="field"
+            placeholder="https://api.deepseek.com/v1"
+            autocomplete="off"
+            spellcheck="false"
+          />
+        </label>
+
+        <label class="field__wrap">
+          <span class="field__label">API Key</span>
+          <span class="field__row">
+            <input
+              v-model="aiDraft.apiKey"
+              class="field"
+              :type="showAiKey ? 'text' : 'password'"
+              placeholder="粘贴 API Key"
+              autocomplete="off"
+              spellcheck="false"
+            />
+            <button class="btn btn--ghost" type="button" @click="showAiKey = !showAiKey">
+              {{ showAiKey ? '隐藏' : '显示' }}
+            </button>
+          </span>
+        </label>
+
+        <label class="field__wrap">
+          <span class="field__label">模型 model</span>
+          <input
+            v-model="aiDraft.model"
+            class="field"
+            placeholder="例如 deepseek-chat"
+            autocomplete="off"
+            spellcheck="false"
+          />
+        </label>
+      </div>
+      <p class="field__tip">
+        测试连接报「网络请求失败 / CORS」时,说明该供应商不允许浏览器跨域调用 ——
+        换一家允许跨域的供应商(设置页顶部的四个预设都可直接测),或自建一个中转地址。
+      </p>
+
+      <p v-if="aiInfo" class="field__tip" :class="aiOk ? 'field__ok' : 'field__error'">{{ aiInfo }}</p>
+      <p v-if="aiSaved" class="field__ok">已保存。</p>
+
+      <div class="row row--end">
+        <button class="btn" type="button" :disabled="!aiDirty" @click="saveAi">保存</button>
+        <button class="btn btn--primary" type="button" :disabled="aiBusy" @click="testAi">
+          {{ aiBusy ? '测试中…' : '测试连接' }}
+        </button>
+      </div>
+      <p class="field__tip">
+        与同步不同,测试连接<strong>不会</strong>先保存 —— 直接用当前输入探活,试通了再点保存。
+      </p>
+    </template>
+
     <!-- 外观：点了就立即生效并直接写本机存储，没有草稿也没有保存按钮 -->
     <template v-else-if="tab === 'appearance'">
       <p class="field__tip appearance__tip">
@@ -694,7 +859,7 @@ onMounted(() => {
         <dd>{{ backendLabel }}</dd>
         <dt>索引与设置</dt>
         <dd>
-          <code>.webvault/</code> 下的 9 个 JSON({{ vault.storageBackend === 'dir' ? '绑定目录内' : '内置存储内' }}),
+          <code>.webvault/</code> 下的 11 个 JSON({{ vault.storageBackend === 'dir' ? '绑定目录内' : '内置存储内' }}),
           浏览器 IndexedDB 仅作缓存
         </dd>
         <dt>本机存储占用</dt>

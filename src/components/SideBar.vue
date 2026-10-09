@@ -1,25 +1,47 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { cardPath, dirOf, sanitizeTitle, titleOf } from '@/core/vault/paths.ts'
+import AiPanel from './AiPanel.vue'
 import FileTree from './FileTree.vue'
 import Modal from './Modal.vue'
+import { useAiStore } from '@/stores/ai.ts'
 import { useSyncStore } from '@/stores/sync.ts'
 import { useUiStore } from '@/stores/ui.ts'
 import { useVaultStore, type TreeNode } from '@/stores/vault.ts'
 
 /**
- * 两条出口：
- * - `open(path)`：打开某篇笔记（文件树、书签行、待建行、新建/重命名后跳转）。
+ * 三条出口：
+ * - `open(path)`：打开某篇笔记（文件树、书签行、待建行、新建/重命名后跳转、AI 产出行）。
  * - `search(query)`：点标签行时把 `#标签` 交给 App 打开全库搜索面板——标签的「结果列表」
  *   本来就是搜索的强项，比在侧栏里另造一个列表更省事，也复用了现成的命中摘要。
+ * - `quote-note` / `insert` / `open-ai-settings`：AI 面板的三条上行通道——引用当前笔记要先
+ *   `flushSave`（只有 App 拿得到编辑器）、插入要走编辑器、打开设置页要走 App 的 overlay，
+ *   三者都够不着，统一分发给 App 处理（面板自己永远不碰编辑器与浮层）。
  */
-const emit = defineEmits<{ (e: 'open', path: string): void; (e: 'search', query: string): void }>()
+const emit = defineEmits<{
+  (e: 'open', path: string): void
+  (e: 'search', query: string): void
+  (e: 'quote-note'): void
+  (e: 'insert', markdown: string): void
+  (e: 'open-ai-settings'): void
+}>()
 
 const vault = useVaultStore()
 /** 折叠目录与置顶/最近两组书签都落在 ui store（持久化 + 跨组件共享）。 */
 const ui = useUiStore()
 /** 删除 / 待建创建这类没有内联错误位的操作，失败时借全局通知出口报出来。 */
 const sync = useSyncStore()
+/** AI 分区的会话计数徽标读它；面板本身也用同一个 store。 */
+const aiStore = useAiStore()
+
+/**
+ * 让 App（快捷键 `mod+alt+a`）把侧栏切到 AI 分区：section 是本组件的本地状态，
+ * 没进 ui store，外部要改只能走暴露的方法——保持「分区状态不落盘」的既有纪律。
+ */
+function showSection(next: Section): void {
+  section.value = next
+}
+defineExpose({ showSection })
 
 const menu = ref<{ path: string; x: number; y: number } | null>(null)
 const renaming = ref<string | null>(null)
@@ -34,15 +56,18 @@ const renameInput = ref<HTMLInputElement | null>(null)
 const createInput = ref<HTMLInputElement | null>(null)
 
 /**
- * 三个分区；数组顺序即活动栏图标顺序，也是指示条按下标平移的依据。
+ * 四个分区；数组顺序即活动栏图标顺序，也是指示条按下标平移的依据。
+ * AI 分区排最后：它是「草稿与外脑」，与笔记 / 待建 / 标签三个库内概念不同级，
+ * 放在「＋新建」上方会被当成笔记的一种——单独压一档在 gap 之前收尾。
  */
-const SECTIONS = ['files', 'unresolved', 'tags'] as const
+const SECTIONS = ['files', 'unresolved', 'tags', 'ai'] as const
 type Section = (typeof SECTIONS)[number]
 
 const SECTION_LABELS: Record<Section, string> = {
   files: '笔记',
   unresolved: '待建',
   tags: '标签',
+  ai: 'AI 助手',
 }
 
 /**
@@ -57,6 +82,8 @@ type FileTab = 'tree' | 'pinned' | 'recent'
 const section = ref<Section>('files')
 /** 当前标签；组件本地状态，不落盘——每次切回笔记区都从目录开始，符合「笔记区 = 找文件」的默认预期。 */
 const fileTab = ref<FileTab>('tree')
+/** AI 分区内的两个页签：对话（默认，流式在 store 里跑，切走再切回状态不丢）/ 产出（`ai/` 目录）。 */
+const aiTab = ref<'chat' | 'outputs'>('chat')
 
 /**
  * 分区内过滤：一个输入框管全部分区与标签，只做「子串包含」匹配（文件名 / 书签标题 /
@@ -96,6 +123,7 @@ watch(section, () => {
     filterTimer = null
   }
   fileTab.value = 'tree'
+  aiTab.value = 'chat'
 })
 
 // 卸载前撤掉防抖：setTimeout 挂到已销毁组件的 ref 上没有意义。
@@ -103,10 +131,12 @@ onBeforeUnmount(() => {
   if (filterTimer) clearTimeout(filterTimer)
 })
 
-/** 待建 / 标签分区的占位文案；笔记分区跟着当前标签走，见下方 FILE_TAB_PLACEHOLDERS。 */
+/** 待建 / 标签 / AI 分区的占位文案；笔记分区跟着当前标签走，见下方 FILE_TAB_PLACEHOLDERS。 */
 const FILTER_PLACEHOLDERS: Record<Exclude<Section, 'files'>, string> = {
   unresolved: '过滤待建目标…',
   tags: '过滤标签…',
+  // 只对「产出」页签有意义；对话页签里这个输入框不渲染（见模板的 v-if）。
+  ai: '过滤 AI 产出…',
 }
 
 /** 笔记分区内每个标签自己的占位文案：过滤词的语义随标签变化（找树 / 找置顶 / 找最近）。 */
@@ -154,6 +184,8 @@ const sectionCounts = computed<Record<Section, number>>(() => ({
   files: vault.notes.length,
   unresolved: vault.unresolvedTargets.length,
   tags: vault.allTags.length,
+  // AI 分区计会话数（对话页签是默认视图）；产出条数在页签上自己显示，两处不重复计。
+  ai: aiStore.sessions.length,
 }))
 
 /** 徽标数字：99 以上一律 99+，免得「1024」把 44px 宽的活动栏图标挤变形。 */
@@ -417,6 +449,27 @@ onBeforeUnmount(closeMenu)
         <span v-if="sectionCounts.tags > 0" class="rail__badge">{{ railText(sectionCounts.tags) }}</span>
       </button>
 
+      <!-- AI 分区：对话与产出都在这里，图标用「火花」与库内三个概念拉开 -->
+      <button
+        class="rail__btn"
+        :class="{ 'rail__btn--on': section === 'ai' }"
+        title="AI 助手 (Ctrl/⌘+Alt+A)"
+        aria-label="AI 助手"
+        @click="section = 'ai'"
+      >
+        <svg viewBox="0 0 16 16" width="18" height="18" aria-hidden="true">
+          <path
+            d="M7.4 2.4l1.3 3.3 3.3 1.3-3.3 1.3-1.3 3.3-1.3-3.3L2.8 7l3.3-1.3z"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.3"
+            stroke-linejoin="round"
+          />
+          <path d="M12.4 10.6l.55 1.45 1.45.55-1.45.55-.55 1.45-.55-1.45-1.45-.55 1.45-.55z" fill="currentColor" />
+        </svg>
+        <span v-if="sectionCounts.ai > 0" class="rail__badge">{{ railText(sectionCounts.ai) }}</span>
+      </button>
+
       <div class="rail__gap"></div>
 
       <!-- 新建笔记：固定在活动栏底部，任何分区下都一键可达（文件树空态提示也指向它） -->
@@ -470,8 +523,24 @@ onBeforeUnmount(closeMenu)
         </button>
       </div>
 
-      <!-- 分区内过滤：一个输入框管当前分区/标签，× 一键清掉；空串时不参与任何匹配 -->
-      <div class="sidebar__filter">
+      <!-- AI 分区的视图标签：对话 / 产出。与笔记分区的三页签同一套样式与语义（一次只渲染一个） -->
+      <div v-else-if="section === 'ai'" class="sidebar__tabs">
+        <button class="tabs__btn" :class="{ 'tabs__btn--on': aiTab === 'chat' }" @click="aiTab = 'chat'">
+          对话
+          <em v-if="aiStore.sessions.length > 0" class="tabs__n">{{ aiStore.sessions.length }}</em>
+        </button>
+        <button
+          class="tabs__btn"
+          :class="{ 'tabs__btn--on': aiTab === 'outputs' }"
+          @click="aiTab = 'outputs'"
+        >
+          产出
+        </button>
+      </div>
+
+      <!-- 分区内过滤：一个输入框管当前分区/标签，× 一键清掉；空串时不参与任何匹配。
+           AI 对话页签不渲染它——那里没有可过滤的列表，占着 36px 只会让输入框离手更远 -->
+      <div v-if="!(section === 'ai' && aiTab === 'chat')" class="sidebar__filter">
         <input
           v-model="filter"
           class="sidebar__filter-input"
@@ -489,7 +558,10 @@ onBeforeUnmount(closeMenu)
         </button>
       </div>
 
-      <div class="sidebar__scroll">
+      <div
+        class="sidebar__scroll"
+        :class="{ 'sidebar__scroll--ai': section === 'ai' }"
+      >
       <template v-if="section === 'files'">
         <p v-if="vault.notes.length === 0" class="hint">
           还没有笔记。点击左侧活动栏底部的 ＋ 新建一篇,或在设置里连接 Gitee 仓库拉取已有笔记。
@@ -593,6 +665,17 @@ onBeforeUnmount(closeMenu)
             </button>
           </li>
         </ul>
+      </template>
+
+      <template v-else-if="section === 'ai'">
+        <AiPanel
+          :tab="aiTab"
+          :filter="query"
+          @open="open"
+          @quote="emit('quote-note')"
+          @insert="(md) => emit('insert', md)"
+          @open-settings="emit('open-ai-settings')"
+        />
       </template>
 
       <template v-else>
@@ -862,6 +945,15 @@ onBeforeUnmount(closeMenu)
   min-height: 0;
   overflow: auto;
   padding: 8px 8px 24px;
+}
+
+/* AI 面板自带「日志滚动 + 输入框固定」的两段式布局，这里只当它的伸展容器：
+   去掉内边距与自身滚动，否则面板 height:100% 会按可滚动内容撑开，输入框被推出画面。 */
+.sidebar__scroll--ai {
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  overflow: hidden;
 }
 
 .hint {

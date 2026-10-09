@@ -1,7 +1,7 @@
 /**
  * 凭据抹除验证（src/core/vault/redact.ts）：
- * - 真实的 settings 行形状进去（`value` 是 `JSON.stringify` 后的**字符串**，token 裹在里面），
- *   Gitee token 必须变空串、其余字段与排版原样保留；
+ * - 真实的 settings 行形状进去（`value` 是 `JSON.stringify` 后的**字符串**，token / apiKey 裹在里面），
+ *   Gitee token 与 AI apiKey 必须变空串、其余字段与排版原样保留；
  * - 匹配是大小写不敏感的整串匹配：`Token` / `PASSWORD` / `api_key` 都要被抹，
  *   而 `tokenCount` / `lastTokenAt` / `secretary` 这类只「含」这些词的字段**不能**被误伤 ——
  *   误抹等于把一份正常快照悄悄改坏，比漏抹更难发现；
@@ -58,6 +58,27 @@ check(
 )
 check('unrelated setting row is untouched', cleaned[1], giteeRow[1])
 ok('unrelated row keeps its original bytes (no reformatting)', cleaned[1]!.value === giteeRow[1]!.value)
+
+// ---- AI 凭据：`apiKey` 是 stores/aiSettings 的既定字段名（本套件钉住它，改名即失去备份抹除）。
+// 对话历史行同框入列：它是用户内容不是凭据，必须原样通过——误抹等于把聊天记录清空。
+const aiValue = JSON.stringify({
+  baseUrl: 'https://api.deepseek.com/v1',
+  apiKey: 'sk-THIS_MUST_NOT_LEAK',
+  model: 'deepseek-chat',
+})
+const aiRow = [
+  { key: 'ai-settings', value: aiValue },
+  { key: 'ai-chat-history', value: JSON.stringify([{ id: 's1', title: '问', messages: [{ role: 'user', content: 'hi' }] }]) },
+]
+const aiCleaned = redactSecrets(aiRow) as typeof aiRow
+const aiParsed = JSON.parse(aiCleaned[0]!.value) as Record<string, unknown>
+check('ai apiKey inside the JSON string is blanked', aiParsed.apiKey, '')
+check(
+  'ai baseUrl and model survive',
+  { baseUrl: aiParsed.baseUrl, model: aiParsed.model },
+  { baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-chat' },
+)
+check('ai chat history row is untouched (content is not a credential)', aiCleaned[1], aiRow[1])
 
 // ---- 形状守恒：键还在，只是值空了 ----
 check(

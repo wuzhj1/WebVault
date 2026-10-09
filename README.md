@@ -14,13 +14,14 @@
 - 反向链接 / 出链 / 待创建目标面板，点击不存在的链接直接建笔记
 - 重命名或移动笔记时，全库指向它的 `[[双链]]` 自动改写
 - 旧笔记里遗留的卡片盒元数据块（frontmatter 的 `id` / `type` / `tags` 等）**原样保留、永不改写**，`[[202609151423]]` 这样的永久 ID 链接依旧能解析、改名不断链
-- 侧栏是 44px **活动栏**：笔记 / 待建 / 标签 三个图标切换右侧面板，图标上挂计数徽标；三个分区都能过滤，笔记区内**目录 / 置顶 / 最近**三个标签页切换视图（书签不再和目录树混排），点标签行直接全库搜索 `#标签`
+- 侧栏是 44px **活动栏**：笔记 / 待建 / 标签 / AI 四个图标切换右侧面板，图标上挂计数徽标；分区都能过滤，笔记区内**目录 / 置顶 / 最近**三个标签页切换视图（书签不再和目录树混排），点标签行直接全库搜索 `#标签`
 - 中文全文搜索（自研 CJK 单字/双字分词 + MiniSearch），带命中摘要
 - 力导向关系图谱
 - Vditor 即时渲染编辑器，`[[` 触发链接补全，资源全部自托管、离线可用
 - 5 套主题（3 深 2 浅）× 8 种强调色，在设置的「外观」里点一下就换，编辑器、代码高亮、关系图谱一起跟着走
 - PWA：可安装、可离线，Safari 清空缓存后能自动从 Gitee 恢复
 - Gitee 单仓库同步：索引优先拉取、正文按需下载、批量提交、三方合并、冲突副本
+- 浏览器直连的 AI 助手（自填 OpenAI 兼容接口，零后端）：侧栏对话、选区一键处理、整篇总结/标签/双链建议；AI 内容与自己的思考**分隔开**——对话历史不进笔记库，进笔记的 AI 内容必带标记，详见「AI 助手」一节
 
 ---
 
@@ -38,7 +39,7 @@ pnpm dev           # http://localhost:5173
 自检命令：
 
 ```bash
-pnpm verify        # 15 个验证套件,955 条断言(配置 / 解析 / frontmatter 与 ID 兼容 / 链接改写 / 三方合并 / 远端删除判定 / 搜索 / 主题 / 路径与标题 / 内容指纹 / 链接解析 / 落盘簿记 / ZIP 打包 / 凭据抹除 / 配置目录形状)
+pnpm verify        # 16 个验证套件,1065 条断言(配置 / 解析 / frontmatter 与 ID 兼容 / 链接改写 / 三方合并 / 远端删除判定 / 搜索 / 主题 / 路径与标题 / 内容指纹 / 链接解析 / 落盘簿记 / ZIP 打包 / 凭据抹除 / 配置目录形状 / AI 标记与提示词)
 pnpm typecheck     # vue-tsc --noEmit
 pnpm build         # 类型检查 → 生成 PWA 图标与 vditor 静态资源 → 产出 dist/
 ```
@@ -179,7 +180,7 @@ Safari 的防跟踪策略（ITP）会在大约 7 天不使用后清空该站点�
 
 ## 快捷键
 
-下面表格里的全局键（选择器 / 搜索 / 设置 / 速查表 / 图谱）都是**出厂绑定**，可以在 设置 → 快捷键 里改绑或解绑（点「修改」按下新组合键，`Backspace` 解绑，`Esc` 取消；撞上别的命令会被当场拦下）——改动只存这台设备，不进同步。`Esc`、鼠标交互和编辑器内建按键是固定行为，改不了。
+下面表格里的全局键（选择器 / 搜索 / 设置 / 速查表 / 图谱 / AI）都是**出厂绑定**，可以在 设置 → 快捷键 里改绑或解绑（点「修改」按下新组合键，`Backspace` 解绑，`Esc` 取消；撞上别的命令会被当场拦下）——改动只存这台设备，不进同步。`Esc`、鼠标交互和编辑器内建按键是固定行为，改不了。
 
 | 键 | 作用 |
 | --- | --- |
@@ -188,6 +189,7 @@ Safari 的防跟踪策略（ITP）会在大约 7 天不使用后清空该站点�
 | `Ctrl / ⌘ + ,` | 打开设置 |
 | `?` | 打开「快捷键速查表」（设置 → 快捷键；不在输入框、正文里时） |
 | `Ctrl / ⌘ + G` | 关系图谱（出厂绑定，可在设置里改） |
+| `Ctrl / ⌘ + Alt + A` | 打开侧栏 AI 助手分区（出厂绑定，可在设置里改；避开 Chrome 自带的 Ctrl+Shift+A） |
 | 单击链接 | 编辑器里的双链胶囊：跳转到目标笔记，目标不存在则直接创建 |
 | `Ctrl / ⌘ + 单击` | 光标所在行（该行展开为原始 markdown）里的 `[[链接]]`：跳转或创建 |
 | 输入 `[[` | 触发链接补全 |
@@ -200,12 +202,31 @@ Safari 的防跟踪策略（ITP）会在大约 7 天不使用后清空该站点�
 
 ---
 
+## AI 助手
+
+浏览器**直连 OpenAI 兼容 API**：在 设置 → AI 里自填 `baseUrl` / API Key / 模型名（预设了 DeepSeek、Kimi、SiliconFlow、OpenRouter 四家，点一下回填，「测试连接」试通再保存）。请求只发往你自己填的地址；API Key 明文存本机 `.webvault/ai.json`，导出备份时被自动抹空（`verify-redact` 钉住），共享整个文件夹前连同它一起清掉。供应商不允许浏览器跨域（CORS）时会报错并提示换一家或自建中转——本项目没有后端，也绝不经手你的 Key。
+
+三个入口，全部是**显式动作**：
+
+- **侧栏「AI」分区**（`Ctrl/⌘ + Alt + A`）：对话页签支持多轮问答与流式输出（可随时停止）；「引用当前笔记」把正文带进上下文（发送前显示可摘掉的引用芯片，长文自动裁剪），随后出现 总结 / 标签 / 双链建议 的快捷动作；产出页签列出 `ai/` 目录里沉淀过的笔记，可按标题过滤
+- **选区浮层**：编辑器里选中一段文字，选区旁浮出 🤖 按钮 —— 改写 / 润色 / 续写 / 总结 / 翻译 / 解释，流式生成后「插入到下方」（原文保留）或「替换选中」（会删原文，因此是单独一个按钮、生成完成后才可点）
+- **存为笔记**：对话会话栏的「存为笔记」把问答誊录沉淀成 `ai/<标题>.md`（重名自动加序号）
+
+### AI 与自己的思考分隔开
+
+- **存放分隔**：对话历史存本机 `.webvault/ai-chats.json`（settings 表的一个键），不进笔记库、不进搜索索引、不随同步推 Gitee —— 聊天是草稿，只有显式「存为笔记」才落成 `.md`（那是定稿，会随同步走）
+- **标记分隔**：AI 内容进笔记必带双重标记 —— frontmatter 的 `ai:` 块（模型 / 时间 / 来源）+ 正文里的可见声明行；一切插入都被包在 `> 🤖` 引用块里，**没有任何裸插路径**：标记只由 `core/ai/marks.ts` 生成，出口只有 `aiQuoteBlock`（插入）与 `buildAiNoteContent`（沉淀）两个，由 `verify-ai-prompts` 逐条钉住
+- **浏览分隔**：侧栏第 4 个分区专属 AI（对话 / 产出两个页签）；`ai/` 目录与其中的笔记在文件树带 🤖 角标，判定与「产出」列表共用同一个 `isAiPath`
+- **不越权**：AI 永远不会自己动笔记 —— 保存、插入、替换、沉淀每个都是用户点下的按钮；面板里发出去的每段上下文（引用芯片）也由用户显式添加、显式摘除
+
+---
+
 ## 数据存在哪里
 
 | 内容 | 位置 | 说明 |
 | --- | --- | --- |
 | 笔记正文 | OPFS（源私有文件系统） | 明文 `.md`，目录结构和仓库里一致；文件开头已有的 frontmatter 原样保留、永不改写（安全网：若保存时发现元数据块消失，会拒绝写入并还原） |
-| 配置与索引（`.webvault/` 下的 9 个 JSON） | vault 根（绑定目录或 OPFS 根） | 文件为真相源，Dexie（库名 `webvault`）只是运行时缓存；设置里有「重建链接与标签索引」按钮 |
+| 配置与索引（`.webvault/` 下的 11 个 JSON） | vault 根（绑定目录或 OPFS 根） | 文件为真相源，Dexie（库名 `webvault`）只是运行时缓存；设置里有「重建链接与标签索引」按钮 |
 | 主题与强调色 | `localStorage` | 见「主题与外观」 |
 
 库根的形状对齐 Obsidian —— 根下只有笔记与目录，全部元数据、索引、设置收进一个隐藏配置目录：
@@ -215,7 +236,9 @@ Safari 的防跟踪策略（ITP）会在大约 7 天不使用后清空该站点�
 ├── 日记/2026-09-29.md         笔记正文,目录结构与仓库一致
 ├── 素材/图.png                附件(只索引,不上传)
 └── .webvault/                 隐藏配置目录,对标 Obsidian 的 .obsidian
-    ├── sync.json              Gitee 同步配置 —— 含明文 token,单独成文件,共享前只清这一个
+    ├── sync.json              Gitee 同步配置 —— 含明文 token,单独成文件,共享前先清它
+    ├── ai.json                AI 连接配置 —— 含明文 API Key,单独成文件,共享前连它一起清
+    ├── ai-chats.json          AI 对话历史(本机草稿,不进笔记库、不推 Gitee)
     ├── app.json               静态设置
     ├── hotkeys.json           可改的快捷键绑定
     ├── workspace.json         工作区状态:上次打开、最近、置顶、折叠(高频变动)
@@ -226,7 +249,7 @@ Safari 的防跟踪策略（ITP）会在大约 7 天不使用后清空该站点�
     └── sync-log.json          同步日志(滚动约 300 条)
 ```
 
-配置目录名与「表 → 文件」的分流规则只有一个出处：`src/core/vault/config-layout.ts`（纯模块，由 `verify-config-layout` 钉住）。旧版库的 `.config/settings.json` 会在启动时一次性拆搬进上面这四个职责文件，搬完即删旧目录。
+配置目录名与「表 → 文件」的分流规则只有一个出处：`src/core/vault/config-layout.ts`（纯模块，由 `verify-config-layout` 钉住）。旧版库的 `.config/settings.json` 会在启动时一次性拆搬进上面按职责分出的小文件，搬完即删旧目录。
 
 这些都只在这台设备上，不会发往 `gitee.com` 以外的任何服务器。
 
@@ -292,6 +315,7 @@ Safari 的防跟踪策略（ITP）会在大约 7 天不使用后清空该站点�
 src/
   core/
     db.ts              Dexie:notes / links / tags / cards / settings / syncLog
+    ai/                AI 标记(唯一生成处)、提示词与动作注册表、OpenAI 兼容客户端
     vault/             OPFS 读写与文件 mtime、路径规范化、git blob sha、.webvault 配置目录形状与落盘簿记、
                        zip 打包与导出备份(含凭据抹除)
     editor/            编辑器内双链胶囊的 DOM 装饰(字符原样保留,不影响 Lute 序列化)
@@ -303,11 +327,13 @@ src/
     ui/                浮层共用的焦点陷阱(Tab 循环 / 焦点还原 / Esc 分发)
     zettel/            卡片元数据的 frontmatter 行解析与链接层永久 ID 兼容(card.ts)
   stores/              Pinia:vault(笔记与索引) / sync(同步与通知) /
-                       settings / appearance / ui(界面状态、最近/置顶与快捷键绑定持久化)
+                       settings / appearance / ui(界面状态、最近/置顶与快捷键绑定持久化) /
+                       aiSettings(AI 连接) 与 ai(对话、流式、沉淀)
   components/          TopBar、SideBar、FileTree、NoteEditor、RightPanel、Modal、
-                       SearchPanel、LinkPicker、GraphView、SettingsDialog、Notices
-scripts/               图标生成、vditor 资源拷贝 + 15 个 Node 验证套件(pnpm verify),CI 见 .github/workflows/
+                       SearchPanel、LinkPicker、GraphView、SettingsDialog、Notices、
+                       AiPanel(侧栏 AI 分区)、AiSelection(选区浮层)
+scripts/               图标生成、vditor 资源拷贝 + 16 个 Node 验证套件(pnpm verify),CI 见 .github/workflows/
 public/vditor/         自托管的编辑器资源,由 scripts/copy-vditor.mjs 从 node_modules 拷出,不入库
 ```
 
-`core/parse/frontmatter.ts`、`core/zettel/*`、`core/vault/flush-state.ts`、`core/vault/zip.ts`、`core/vault/redact.ts` 和 `core/vault/config-layout.ts` 是纯函数模块，有两条硬约束：**只用相对导入**（验证脚本以 `node scripts/*.mts` 直跑，没有 `@/` 别名解析），且**不得在运行时导入 `db.ts`**（它在模块作用域就构造 Dexie，需要 IndexedDB）。用 `import type` 引类型是安全的，编译后会被擦除。违反任一条，验证脚本会静默失效或直接崩掉。
+`core/parse/frontmatter.ts`、`core/zettel/*`、`core/vault/flush-state.ts`、`core/vault/zip.ts`、`core/vault/redact.ts`、`core/vault/config-layout.ts` 和 `core/ai/{marks,prompts}.ts` 是纯函数模块，有两条硬约束：**只用相对导入**（验证脚本以 `node scripts/*.mts` 直跑，没有 `@/` 别名解析），且**不得在运行时导入 `db.ts`**（它在模块作用域就构造 Dexie，需要 IndexedDB）。用 `import type` 引类型是安全的，编译后会被擦除。违反任一条，验证脚本会静默失效或直接崩掉。

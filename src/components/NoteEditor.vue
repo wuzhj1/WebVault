@@ -3,8 +3,9 @@
  * 主编辑器:承载一个 Vditor 实例(IR / live-preview 模式),编辑 `vault.activePath` 指向的那篇笔记。
  *
  * props.startupDone 只在空态占位页上用;emits `open-link`(点到的 wikilink 解析成了某个路径,交给
- * App 去打开)与 `pick-link`(空态那个按钮要呼出链接选择器)。父组件通过 defineExpose 的两个方法
- * 反向操控本组件:`flushSave` 落盘、`insertLink` 从选择器插链。
+ * App 去打开)、`pick-link`(空态那个按钮要呼出链接选择器)与 `open-ai-settings`(选区 AI 浮层的
+ * 「去设置」)。父组件通过 defineExpose 的三个方法反向操控本组件:`flushSave` 落盘、
+ * `insertLink` 从选择器插链、`insertMarkdown` 插入带标记的 AI 内容(选区浮层与侧栏 AI 面板共用)。
  *
  * 读 vault(正文与 resolver)、appearance(明暗翻转)、sync(notify 与 schedulePush / fetchBody)。
  *
@@ -27,6 +28,7 @@ import {
   markActiveBlock,
   type WikilinkLookup,
 } from '@/core/editor/wikilink-dom.ts'
+import AiSelection from './AiSelection.vue'
 import { slashHint } from '@/core/editor/slash-commands.ts'
 import { clearPendingSave, snapshotPendingSave } from '@/core/editor/pending-save.ts'
 import { splitFrontmatter } from '@/core/parse/frontmatter.ts'
@@ -41,6 +43,8 @@ const emit = defineEmits<{
   (e: 'open-link', path: string): void
   /** 空态页上的按钮,请求 App 呼出链接选择器。 */
   (e: 'pick-link'): void
+  /** 选区浮层里的「去设置」:本组件碰不到 overlay,交 App 打开设置的 AI 页。 */
+  (e: 'open-ai-settings'): void
 }>()
 
 const props = withDefaults(defineProps<{
@@ -292,9 +296,37 @@ function runDecorate(): void {
 /**
  * 光标所在的块保持裸 markdown,所以只有移到*另一个*块才可能留下值得装饰的东西。
  * 同一个块内部的普通移动什么都不用做。
+ *
+ * 顺带记下编辑器内的最后一次选区(`lastRange`):点 AI 面板按钮后浏览器会把选区挪出编辑器,
+ * `insertMarkdown` 全靠这份副本把插入点还原到「用户刚才选/点的地方」。
+ * 只在选区仍落在 irRoot 内时覆盖——选区移到按钮上之类的外部变动必须放过,否则副本会被洗掉。
  */
+let lastRange: Range | null = null
+
+/**
+ * 选区 AI 浮层的锚点:选区矩形(左、底)+ 选中原文;null = 不显示 🤖 按钮。
+ * `aiRange` 是打开浮层那一刻**钉住**的选区副本——`lastRange` 会随后续编辑漂移,
+ * 而「替换」必须精确删掉用户当初选中的那段,两者职责不同、不能合并。
+ */
+const aiAnchor = ref<{ x: number; y: number; text: string } | null>(null)
+let aiRange: Range | null = null
+
+/** 换笔记即收浮层并作废旧选区:浮层跟的是「这篇里这段文字」,跨笔记毫无意义。 */
+watch(
+  () => vault.activePath,
+  () => {
+    aiAnchor.value = null
+    aiRange = null
+  },
+)
+
 function onSelectionChange(): void {
   if (!irRoot) return
+  const selection = window.getSelection()
+  if (selection && selection.rangeCount > 0) {
+    const current = selection.getRangeAt(0)
+    if (irRoot.contains(current.commonAncestorContainer)) lastRange = current.cloneRange()
+  }
   if (markActiveBlock(irRoot) === activeBlock) return
   queueDecorate()
 }
@@ -332,6 +364,31 @@ function isTaskCheckbox(target: EventTarget | null): target is HTMLInputElement 
  */
 function onEditorMouseDown(event: MouseEvent): void {
   if (chipFromEvent(event.target) || isTaskCheckbox(event.target)) event.preventDefault()
+  // 在编辑器里重新落鼠标 = 选区要变了,旧浮层(连同它钉住的 aiRange)立刻作废;
+  // 浮层本体 Teleport 在 body 上,点它不会走到这里,关不掉自己。
+  aiAnchor.value = null
+  aiRange = null
+}
+
+/**
+ * 选区完成(mouseup 是拖选的天然收尾时机)后浮出 🤖 按钮。三条门槛:
+ * - 只读/空态不弹(只读下插入会替用户解锁,那是「按钮点下去才解锁」,不是选中就弹);
+ * - 选区必须落在 IR 根内且不折叠,单字符以内的选区不值得占屏——AI 处理它没有意义;
+ * - 位置取 `getBoundingClientRect`,fixed 定位直接用视口坐标,不用换算父系。
+ * 键盘完成的选区(shift+方向键)不经过 mouseup,因此不弹入口——这是已知取舍,
+ * 键盘用户走侧栏 AI 面板那条路(浮层只是鼠标流的快捷入口)。
+ */
+function onEditorMouseUp(): void {
+  if (state.value !== 'ready' || !irRoot || !editorReady) return
+  const selection = window.getSelection()
+  if (!selection || selection.isCollapsed || selection.rangeCount === 0) return
+  const range = selection.getRangeAt(0)
+  if (!irRoot.contains(range.commonAncestorContainer)) return
+  const text = selection.toString()
+  if (text.trim().length < 2) return
+  const rect = range.getBoundingClientRect()
+  aiRange = range.cloneRange()
+  aiAnchor.value = { x: rect.left, y: rect.bottom, text }
 }
 
 /** 点击分派:胶囊→跟链;任务复选框→把焦点与选区还给文字;Ctrl/⌘+点击正在编辑的裸链接→同样跟过去。 */
@@ -524,6 +581,74 @@ function insertLink(target: string): void {
   editor?.focus()
 }
 
+/**
+ * 按 IR 语义插入一段 markdown(AI 面板的「插入到笔记」、选区浮层的插入等外部来源)。
+ *
+ * 与 insertLink 的三点差别,都是被 Vditor 的 `insertMD`/`insertHTML` 实现逼出来的:
+ * - 用 `insertMD` 而非 `insertValue`:前者经 Lute 把 markdown 转成 IR DOM 再插,
+ *   引用块这类**块级**结构才能正确落位;`insertValue` 收的是 HTML 字面量,会把 `>` 当正文。
+ * - 插入点必须先收敛:`insertHTML` 见到非空选区会先 `execCommand('delete')` 再插——
+ *   这个行为 mode 两种取值各用一半:
+ *   - `after`(默认):收敛到「编辑器内最后一次光标的末尾」(选区内 → 坍缩到选区尾,
+ *     选区已丢 → 回放 lastRange),选区为空故原文分毫不动,块级内容落在光标所在块**之后**;
+ *   - `replace`:回放浮层打开时钉住的 aiRange(**不**坍缩),让 delete 先吃掉选中原文,
+ *     带标记的 AI 块随后落位——「替换会删原文」正是靠这个显式按钮才被允许;
+ *     钉住的选区已失效(正文被改、重排)则退化为 `after`,宁可多留原文也不误删。
+ *   选区丢了又没有可回放的副本时兜底到末块之后,好过 insertHTML 自己兜底的文档开头。
+ * - 收敛后选区落在哪个块,`insertHTML` 就把块级内容插到那个块的**之后** ——
+ *   这正是「插入到下方」的落点:引用块永远排在原段落下侧,不并行、不覆盖。
+ */
+function insertMarkdown(md: string, mode: 'after' | 'replace' = 'after'): void {
+  if (!vault.editable) vault.editable = true
+  const selection = window.getSelection()
+  if (selection && irRoot) {
+    const usable = (r: Range | null): r is Range =>
+      !!r && irRoot!.contains(r.commonAncestorContainer)
+    if (mode === 'replace') {
+      // 焦点先还给编辑器(execCommand 需要),回放选区必须是最后一步才不被 focus 挪走。
+      editor?.focus()
+      if (usable(aiRange)) {
+        selection.removeAllRanges()
+        selection.addRange(aiRange.cloneRange())
+      } else if (
+        usable(lastRange) &&
+        selection.rangeCount > 0 &&
+        selection.getRangeAt(0).toString() !== ''
+      ) {
+        // 钉住的选区没了,但当前恰好真有一个非空选区(用户重新选了一段):就替换它。
+        selection.removeAllRanges()
+        selection.addRange(lastRange.cloneRange())
+      } else {
+        // 两头都没有可用选区:退化为插入,宁可多留原文也不误删。
+        insertMarkdown(md, 'after')
+        return
+      }
+    } else {
+      const inside =
+        selection.rangeCount > 0 &&
+        irRoot.contains(selection.getRangeAt(0).commonAncestorContainer)
+      if (inside && selection.rangeCount > 0 && !selection.isCollapsed) {
+        const collapse = selection.getRangeAt(0).cloneRange()
+        collapse.collapse(false)
+        selection.removeAllRanges()
+        selection.addRange(collapse)
+      } else if (!inside) {
+        if (lastRange && irRoot.contains(lastRange.commonAncestorContainer)) {
+          const restore = lastRange.cloneRange()
+          restore.collapse(false)
+          selection.removeAllRanges()
+          selection.addRange(restore)
+        } else {
+          // 一个光标都没留过(刚打开就点插入):放到末块之后,好过 insertHTML 兜底的文档开头。
+          setRangeAt(irRoot, false)
+        }
+      }
+    }
+  }
+  editor?.insertMD(md)
+  editor?.focus()
+}
+
 /** 只读提示条的解锁入口;与顶栏那把锁写的是同一个 vault.editable。 */
 function unlock(): void {
   vault.editable = true
@@ -594,6 +719,7 @@ onMounted(async () => {
     after: () => {
       editorReady = true
       host.value?.addEventListener('mousedown', onEditorMouseDown, true)
+      host.value?.addEventListener('mouseup', onEditorMouseUp, true)
       host.value?.addEventListener('click', onEditorClick, true)
       host.value?.addEventListener('keydown', onEditorKeydownCapture, true)
       startDecorating()
@@ -606,7 +732,10 @@ onMounted(async () => {
 onBeforeUnmount(async () => {
   stopDecorating()
   slashFill = null
+  aiAnchor.value = null
+  aiRange = null
   host.value?.removeEventListener('mousedown', onEditorMouseDown, true)
+  host.value?.removeEventListener('mouseup', onEditorMouseUp, true)
   host.value?.removeEventListener('click', onEditorClick, true)
   host.value?.removeEventListener('keydown', onEditorKeydownCapture, true)
   await flushSave()
@@ -651,8 +780,8 @@ watch(
   },
 )
 
-/** 暴露给父组件的两个反向操控入口:强制落盘、从选择器插链。 */
-defineExpose({ flushSave, insertLink })
+/** 暴露给父组件的三个反向操控入口:强制落盘、从选择器插链、插入成块 markdown(AI)。 */
+defineExpose({ flushSave, insertLink, insertMarkdown })
 </script>
 
 <template>
@@ -671,6 +800,14 @@ defineExpose({ flushSave, insertLink })
     </div>
     <!-- Vditor 挂载点用 v-show:DOM 一旦销毁就得整个重建编辑器实例 -->
     <div v-show="state !== 'empty'" ref="host" class="editor__host"></div>
+    <!-- 选区 AI 浮层:Teleport 到 body,fixed 跟着选区矩形;插入走 insertMarkdown,打开设置上抛 App -->
+    <AiSelection
+      v-if="aiAnchor"
+      :anchor="aiAnchor"
+      @close="aiAnchor = null"
+      @insert="(payload) => insertMarkdown(payload.markdown, payload.mode)"
+      @open-settings="emit('open-ai-settings')"
+    />
     <!-- 云端正文未就绪时的下载提示,盖在编辑区底部而不是替换它 -->
     <div v-if="state === 'loading'" class="editor__loading">
       <span class="spinner"></span>

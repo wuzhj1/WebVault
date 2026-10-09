@@ -17,6 +17,7 @@
  * - 折叠状态仍在 ui store(跨层级、跨会话持久);展平是纯派生,没有也不允许有副作用。
  */
 import { computed, onBeforeUnmount, onMounted, ref, shallowRef } from 'vue'
+import { isAiPath } from '@/core/ai/marks.ts'
 import type { TreeNode } from '@/stores/vault.ts'
 import { useUiStore } from '@/stores/ui.ts'
 import { useVaultStore } from '@/stores/vault.ts'
@@ -176,6 +177,8 @@ const view = computed(() => {
             <path d="M6 3.5 L10.5 8 L6 12.5" fill="none" stroke="currentColor" stroke-width="1.6" />
           </svg>
           <span class="row__name">{{ row.name }}</span>
+          <!-- AI 产出目录的角标:与侧栏「产出」页签同一个 isAiPath 判定,三处标识不会漂移 -->
+          <span v-if="isAiPath(row.path)" class="badge badge--ai" title="AI 产出目录">🤖</span>
           <span class="row__count">{{ row.count }}</span>
         </button>
       </template>
@@ -194,8 +197,13 @@ const view = computed(() => {
           @keydown.space.prevent="emit('open', row.path)"
         >
           <span class="row__name">{{ row.name }}</span>
-          <!-- 角标：实心点 = 有未上传的本地修改；云朵 = 正文尚未下载到本地 -->
+          <!-- 角标：🤖 = AI 产出的笔记；实心点 = 有未上传的本地修改；云朵 = 正文尚未下载到本地 -->
           <span class="row__badges">
+            <span
+              v-if="isAiPath(row.path)"
+              class="badge badge--ai"
+              title="AI 生成的笔记"
+            >🤖</span>
             <span
               v-if="meta(row.path)?.dirty"
               class="badge badge--dirty"
@@ -319,6 +327,12 @@ const view = computed(() => {
   height: 6px;
   border-radius: 50%;
   background: var(--warn);
+}
+
+/* AI 产出角标:emoji 本身有色,这里只管字号与对齐;文本内容(🤖)也是无障碍可读的 */
+.badge--ai {
+  font-size: 10px;
+  line-height: 1;
 }
 
 .badge--cloud {

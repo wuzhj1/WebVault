@@ -1,11 +1,11 @@
 /**
  * 配置目录形状验证（src/core/vault/config-layout.ts）：
  * - 目录与文件清单：`.webvault` 是唯一配置目录、旧版 `.config` 只作搬迁源，六张表的文件名不重不漏；
- * - 键名 → 文件的分流：settings 按职责拆成 sync / app / hotkeys / workspace 四档，
+ * - 键名 → 文件的分流：settings 按职责拆成 sync / app / hotkeys / workspace / ai / ai-chats 六档，
  *   每个已登记键落到预期的那档、未知键一律回落 app.json（新设置忘了登记只会落错档，绝不会丢）；
  * - 分流的硬不变量：`partitionRows` 必须让每一行都有桶 —— 漏一行等于悄悄丢设置，
  *   datafiles 的 doFlush 正是靠 `placed === rows.length` 在写盘前拦这一条；
- * - 旧版搬迁：`settings.json` 拆成四档后，四档的并集必须与原表逐行相同（不多不少、不改键名）。
+ * - 旧版搬迁：`settings.json` 拆成六档后，六档的并集必须与原表逐行相同（不多不少、不改键名）。
  *
  * 运行：pnpm verify（第 15 个套件；裸 node 直跑本文件）。全部通过退出码 0，否则 1。
  */
@@ -84,7 +84,7 @@ for (const [table, files] of TABLE_FILES) {
   }
 }
 check('file names are globally unique across tables', new Set(allFiles).size, allFiles.length)
-check('nine config files in total', allFiles.length, 9)
+check('eleven config files in total', allFiles.length, 11)
 
 check('notes is single-file', filesOf('notes'), ['notes.json'])
 check('links is single-file', filesOf('links'), ['links.json'])
@@ -92,16 +92,16 @@ check('tags is single-file', filesOf('tags'), ['tags.json'])
 check('cards is single-file', filesOf('cards'), ['cards.json'])
 check('syncLog is single-file', filesOf('syncLog'), ['sync-log.json'])
 check(
-  'settings splits into four duty files',
+  'settings splits into six duty files',
   filesOf('settings'),
-  ['sync.json', 'app.json', 'hotkeys.json', 'workspace.json'],
+  ['sync.json', 'app.json', 'hotkeys.json', 'workspace.json', 'ai.json', 'ai-chats.json'],
 )
 check('unknown table resolves to no file', filesOf('nope'), [])
 check('config table is not persisted to files (handle cannot be serialized)', filesOf('config'), [])
 
 // ---- 3. settings 键名注册表：唯一、非空、值固定 ----
 const keyEntries = Object.entries(SETTING_KEYS)
-check('six settings keys declared', keyEntries.length, 6)
+check('eight settings keys declared', keyEntries.length, 8)
 check('keys are unique', new Set(keyEntries.map(([, value]) => value)).size, keyEntries.length)
 for (const [name, value] of keyEntries) {
   ok(`SETTING_KEYS.${name} is a non-empty string`, typeof value === 'string' && value.length > 0)
@@ -112,6 +112,8 @@ check('recent key', SETTING_KEYS.recentPaths, 'ui-recent-paths')
 check('pinned key', SETTING_KEYS.pinnedPaths, 'ui-pinned-paths')
 check('collapsed key', SETTING_KEYS.collapsedDirs, 'ui-collapsed-dirs')
 check('shortcut key', SETTING_KEYS.shortcutBindings, 'ui-shortcut-bindings')
+check('ai settings key', SETTING_KEYS.aiSettings, 'ai-settings')
+check('ai chat history key', SETTING_KEYS.aiChatHistory, 'ai-chat-history')
 
 // ---- 4. 键 → 档的分流 ----
 const settingsFiles = filesOf('settings')
@@ -121,6 +123,10 @@ check('last-open-path goes to workspace.json', settingsFileOf(SETTING_KEYS.lastO
 check('recent goes to workspace.json', settingsFileOf(SETTING_KEYS.recentPaths), 'workspace.json')
 check('pinned goes to workspace.json', settingsFileOf(SETTING_KEYS.pinnedPaths), 'workspace.json')
 check('collapsed goes to workspace.json', settingsFileOf(SETTING_KEYS.collapsedDirs), 'workspace.json')
+// AI 两档必须各自单独成文件：ai.json 裹着 apiKey（共享库前只清它），ai-chats.json 是可删的对话记录。
+check('ai settings go to ai.json', settingsFileOf(SETTING_KEYS.aiSettings), 'ai.json')
+check('ai chat history goes to ai-chats.json', settingsFileOf(SETTING_KEYS.aiChatHistory), 'ai-chats.json')
+check('ai credential and ai chat never share a file', settingsFileOf(SETTING_KEYS.aiSettings) !== settingsFileOf(SETTING_KEYS.aiChatHistory), true)
 check('unknown key falls back to app.json', settingsFileOf('brand-new-setting'), 'app.json')
 check('empty key falls back to app.json', settingsFileOf(''), 'app.json')
 check('case matters (no case folding)', settingsFileOf('SYNC-SETTINGS'), 'app.json')
@@ -155,6 +161,8 @@ const realisticSettings = [
   { key: SETTING_KEYS.collapsedDirs, value: '[]' },
   { key: SETTING_KEYS.shortcutBindings, value: '{"search":"mod+f"}' },
   { key: 'ui-something-new', value: 'true' },
+  { key: SETTING_KEYS.aiSettings, value: '{"baseUrl":"","apiKey":"","model":""}' },
+  { key: SETTING_KEYS.aiChatHistory, value: '[]' },
 ]
 const buckets = partitionRows('settings', settingsFiles, realisticSettings)
 check('bucket names exactly the settings files', [...buckets.keys()], settingsFiles)
@@ -169,8 +177,10 @@ check(
   [realisticSettings[1], realisticSettings[2], realisticSettings[3], realisticSettings[4]],
 )
 check('app.json holds the unknown key', buckets.get('app.json'), [realisticSettings[6]])
+check('ai.json only holds ai settings', buckets.get('ai.json'), [realisticSettings[7]])
+check('ai-chats.json only holds chat history', buckets.get('ai-chats.json'), [realisticSettings[8]])
 
-// 空表也要建齐四个桶：flush 照桶写，缺桶就是「删了这个文件却以为写过了」。
+// 空表也要建齐六个桶：flush 照桶写，缺桶就是「删了这个文件却以为写过了」。
 const emptyBuckets = partitionRows('settings', settingsFiles, [])
 check('empty table still gets all buckets', [...emptyBuckets.keys()], settingsFiles)
 for (const [, rows] of emptyBuckets) check('empty bucket is empty', rows, [])
@@ -214,7 +224,7 @@ for (let round = 0; round < 40; round++) {
   }
 }
 
-// ---- 7. 旧版搬迁：settings.json 拆四档后并集必须逐行相同 ----
+// ---- 7. 旧版搬迁：settings.json 拆六档后并集必须逐行相同 ----
 {
   const legacyText = JSON.stringify(realisticSettings, null, 1)
   const parsed = parseRows(legacyText)

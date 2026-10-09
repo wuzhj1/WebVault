@@ -8,10 +8,11 @@
  *   就此重建。搬进一个装着旧版文件的目录时，还会顺手把 `.config/` 一次性迁过来。
  * - 运行期给六张表注册 Dexie hooks，任何写入防抖 300ms 后全量落盘；页面隐藏或关闭时强刷一次。
  *
- * settings 是唯一「一表多文件」的表：按职责拆成 sync / app / hotkeys / workspace 四个文件
- * （对标 Obsidian 的配置目录形状），行归哪个文件由 config-layout 的 `settingsFileOf` 决定。
- * 拆开的好处是敏感配置单独成文件（共享整个库前只清 `sync.json`），且高频变动的 `workspace.json`
- * 与静态配置分开；代价是 hydrate / flush 要按档处理 —— 三条规则见 hydrateFromFiles 与 doFlush。
+ * settings 是唯一「一表多文件」的表：按职责拆成 sync / app / hotkeys / workspace / ai / ai-chats
+ * 六个文件（对标 Obsidian 的配置目录形状），行归哪个文件由 config-layout 的 `settingsFileOf` 决定。
+ * 拆开的好处是敏感配置单独成文件（共享整个库前只清 `sync.json` / `ai.json`），且高频变动的
+ * `workspace.json` 与静态配置分开；代价是 hydrate / flush 要按档处理 ——
+ * 三条规则见 hydrateFromFiles 与 doFlush。
  *
  * 两个例外与已知取舍：
  * - 目录句柄（config 表）是浏览器私有对象，存不进文件，只能留在 IndexedDB；
@@ -94,7 +95,7 @@ function reportFlushError(file: string, err: unknown): void {
 
 /**
  * 旧版 `.config/` → `.webvault/` 一次性搬迁，顺带把旧版挤在一个 `settings.json` 里的设置
- * 按职责拆成 sync / app / hotkeys / workspace 四个文件。
+ * 按职责拆成 sync / app / hotkeys / workspace / ai / ai-chats 若干个小文件。
  *
  * 每次 hydrate 都先跑一遍：没有旧目录时只花一次 `getDirectoryHandle` 就返回；反过来，用户换到
  * 一个装着旧版文件的目录时它会自动补做 —— 迁移不依赖「数据装在哪台机器、哪次启动」。
@@ -164,8 +165,8 @@ async function putIfAbsent(to: string, text: string): Promise<boolean> {
  * 一个文件缺失/损坏不影响其余表。尾部回写：兜底数据落成文件、损坏文件被修复
  * （唯一例外是「压根没读到」的表，见 skipForce —— 那时文件究竟是不是好的无从判断）。
  *
- * settings 一表四档，读的纪律按**整张表**而不是按档：一档坏就整张表按坏处理。
- * 理由是半份覆盖更危险 —— 表被 clear 成「三档的并集」，坏掉那档里的设置会被另外三档顶掉，
+ * settings 一表多档，读的纪律按**整张表**而不是按档：一档坏就整张表按坏处理。
+ * 理由是半份覆盖更危险 —— 表被 clear 成「其余各档的并集」，坏掉那档里的设置会被其余各档顶掉，
  * 而且尾部回写会把这半份固化下来；整张表跳过则最坏也就是什么都不变。
  *
  * 「文件为真相源」不等于「无条件覆盖」，三种情况必须让浏览器数据赢：
