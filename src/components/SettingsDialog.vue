@@ -12,7 +12,7 @@
  * 不会随笔记上传,也不会同步到其他设备(故 sync tab 顶部有醒目警告)。
  * AI 的 apiKey 同等待遇：明文存本机 `.webvault/ai.json`，只发往用户自己填的地址（ai tab 顶部同款警告）。
  */
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, defineComponent, h, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { bindingOfEvent, displayOfBinding } from '@/core/hotkeys.ts'
 // 文件读写在本组件里承担五件维护动作：目录绑定/解除、探测持久化授权、重建索引时逐篇读正文、
 // 清空本机正文、导出 zip 备份；导出本身在 core/vault/backup.ts，本组件只负责按钮与回执。
@@ -35,6 +35,39 @@ const emit = defineEmits<{ (e: 'close'): void }>()
 /** 打开时落位的页签；App 的 ? 快捷键直达「快捷键」页，不传则默认同步页。 */
 const props = defineProps<{ initialTab?: Tab }>()
 
+/**
+ * 提示图标：⚠(warn) / ⓘ(info) 两态，一处定义、全页复用。
+ * 语义由旁边的文字承载，图标纯装饰（aria-hidden）；颜色走 currentColor，
+ * 由 kind 决定的 `tip__ico--warn` / `tip__ico--info` 类着色（var(--warn) / var(--text-muted)，
+ * 写死颜色会被 verify-theme 当场拦下）。16 网格、线宽 1.5，与顶栏/侧栏内联 SVG 同规格。
+ */
+const TipIcon = defineComponent({
+  props: { kind: { type: String, default: 'info' } },
+  setup(iconProps) {
+    const base = {
+      viewBox: '0 0 16 16',
+      width: 15,
+      height: 15,
+      'aria-hidden': 'true',
+      // 颜色挂在图标自己身上而不是容器上:同一枚 ⚠ 既出现在 callout 里也出现在段落提示里,
+      // 靠容器选择器分色会在「普通 callout + warn 图标」的组合上染错。
+      class: iconProps.kind === 'warn' ? 'tip__ico tip__ico--warn' : 'tip__ico tip__ico--info',
+    }
+    return () =>
+      iconProps.kind === 'warn'
+        ? h('svg', base, [
+            h('path', { d: 'M8 1.8 L14.8 13.9 H1.2 Z', fill: 'none', stroke: 'currentColor', 'stroke-width': 1.5, 'stroke-linejoin': 'round' }),
+            h('path', { d: 'M8 6.1 v3.4', stroke: 'currentColor', 'stroke-width': 1.5, 'stroke-linecap': 'round' }),
+            h('circle', { cx: 8, cy: 11.7, r: 0.95, fill: 'currentColor' }),
+          ])
+        : h('svg', base, [
+            h('circle', { cx: 8, cy: 8, r: 6.3, fill: 'none', stroke: 'currentColor', 'stroke-width': 1.5 }),
+            h('path', { d: 'M8 7.2 v4', stroke: 'currentColor', 'stroke-width': 1.5, 'stroke-linecap': 'round' }),
+            h('circle', { cx: 8, cy: 4.9, r: 0.95, fill: 'currentColor' }),
+          ])
+  },
+})
+
 const settings = useSettingsStore()
 const aiSettings = useAiSettingsStore()
 const sync = useSyncStore()
@@ -56,8 +89,45 @@ const TAB_LABELS: Record<Tab, string> = {
   about: '关于',
 }
 
+/**
+ * 侧栏导航图标：16 网格单路径，stroke=currentColor、线宽 1.5，与 TipIcon 同一规格。
+ * 每项只存 d 串，模板统一渲染 <path>；换图标只改这里，不动模板。
+ */
+const TAB_ICONS: Record<Tab, string> = {
+  // 上下双箭头：推送 / 拉取的往复
+  sync: 'M4.8 13V3.4M4.8 3.4 2.6 5.6M4.8 3.4 7 5.6M11.2 3v9.6M11.2 12.6 9 10.4M11.2 12.6 13.4 10.4',
+  // 四角星：AI 的通用「闪」
+  ai: 'M8 2.2 9.45 6.55 13.8 8 9.45 9.45 8 13.8 6.55 9.45 2.2 8 6.55 6.55Z',
+  // 太阳：主题 / 明暗
+  appearance:
+    'M5.4 8a2.6 2.6 0 1 0 5.2 0 2.6 2.6 0 1 0-5.2 0M8 1.9v1.3M8 12.8v1.3M1.9 8h1.3M12.8 8h1.3M3.7 3.7l.9.9M11.4 11.4l.9.9M12.3 3.7l-.9.9M4.6 11.4l-.9.9',
+  // 数据库圆柱：存储与日志
+  data: 'M3 4.4C3 3.1 5.2 2.1 8 2.1s5 1 5 2.3-2.2 2.3-5 2.3S3 5.7 3 4.4ZM3 4.4v7.2C3 12.9 5.2 13.9 8 13.9s5-1 5-2.3V4.4M3 8c0 1.3 2.2 2.3 5 2.3s5-1 5-2.3',
+  // 键盘：键帽框 + 三颗键位点 + 空格
+  shortcuts: 'M2.5 5.4a1 1 0 0 1 1-1h9a1 1 0 0 1 1 1v5.2a1 1 0 0 1-1 1h-9a1 1 0 0 1-1-1zM5 7h.01M8 7h.01M11 7h.01M5.2 9.6h5.6',
+  // 信息圈：与 TipIcon 的 ⓘ 同几何
+  about: 'M1.7 8a6.3 6.3 0 1 0 12.6 0 6.3 6.3 0 1 0-12.6 0M8 7.2v4M8 4.7v.1',
+}
+
 /** 当前标签页，切换只影响渲染哪一段，不重置各段自己的草稿状态。初值来自 ? 快捷键的落位。 */
 const tab = ref<Tab>(props.initialTab ?? 'sync')
+
+/** 导航容器；方向键切换选中后把焦点挪到新项上（tablist 的 roving tabindex 约定）。 */
+const navEl = ref<HTMLElement | null>(null)
+
+/**
+ * tablist 键盘漫游：上下 / 左右切页、首尾循环。Enter、Space 走 button 原生点击，不另监听；
+ * Esc 留给 Modal 关闭，这里不抢。
+ */
+function onNavKey(event: KeyboardEvent): void {
+  const delta =
+    event.key === 'ArrowUp' || event.key === 'ArrowLeft' ? -1 : event.key === 'ArrowDown' || event.key === 'ArrowRight' ? 1 : 0
+  if (delta === 0) return
+  event.preventDefault()
+  const i = TABS.indexOf(tab.value)
+  tab.value = TABS[(i + delta + TABS.length) % TABS.length]
+  void nextTick(() => navEl.value?.querySelector<HTMLButtonElement>('[aria-selected="true"]')?.focus())
+}
 /** 同步设置的编辑副本：只有点「保存」才写回 store，避免边打字边落盘。 */
 const draft = ref<SyncSettings>({ ...settings.settings })
 /** token 输入框是否在 text / password 之间切成明文，仅为当场核对粘贴对不对。 */
@@ -297,6 +367,8 @@ const dirty = computed(() => JSON.stringify(draft.value) !== JSON.stringify(sett
 const aiDirty = computed(
   () => JSON.stringify(aiDraft.value) !== JSON.stringify(aiSettings.settings),
 )
+/** footer 的脏提示只跟当前页走：切页后草稿仍在，但提示不跨页指错地方。 */
+const footDirty = computed(() => (tab.value === 'sync' ? dirty.value : tab.value === 'ai' ? aiDirty.value : false))
 
 /** 读取浏览器存储配额与持久化授权；API 缺失时给出说明文本而不是抛错（部分浏览器不实现 estimate）。 */
 async function refreshUsage(): Promise<void> {
@@ -565,99 +637,545 @@ onMounted(() => {
 
 <template>
   <Modal title="设置" wide @close="emit('close')">
-    <!-- 六个标签页共用一个 tab 状态，切换不销毁已填的草稿 -->
-    <nav class="tabs">
-      <button
-        v-for="t in TABS"
-        :key="t"
-        class="tabs__btn"
-        :class="{ 'tabs__btn--on': tab === t }"
-        @click="tab = t"
-      >
-        {{ TAB_LABELS[t] }}
-      </button>
-    </nav>
-
-    <!-- Gitee 同步：唯一会把凭据写进本机数据库的一页，所以顶部先给警告 -->
-    <template v-if="tab === 'sync'">
-      <div class="callout callout--warn">
-        <strong>先看清楚:</strong> 私人令牌会明文保存在本机(未绑定目录时是浏览器数据库
-        <code>IndexedDB</code>,绑定后写入正文目录的 <code>.webvault/sync.json</code>),只会被发往
-        <code>gitee.com</code>。公用电脑或共享设备请不要填。建议在 Gitee
-        单独建一个仓库专门放笔记,并只给令牌勾选 <code>projects</code> 权限,这样即使泄露也影响有限。
-      </div>
-
-      <div class="steps">
-        <p class="steps__title">第一次使用的准备步骤</p>
-        <ol>
-          <li>在 Gitee 新建一个<strong>私有</strong>仓库(例如 <code>my-vault</code>),里面至少提交一个文件,否则没有分支可推。</li>
-          <li>打开 <code>gitee.com/profile/personal_access_tokens</code>,生成新令牌,勾选 <code>projects</code>。</li>
-          <li>把令牌、用户名(空间地址)、仓库名、分支名填到下面,点「测试连接」。</li>
-          <li>连接成功后点「立即同步」把远端笔记拉到本机。</li>
-        </ol>
-      </div>
-
-      <div class="grid">
-        <label class="field__wrap">
-          <span class="field__label">私人令牌 access token</span>
-          <span class="field__row">
-            <input
-              v-model="draft.token"
-              class="field"
-              :type="showToken ? 'text' : 'password'"
-              placeholder="粘贴 Gitee 私人令牌"
-              autocomplete="off"
-              spellcheck="false"
+    <!-- 左栏导航 + 右栏内容，六个页签共用一个 tab 状态，切换不销毁已填的草稿。
+         tablist / aria-selected + roving tabindex + 方向键漫游（onNavKey），键盘语义与原横排一致。 -->
+    <div class="pane">
+      <nav ref="navEl" class="snav" role="tablist" aria-label="设置分类" aria-orientation="vertical" @keydown="onNavKey">
+        <button
+          v-for="t in TABS"
+          :id="`settab-${t}`"
+          :key="t"
+          class="snav__btn"
+          role="tab"
+          :class="{ 'snav__btn--on': tab === t }"
+          :aria-selected="tab === t"
+          aria-controls="setpane"
+          :tabindex="tab === t ? 0 : -1"
+          @click="tab = t"
+        >
+          <svg class="snav__ico" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
+            <path
+              :d="TAB_ICONS[t]"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.5"
+              stroke-linecap="round"
+              stroke-linejoin="round"
             />
-            <button class="btn btn--ghost" type="button" @click="showToken = !showToken">
-              {{ showToken ? '隐藏' : '显示' }}
+          </svg>
+          <span class="snav__label">{{ TAB_LABELS[t] }}</span>
+        </button>
+      </nav>
+      <div id="setpane" class="pane__main" role="tabpanel" :aria-labelledby="`settab-${tab}`">
+
+        <!-- Gitee 同步：唯一会把凭据写进本机数据库的一页，所以先警告、后表单 -->
+        <template v-if="tab === 'sync'">
+          <div class="sect sect--first">
+            <h4 class="sect__t">凭据</h4>
+            <div class="callout callout--warn">
+              <tip-icon kind="warn" />
+              <strong>令牌明文存本机</strong>(IndexedDB 或 <code>.webvault/sync.json</code>),只发往
+              <code>gitee.com</code>。公用设备别填;单独建仓库、令牌只勾 <code>projects</code>,泄露也影响有限。
+            </div>
+
+            <!-- 首次准备步骤按需展开:常驻形态只留一行入口,打开才是完整四步 -->
+            <details class="disclose">
+              <summary class="disclose__sum">第一次使用?展开 4 步准备</summary>
+              <div class="steps">
+                <ol>
+                  <li>在 Gitee 新建一个<strong>私有</strong>仓库(例如 <code>my-vault</code>),里面至少提交一个文件,否则没有分支可推。</li>
+                  <li>打开 <code>gitee.com/profile/personal_access_tokens</code>,生成新令牌,勾选 <code>projects</code>。</li>
+                  <li>把令牌、用户名(空间地址)、仓库名、分支名填到下面,点「测试连接」。</li>
+                  <li>连接成功后点「立即同步」把远端笔记拉到本机。</li>
+                </ol>
+              </div>
+            </details>
+
+            <label class="frow">
+              <span class="frow__label">私人令牌 access token</span>
+              <span class="frow__ctl">
+                <span class="field__row">
+                  <input
+                    v-model="draft.token"
+                    class="field"
+                    :type="showToken ? 'text' : 'password'"
+                    placeholder="粘贴 Gitee 私人令牌"
+                    autocomplete="off"
+                    spellcheck="false"
+                  />
+                  <button class="btn btn--ghost" type="button" @click="showToken = !showToken">
+                    {{ showToken ? '隐藏' : '显示' }}
+                  </button>
+                </span>
+              </span>
+            </label>
+
+            <label class="frow" title="粘贴完整仓库地址会在保存时自动拆成三段">
+              <span class="frow__label">空间地址 owner<span class="frow__desc">用户名或组织;也可直接粘贴仓库地址</span></span>
+              <span class="frow__ctl">
+                <input v-model="draft.owner" class="field" placeholder="例如 zhangsan" autocomplete="off" spellcheck="false" />
+              </span>
+            </label>
+
+            <label class="frow">
+              <span class="frow__label">仓库名 repo</span>
+              <span class="frow__ctl">
+                <input v-model="draft.repo" class="field" placeholder="例如 my-vault" autocomplete="off" spellcheck="false" />
+              </span>
+            </label>
+
+            <label class="frow">
+              <span class="frow__label">分支 branch</span>
+              <span class="frow__ctl">
+                <input v-model="draft.branch" class="field" placeholder="master" autocomplete="off" spellcheck="false" />
+              </span>
+            </label>
+          </div>
+
+          <div class="sect">
+            <h4 class="sect__t">同步行为</h4>
+            <label class="frow">
+              <span class="frow__label">编辑后自动同步</span>
+              <span class="frow__ctl"><input v-model="draft.autoSync" type="checkbox" /></span>
+            </label>
+            <label class="frow" title="「停止输入多久后尝试上传」。设长一些能减少提交次数,避免把仓库塞满碎片提交。">
+              <span class="frow__label">推送延迟</span>
+              <span class="frow__ctl">
+                <!-- .number 必需：select 的值是字符串，落成数字后 debounce 才能直接参与毫秒运算 -->
+                <select v-model.number="draft.pushDelayMs" class="field field--select">
+                  <option v-for="d in DELAYS" :key="d.ms" :value="d.ms">{{ d.label }}</option>
+                </select>
+              </span>
+            </label>
+          </div>
+
+          <p v-if="sync.connectionInfo" class="field__tip" :class="{ 'field__error': sync.connectionInfo.startsWith('连接失败') }">
+            {{ sync.connectionInfo }}
+          </p>
+          <p v-if="error" class="field__error">{{ error }}</p>
+          <p v-if="saved" class="field__ok">已保存。</p>
+        </template>
+
+        <!-- AI：第二份明文凭据的一页，与同步页同款先警告、后表单的结构 -->
+        <template v-else-if="tab === 'ai'">
+          <div class="sect sect--first">
+            <h4 class="sect__t">预设</h4>
+            <div class="frow frow--wide">
+              <span class="frow__label">供应商预设<span class="frow__desc">只回填接口地址与模型名(可再改)。</span></span>
+              <span class="frow__ctl">
+                <button
+                  v-for="p in AI_PRESETS"
+                  :key="p.name"
+                  class="btn btn--ghost"
+                  type="button"
+                  @click="applyPreset(p)"
+                >
+                  {{ p.name }}
+                </button>
+                <button class="btn btn--ghost" type="button" @click="applyPreset(null)">自定义</button>
+              </span>
+            </div>
+          </div>
+
+          <div class="sect">
+            <h4 class="sect__t">连接</h4>
+            <div class="callout callout--warn">
+              <tip-icon kind="warn" />
+              <strong>Key 明文存本机</strong>(IndexedDB 或 <code>.webvault/ai.json</code>),只发往你填的接口地址;
+              笔记仅在你显式「引用笔记 / 存为笔记」时随请求发出。
+              导出 zip 自动抹空该字段;共享整个文件夹前请把 <code>ai.json</code> 一并清掉。
+            </div>
+
+            <label class="frow">
+              <span class="frow__label">接口地址 baseUrl<span class="frow__desc">OpenAI 兼容,自动补 /chat/completions</span></span>
+              <span class="frow__ctl">
+                <input
+                  v-model="aiDraft.baseUrl"
+                  class="field"
+                  placeholder="https://api.deepseek.com/v1"
+                  autocomplete="off"
+                  spellcheck="false"
+                />
+              </span>
+            </label>
+
+            <label class="frow">
+              <span class="frow__label">API Key</span>
+              <span class="frow__ctl">
+                <span class="field__row">
+                  <input
+                    v-model="aiDraft.apiKey"
+                    class="field"
+                    :type="showAiKey ? 'text' : 'password'"
+                    placeholder="粘贴 API Key"
+                    autocomplete="off"
+                    spellcheck="false"
+                  />
+                  <button class="btn btn--ghost" type="button" @click="showAiKey = !showAiKey">
+                    {{ showAiKey ? '隐藏' : '显示' }}
+                  </button>
+                </span>
+              </span>
+            </label>
+
+            <label class="frow">
+              <span class="frow__label">模型 model</span>
+              <span class="frow__ctl">
+                <input
+                  v-model="aiDraft.model"
+                  class="field"
+                  placeholder="例如 deepseek-chat"
+                  autocomplete="off"
+                  spellcheck="false"
+                />
+              </span>
+            </label>
+
+            <!-- 排查手册按需展开:报错时 client 的错误行本身就带 CORS 提示,这里是备用的完整版 -->
+            <details class="disclose">
+              <summary class="disclose__sum">报「网络失败 / CORS」?展开排查</summary>
+              <div class="disclose__body">
+                测试连接报「网络请求失败 / CORS」时,说明该供应商不允许浏览器跨域调用 ——
+                换一家允许跨域的供应商(本页的四个预设都可直接测),或自建一个中转地址。
+              </div>
+            </details>
+
+            <p v-if="aiInfo" class="field__tip" :class="aiOk ? 'field__ok' : 'field__error'">{{ aiInfo }}</p>
+            <p v-if="aiSaved" class="field__ok">已保存。</p>
+          </div>
+        </template>
+
+        <!-- 外观：点了就立即生效并直接写本机存储，没有草稿也没有保存按钮 -->
+        <template v-else-if="tab === 'appearance'">
+          <div class="sect sect--first">
+            <h4 class="sect__t">主题</h4>
+            <p class="sect__d tip--info">
+              <tip-icon kind="info" />
+              <span>点击立即生效;只存本机浏览器,不进同步、不影响笔记。</span>
+            </p>
+            <div class="themes">
+              <button
+                v-for="t in THEMES"
+                :key="t.id"
+                type="button"
+                class="theme"
+                :class="{ 'theme--on': appearance.theme === t.id }"
+                @click="appearance.setTheme(t.id)"
+              >
+                <span
+                  class="theme__mini"
+                  :data-theme-preview="t.id"
+                  :data-mode="t.mode"
+                  :data-accent="appearance.accent"
+                >
+                  <span class="theme__side"></span>
+                  <span class="theme__body"><i></i><i></i><i></i></span>
+                </span>
+                <span class="theme__name">{{ t.label }}</span>
+                <span class="theme__hint">{{ t.hint }}</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="sect">
+            <h4 class="sect__t">强调色</h4>
+            <p class="sect__d">用于链接、双链胶囊、选中态与图谱节点;浅色主题自动压深以保对比度。</p>
+            <div class="accents">
+              <button
+                v-for="a in ACCENTS"
+                :key="a.id"
+                type="button"
+                class="accent"
+                :class="{ 'accent--on': appearance.accent === a.id }"
+                :title="a.label"
+                @click="appearance.setAccent(a.id)"
+              >
+                <span class="accent__chip" :data-accent-preview="a.id"></span>
+                <span class="accent__name">{{ a.label }}</span>
+              </button>
+            </div>
+          </div>
+        </template>
+
+        <!-- 数据与日志：存储位置与绑定管理 + 只读统计 + 三个维护动作（重建索引、看同步日志、清空本机正文重来） -->
+        <template v-else-if="tab === 'data'">
+          <div class="sect sect--first">
+            <h4 class="sect__t">存储位置</h4>
+            <div class="callout">
+              <template v-if="vault.storageBackend === 'dir'">
+                <tip-icon kind="info" />
+                正文读写都在绑定目录 <strong>「{{ vault.storageDirName }}」</strong
+                >里,资源管理器可见、可备份。
+                <details class="disclose disclose--inline">
+                  <summary class="disclose__sum">索引与设置存在哪?会离开本机吗?</summary>
+                  <div class="disclose__body">
+                    索引与设置也以 JSON 文件存在该目录的 <code>.webvault/</code> 下,浏览器 IndexedDB 只是缓存 ——
+                    整个文件夹拷走即带走全部数据。这些数据都只在这台设备上,不会上传到本应用之外的任何服务器。
+                  </div>
+                </details>
+              </template>
+              <template v-else>
+                <tip-icon kind="warn" />
+                正文存在浏览器存储(OPFS),资源管理器看不到,<strong>清理站点数据会一起丢</strong>。
+                <details class="disclose disclose--inline">
+                  <summary class="disclose__sum">绑定一个本地目录后呢?</summary>
+                  <div class="disclose__body">
+                    指定一个本地目录后,笔记是磁盘上实打实的文件,索引与设置(<code>.webvault/</code> 下的 JSON)也一起落进去,
+                    整个文件夹拷走即带走全部数据。所有数据都只在这台设备上,不会上传到本应用之外的任何服务器。
+                  </div>
+                </details>
+              </template>
+            </div>
+            <div class="frow">
+              <span class="frow__label">本地目录</span>
+              <span class="frow__ctl">
+                <button class="btn" type="button" :disabled="dirBusy || !dirPickerOk" @click="chooseDirectory">
+                  {{ dirBusy ? '处理中…' : vault.storageBackend === 'dir' ? '换一个目录…' : '选择目录…' }}
+                </button>
+                <button
+                  v-if="vault.storageBackend === 'dir'"
+                  class="btn"
+                  :class="{ 'btn--danger': unbindArmed }"
+                  type="button"
+                  :disabled="dirBusy"
+                  @click="onUnbindClick"
+                >
+                  {{ unbindArmed ? '再点一次确认解除' : '解除绑定' }}
+                </button>
+                <button v-if="unbindArmed" class="btn btn--ghost" type="button" @click="disarm">取消</button>
+              </span>
+            </div>
+            <p v-if="!dirPickerOk" class="field__tip">当前浏览器不支持目录选择器,请改用 Chrome / Edge。</p>
+            <template v-else>
+              <details class="disclose">
+                <summary class="disclose__sum">绑定 / 解除时会发生什么?</summary>
+                <div class="disclose__body">
+                  绑定时会把现有笔记(含 <code>.webvault</code> 数据文件)复制进所选目录,推荐选一个空文件夹;目录里已有的同名文件不会被覆盖,
+                  差异以目录内容为准。解除绑定前会先把目录内容回写回内置存储。
+                </div>
+              </details>
+              <p class="field__tip tip--warn">
+                <tip-icon kind="warn" />
+                <span>token 明文写在 <code>.webvault/sync.json</code>,共享或备份文件夹前请先删。</span>
+              </p>
+            </template>
+            <p v-if="dirMsg" class="field__ok">{{ dirMsg }}</p>
+            <p v-if="error" class="field__error">{{ error }}</p>
+
+            <dl class="info">
+              <dt>笔记总数</dt>
+              <dd>{{ stats.total }}</dd>
+              <dt>正文已下载到本机</dt>
+              <dd>{{ stats.cached }} 篇(其余为仅索引,打开时按需下载)</dd>
+              <dt>待上传</dt>
+              <dd>{{ stats.pending }} 篇</dd>
+              <dt>正文存放</dt>
+              <dd>{{ backendLabel }}</dd>
+              <dt>索引与设置</dt>
+              <dd>
+                <code>.webvault/</code> 下的 11 个 JSON({{ vault.storageBackend === 'dir' ? '绑定目录内' : '内置存储内' }}),
+                浏览器 IndexedDB 仅作缓存
+              </dd>
+              <dt>本机存储占用</dt>
+              <dd>{{ usage }}</dd>
+              <template v-if="vault.storageBackend === 'opfs'">
+                <dt>持久化存储授权</dt>
+                <dd>
+                  <span :class="persisted ? 'field__ok' : 'field__error'">
+                    {{ persisted === null ? '检测中…' : persisted ? '已授权(不易被浏览器自动清理)' : '未授权' }}
+                  </span>
+                </dd>
+              </template>
+            </dl>
+          </div>
+
+          <div class="sect">
+            <h4 class="sect__t">维护</h4>
+            <div class="frow">
+              <span class="frow__label">导出备份 (zip)<span class="frow__desc">只读打包,凭据不进包</span></span>
+              <span class="frow__ctl">
+                <button class="btn" type="button" :disabled="exporting" @click="exportBackup">
+                  {{ exporting ? '打包中…' : '打包下载' }}
+                </button>
+              </span>
+            </div>
+            <p v-if="exportMsg" class="field__tip">{{ exportMsg }}</p>
+            <details class="disclose">
+              <summary class="disclose__sum">导出 zip 里有什么?</summary>
+              <div class="disclose__body">
+                把本机的全部笔记正文连同索引快照打成一个 zip 下载,包内保持原目录结构,解压即可直接阅读。
+                导出<strong>只读</strong>,不改动任何数据;<strong>Gitee token 等凭据不会写进包里</strong>。
+                浏览器有清理内置存储的可能,这是独立于 Gitee 的第二份副本。
+              </div>
+            </details>
+
+            <div class="frow">
+              <span class="frow__label">重建链接与标签索引<span class="frow__desc">从正文重新解析反链与标签,<strong>不改笔记内容</strong></span></span>
+              <span class="frow__ctl">
+                <button class="btn" type="button" :disabled="reindexing" @click="reindex">
+                  {{ reindexing ? '重建中…' : '重建索引' }}
+                </button>
+              </span>
+            </div>
+            <p v-if="reindexed !== null" class="field__tip">已重新解析 {{ reindexed }} 篇笔记。</p>
+          </div>
+
+          <div class="logs">
+            <div class="logs__head">
+              <span>同步日志(最近 120 条)</span>
+              <div class="logs__actions">
+                <button class="btn btn--ghost" type="button" @click="sync.refreshLog()">刷新</button>
+                <button class="btn btn--ghost" type="button" :disabled="sync.log.length === 0" @click="sync.clearLog()">
+                  清空
+                </button>
+              </div>
+            </div>
+            <ul v-if="sync.log.length > 0" class="logs__list">
+              <li v-for="row in sync.log" :key="row.id">
+                <span class="logs__level" :data-level="row.level">{{ row.level }}</span>
+                <span class="logs__at">{{ new Date(row.at).toLocaleString('zh-CN', { hour12: false }) }}</span>
+                <span class="logs__msg">{{ row.message }}</span>
+              </li>
+            </ul>
+            <p v-else class="field__tip">还没有同步记录。</p>
+          </div>
+
+          <div class="danger">
+            <p class="danger__title">清空本机正文并重新下载</p>
+            <p class="field__tip tip--warn">
+              <tip-icon kind="warn" />
+              <span>
+                删除本机全部正文并从 Gitee 完整重拉;<strong>未上传的修改会丢失</strong>,先确认「待上传」为 0。
+              </span>
+            </p>
+            <!-- 三个禁用条件缺一不可：未配置就没处可拉；还有待上传就等于删掉唯一一份未同步的修改；进行中防重复点。
+                 点击是两段式：第一次只上膛（文案变「再点一次」+ 危险配色 + 出现取消），第二次才执行。 -->
+            <button
+              class="btn"
+              :class="{ 'btn--danger': wipeArmed }"
+              type="button"
+              title="用于修复本机文件损坏,或补回被浏览器清掉的缓存"
+              :disabled="!settings.configured || stats.pending > 0 || wipeBusy"
+              @click="onWipeClick"
+            >
+              {{ wipeBusy ? '处理中…' : wipeArmed ? '再点一次确认清空' : '清空并重新下载' }}
             </button>
-          </span>
-        </label>
+            <button v-if="wipeArmed" class="btn btn--ghost" type="button" @click="disarm">取消</button>
+            <p v-if="stats.pending > 0" class="field__tip">当前有 {{ stats.pending }} 篇待上传,请先同步。</p>
+          </div>
+        </template>
 
-        <label class="field__wrap">
-          <span class="field__label">空间地址 owner(用户名或组织,也可直接粘贴仓库地址)</span>
-          <input v-model="draft.owner" class="field" placeholder="例如 zhangsan" autocomplete="off" spellcheck="false" />
-        </label>
+        <!-- 快捷键:上半截可改绑(录键),下半截是改不了的固定键与编辑器内建键 -->
+        <template v-else-if="tab === 'shortcuts'">
+          <div class="sect sect--first">
+            <h4 class="sect__t">可修改</h4>
+            <p class="sect__d tip--info">
+              <tip-icon kind="info" />
+              <span>
+                点「修改」后按新键;<code>Backspace</code> 解绑,<code>Esc</code> 取消。改动仅存本机。
+              </span>
+            </p>
+            <details class="disclose">
+              <summary class="disclose__sum">哪些键 / 组合不生效?</summary>
+              <div class="disclose__body">
+                不带主键的裸键(如 <code>?</code>)在输入框与正文里不会触发;
+                <code>Ctrl + N / T / W</code> 这类组合被浏览器占用,页面根本收不到。
+              </div>
+            </details>
 
-        <label class="field__wrap">
-          <span class="field__label">仓库名 repo</span>
-          <input v-model="draft.repo" class="field" placeholder="例如 my-vault" autocomplete="off" spellcheck="false" />
-        </label>
+            <ul class="binds">
+              <li v-for="c in SHORTCUT_COMMANDS" :key="c.id" class="binds__row">
+                <span class="binds__name">
+                  {{ c.label }}
+                  <em v-if="isChanged(c.id)" class="binds__def">默认 {{ displayOfBinding(c.default) }}</em>
+                </span>
+                <span class="binds__keys">
+                  <span v-if="recording === c.id" class="binds__rec">按下新组合键…</span>
+                  <kbd v-else-if="ui.bindings[c.id] !== ''" class="keys__cap">{{
+                    displayOfBinding(ui.bindings[c.id])
+                  }}</kbd>
+                  <span v-else class="binds__none">未绑定</span>
+                </span>
+                <button class="btn btn--ghost" type="button" @click="toggleRecord(c.id)">
+                  {{ recording === c.id ? '取消' : '修改' }}
+                </button>
+                <button
+                  v-if="isChanged(c.id)"
+                  class="btn btn--ghost"
+                  type="button"
+                  @click="ui.resetBinding(c.id)"
+                >恢复默认</button>
+              </li>
+            </ul>
+            <p v-if="recordError" class="field__error">{{ recordError }}</p>
+          </div>
 
-        <label class="field__wrap">
-          <span class="field__label">分支 branch</span>
-          <input v-model="draft.branch" class="field" placeholder="master" autocomplete="off" spellcheck="false" />
-        </label>
+          <div class="sect">
+            <h4 class="sect__t">改不了的按键</h4>
+            <details class="disclose">
+              <summary class="disclose__sum">为什么这些改不了?撞了会怎样?</summary>
+              <div class="disclose__body">
+                这些是应用交互与编辑器内核(Vditor)的内置行为,不参与改绑;标题、表格两组只在光标落进对应块时生效。
+                若把上面的快捷键设成同样的组合,两者会同时触发。
+              </div>
+            </details>
+
+            <!-- 每组一个区块:左列键帽右对齐成一栏,右列说明——从上往下扫,不用来回找键 -->
+            <section v-for="g in FIXED_SHORTCUTS" :key="g.group" class="keys">
+              <h5 class="keys__group">{{ g.group }}</h5>
+              <ul class="keys__list">
+                <li v-for="(row, i) in g.rows" :key="i" class="keys__row">
+                  <span class="keys__caps">
+                    <template v-for="(cap, j) in row.keys" :key="j">
+                      <span v-if="j > 0" class="keys__plus">+</span>
+                      <kbd class="keys__cap">{{ cap }}</kbd>
+                    </template>
+                  </span>
+                  <span class="keys__desc">{{ row.desc }}</span>
+                </li>
+              </ul>
+            </section>
+          </div>
+        </template>
+
+        <!-- 关于:纯静态文案,兜底分支,列出不支持项以免用户误以为丢数据 -->
+        <template v-else>
+          <p class="about">
+            WebVault 是一个纯静态的单页应用:笔记是你的普通 <code>.md</code>
+            文件,存在本机浏览器里,通过你自己的 Gitee 仓库在设备之间同步。没有账号系统,没有服务器,没有人能看到你的笔记。
+          </p>
+
+          <div class="sect">
+            <h4 class="sect__t">装到桌面 / 手机</h4>
+            <ul class="plain">
+              <li><strong>桌面 Chrome / Edge:</strong>地址栏右侧会出现安装图标,点一下即可作为独立窗口应用运行。</li>
+              <li><strong>Android Chrome:</strong>菜单 →「安装应用」或「添加到主屏幕」。</li>
+              <li>
+                <strong>iOS Safari:</strong>分享按钮 →「添加到主屏幕」。<em>必须这样做</em>,否则 Safari
+                的防跟踪策略会在约 7 天不用之后清空本机笔记缓存。装到主屏幕后仍可能被清,应用会在启动时检测并自动从 Gitee 恢复。
+              </li>
+            </ul>
+          </div>
+
+          <div class="sect">
+            <h4 class="sect__t">已知限制</h4>
+            <ul class="plain">
+              <li>附件(图片等)只会被索引为链接,暂不支持在编辑器里预览或上传。</li>
+              <li>即时渲染模式会在首次编辑时规范化部分 Markdown 语法(列表符号、空行等),这是编辑器内核的行为。</li>
+              <li>与 Obsidian 桌面版可以共用同一个 git 仓库,但 iOS 版 Obsidian 没有 git 同步,无法直接互通。</li>
+              <li>本地与远端同时改了同一篇笔记时:能自动合并的部分会合并,合不了的会保留本地版本,并把远端版本另存为
+                <code>标题.conflict-时间戳.md</code>,两个文件都会上传。<strong>不会</strong>在正文里插入冲突标记。</li>
+            </ul>
+          </div>
+        </template>
       </div>
-      <p class="field__tip">
-        owner / repo 里直接粘贴 <code>gitee.com/&lt;owner&gt;/&lt;repo&gt;</code> 的完整地址也可以,保存时会自动拆成三段。
-      </p>
+    </div>
 
-      <div class="row">
-        <label class="check">
-          <input v-model="draft.autoSync" type="checkbox" />
-          <span>编辑后自动同步</span>
-        </label>
-        <label class="check">
-          <span class="check__label">推送延迟</span>
-          <!-- .number 必需：select 的值是字符串，落成数字后 debounce 才能直接参与毫秒运算 -->
-          <select v-model.number="draft.pushDelayMs" class="field field--select">
-            <option v-for="d in DELAYS" :key="d.ms" :value="d.ms">{{ d.label }}</option>
-          </select>
-        </label>
-      </div>
-      <p class="field__tip">
-        推送延迟是「停止输入多久后尝试上传」。设长一些能减少提交次数,避免把仓库塞满碎片提交。
-      </p>
-
-      <p v-if="sync.connectionInfo" class="field__tip" :class="{ 'field__error': sync.connectionInfo.startsWith('连接失败') }">
-        {{ sync.connectionInfo }}
-      </p>
-      <p v-if="error" class="field__error">{{ error }}</p>
-      <p v-if="saved" class="field__ok">已保存。</p>
-
-      <div class="row row--end">
+    <!-- 动作收进 footer:左侧脏提示、右侧按页渲染动作,「关闭」恒在最右 —— 与主流设置面板一致 -->
+    <template #footer>
+      <span v-if="footDirty" class="foot__dirty"><i aria-hidden="true"></i>有未保存的更改</span>
+      <span class="spacer"></span>
+      <template v-if="tab === 'sync'">
         <button class="btn" type="button" :disabled="!dirty" @click="save">保存</button>
         <button class="btn" type="button" @click="test">测试连接</button>
         <button
@@ -668,409 +1186,185 @@ onMounted(() => {
         >
           {{ sync.syncing ? '同步中…' : '立即同步' }}
         </button>
-      </div>
-      <p class="field__tip">同步中会显示进度;失败时具体原因会写在「数据与日志」标签页。</p>
-    </template>
-
-    <!-- AI：第二份明文凭据的一页，与同步页同款先警告、后表单的结构 -->
-    <template v-else-if="tab === 'ai'">
-      <div class="callout callout--warn">
-        <strong>先看清楚:</strong> API Key 会<strong>明文</strong>保存在本机(未绑定目录时是浏览器数据库
-        <code>IndexedDB</code>,绑定后写入正文目录的 <code>.webvault/ai.json</code>),
-        <strong>只会发往下面你填写的接口地址</strong>。本项目是纯静态应用、没有后端,
-        笔记内容只有在你显式「引用笔记 / 存为笔记」时才会作为请求的一部分发给该地址。
-        导出备份时这个字段会被自动抹空;共享整个文件夹前请把 <code>ai.json</code> 一并清掉。
-      </div>
-
-      <div class="row">
-        <button
-          v-for="p in AI_PRESETS"
-          :key="p.name"
-          class="btn btn--ghost"
-          type="button"
-          @click="applyPreset(p)"
-        >
-          {{ p.name }}
-        </button>
-        <button class="btn btn--ghost" type="button" @click="applyPreset(null)">自定义</button>
-      </div>
-      <p class="field__tip">
-        预设只回填接口地址与一个可用的模型名建议(都能再改),能不能用以「测试连接」为准。
-      </p>
-
-      <div class="grid">
-        <label class="field__wrap">
-          <span class="field__label">接口地址 baseUrl(OpenAI 兼容,自动补 /chat/completions)</span>
-          <input
-            v-model="aiDraft.baseUrl"
-            class="field"
-            placeholder="https://api.deepseek.com/v1"
-            autocomplete="off"
-            spellcheck="false"
-          />
-        </label>
-
-        <label class="field__wrap">
-          <span class="field__label">API Key</span>
-          <span class="field__row">
-            <input
-              v-model="aiDraft.apiKey"
-              class="field"
-              :type="showAiKey ? 'text' : 'password'"
-              placeholder="粘贴 API Key"
-              autocomplete="off"
-              spellcheck="false"
-            />
-            <button class="btn btn--ghost" type="button" @click="showAiKey = !showAiKey">
-              {{ showAiKey ? '隐藏' : '显示' }}
-            </button>
-          </span>
-        </label>
-
-        <label class="field__wrap">
-          <span class="field__label">模型 model</span>
-          <input
-            v-model="aiDraft.model"
-            class="field"
-            placeholder="例如 deepseek-chat"
-            autocomplete="off"
-            spellcheck="false"
-          />
-        </label>
-      </div>
-      <p class="field__tip">
-        测试连接报「网络请求失败 / CORS」时,说明该供应商不允许浏览器跨域调用 ——
-        换一家允许跨域的供应商(设置页顶部的四个预设都可直接测),或自建一个中转地址。
-      </p>
-
-      <p v-if="aiInfo" class="field__tip" :class="aiOk ? 'field__ok' : 'field__error'">{{ aiInfo }}</p>
-      <p v-if="aiSaved" class="field__ok">已保存。</p>
-
-      <div class="row row--end">
+      </template>
+      <template v-else-if="tab === 'ai'">
         <button class="btn" type="button" :disabled="!aiDirty" @click="saveAi">保存</button>
-        <button class="btn btn--primary" type="button" :disabled="aiBusy" @click="testAi">
+        <button
+          class="btn btn--primary"
+          type="button"
+          title="直接用当前输入探活,不会先保存;试通了再点保存"
+          :disabled="aiBusy"
+          @click="testAi"
+        >
           {{ aiBusy ? '测试中…' : '测试连接' }}
         </button>
-      </div>
-      <p class="field__tip">
-        与同步不同,测试连接<strong>不会</strong>先保存 —— 直接用当前输入探活,试通了再点保存。
-      </p>
-    </template>
-
-    <!-- 外观：点了就立即生效并直接写本机存储，没有草稿也没有保存按钮 -->
-    <template v-else-if="tab === 'appearance'">
-      <p class="field__tip appearance__tip">
-        点了立即生效,不用保存。选择只写在这台设备的浏览器里,不会同步到 Gitee,也不会影响笔记内容。
-      </p>
-
-      <h4 class="sub sub--first">主题</h4>
-      <div class="themes">
-        <button
-          v-for="t in THEMES"
-          :key="t.id"
-          type="button"
-          class="theme"
-          :class="{ 'theme--on': appearance.theme === t.id }"
-          @click="appearance.setTheme(t.id)"
-        >
-          <span
-            class="theme__mini"
-            :data-theme-preview="t.id"
-            :data-mode="t.mode"
-            :data-accent="appearance.accent"
-          >
-            <span class="theme__side"></span>
-            <span class="theme__body"><i></i><i></i><i></i></span>
-          </span>
-          <span class="theme__name">{{ t.label }}</span>
-          <span class="theme__hint">{{ t.hint }}</span>
-        </button>
-      </div>
-
-      <h4 class="sub">强调色</h4>
-      <div class="accents">
-        <button
-          v-for="a in ACCENTS"
-          :key="a.id"
-          type="button"
-          class="accent"
-          :class="{ 'accent--on': appearance.accent === a.id }"
-          :title="a.label"
-          @click="appearance.setAccent(a.id)"
-        >
-          <span class="accent__chip" :data-accent-preview="a.id"></span>
-          <span class="accent__name">{{ a.label }}</span>
-        </button>
-      </div>
-      <p class="field__tip">
-        强调色用于链接、双链胶囊、选中态和关系图谱的节点。浅色主题会自动把强调色压深,保证小字号文本的对比度。
-      </p>
-    </template>
-
-    <!-- 数据与日志：存储位置与绑定管理 + 只读统计 + 三个维护动作（重建索引、看同步日志、清空本机正文重来） -->
-    <template v-else-if="tab === 'data'">
-      <h4 class="sub sub--first">正文存储位置</h4>
-      <div class="callout">
-        <template v-if="vault.storageBackend === 'dir'">
-          正文读写都落在绑定的目录 <strong>「{{ vault.storageDirName }}」</strong
-          >里:资源管理器可见、可备份、可被其他编辑器修改。索引与设置也以 JSON 文件存在该目录的
-          <code>.webvault/</code> 下,浏览器 IndexedDB 只是缓存 —— 整个文件夹拷走即带走全部数据。
-          这些数据都只在这台设备上,不会上传到本应用之外的任何服务器。
-        </template>
-        <template v-else>
-          正文以明文 <code>.md</code> 存在浏览器内置存储(OPFS),资源管理器看不到,浏览器清理站点数据会一起丢。
-          指定一个本地目录后,笔记是磁盘上实打实的文件,索引与设置(<code>.webvault/</code> 下的 JSON)也一起落进去,
-          整个文件夹拷走即带走全部数据。所有数据都只在这台设备上,不会上传到本应用之外的任何服务器。
-        </template>
-      </div>
-      <div class="row">
-        <button class="btn" type="button" :disabled="dirBusy || !dirPickerOk" @click="chooseDirectory">
-          {{ dirBusy ? '处理中…' : vault.storageBackend === 'dir' ? '换一个目录…' : '选择目录…' }}
-        </button>
-        <button
-          v-if="vault.storageBackend === 'dir'"
-          class="btn"
-          :class="{ 'btn--danger': unbindArmed }"
-          type="button"
-          :disabled="dirBusy"
-          @click="onUnbindClick"
-        >
-          {{ unbindArmed ? '再点一次确认解除' : '解除绑定' }}
-        </button>
-        <button v-if="unbindArmed" class="btn btn--ghost" type="button" @click="disarm">取消</button>
-      </div>
-      <p v-if="!dirPickerOk" class="field__tip">当前浏览器不支持目录选择器,请改用 Chrome / Edge。</p>
-      <p v-else class="field__tip">
-        绑定时会把现有笔记(含 <code>.webvault</code> 数据文件)复制进所选目录,推荐选一个空文件夹;目录里已有的同名文件不会被覆盖,
-        差异以目录内容为准。解除绑定前会先把目录内容回写回内置存储。
-        <code>.webvault/sync.json</code> 里的 Gitee token 是明文,共享或备份文件夹前请留意。
-      </p>
-      <p v-if="dirMsg" class="field__ok">{{ dirMsg }}</p>
-      <p v-if="error" class="field__error">{{ error }}</p>
-
-      <dl class="info">
-        <dt>笔记总数</dt>
-        <dd>{{ stats.total }}</dd>
-        <dt>正文已下载到本机</dt>
-        <dd>{{ stats.cached }} 篇(其余为仅索引,打开时按需下载)</dd>
-        <dt>待上传</dt>
-        <dd>{{ stats.pending }} 篇</dd>
-        <dt>正文存放</dt>
-        <dd>{{ backendLabel }}</dd>
-        <dt>索引与设置</dt>
-        <dd>
-          <code>.webvault/</code> 下的 11 个 JSON({{ vault.storageBackend === 'dir' ? '绑定目录内' : '内置存储内' }}),
-          浏览器 IndexedDB 仅作缓存
-        </dd>
-        <dt>本机存储占用</dt>
-        <dd>{{ usage }}</dd>
-        <template v-if="vault.storageBackend === 'opfs'">
-          <dt>持久化存储授权</dt>
-          <dd>
-            <span :class="persisted ? 'field__ok' : 'field__error'">
-              {{ persisted === null ? '检测中…' : persisted ? '已授权(不易被浏览器自动清理)' : '未授权' }}
-            </span>
-          </dd>
-        </template>
-      </dl>
-
-      <div class="row">
-        <button class="btn" type="button" :disabled="exporting" @click="exportBackup">
-          {{ exporting ? '打包中…' : '导出备份 (zip)' }}
-        </button>
-        <span v-if="exportMsg" class="field__tip">{{ exportMsg }}</span>
-      </div>
-      <p class="field__tip">
-        把本机的全部笔记正文连同索引快照打成一个 zip 下载,包内保持原目录结构,解压即可直接阅读。
-        导出<strong>只读</strong>,不改动任何数据;<strong>Gitee token 等凭据不会写进包里</strong>。
-        浏览器有清理内置存储的可能,这是独立于 Gitee 的第二份副本。
-      </p>
-
-      <div class="row">
-        <button class="btn" type="button" :disabled="reindexing" @click="reindex">
-          {{ reindexing ? '重建中…' : '重建链接与标签索引' }}
-        </button>
-        <span v-if="reindexed !== null" class="field__tip">已重新解析 {{ reindexed }} 篇笔记。</span>
-      </div>
-      <p class="field__tip">
-        当反链、待创建列表或标签明显不对时,可以用这个按钮从正文重新解析一遍,不会改动任何笔记内容。
-      </p>
-
-      <div class="logs">
-        <div class="logs__head">
-          <span>同步日志(最近 120 条)</span>
-          <div class="logs__actions">
-            <button class="btn btn--ghost" type="button" @click="sync.refreshLog()">刷新</button>
-            <button class="btn btn--ghost" type="button" :disabled="sync.log.length === 0" @click="sync.clearLog()">
-              清空
-            </button>
-          </div>
-        </div>
-        <ul v-if="sync.log.length > 0" class="logs__list">
-          <li v-for="row in sync.log" :key="row.id">
-            <span class="logs__level" :data-level="row.level">{{ row.level }}</span>
-            <span class="logs__at">{{ new Date(row.at).toLocaleString('zh-CN', { hour12: false }) }}</span>
-            <span class="logs__msg">{{ row.message }}</span>
-          </li>
-        </ul>
-        <p v-else class="field__tip">还没有同步记录。</p>
-      </div>
-
-      <div class="danger">
-        <p class="danger__title">清空本机正文并重新下载</p>
-        <p class="field__tip">
-          用于修复本机文件损坏,或把 Safari 清空的缓存补回来。会先删除本机所有笔记正文,再从 Gitee
-          仓库完整拉取。<strong>未上传的本地修改会丢失</strong>,请先确认「待上传」为 0。
-        </p>
-        <!-- 三个禁用条件缺一不可：未配置就没处可拉；还有待上传就等于删掉唯一一份未同步的修改；进行中防重复点。
-             点击是两段式：第一次只上膛（文案变「再点一次」+ 危险配色 + 出现取消），第二次才执行。 -->
-        <button
-          class="btn"
-          :class="{ 'btn--danger': wipeArmed }"
-          type="button"
-          :disabled="!settings.configured || stats.pending > 0 || wipeBusy"
-          @click="onWipeClick"
-        >
-          {{ wipeBusy ? '处理中…' : wipeArmed ? '再点一次确认清空' : '清空并重新下载' }}
-        </button>
-        <button v-if="wipeArmed" class="btn btn--ghost" type="button" @click="disarm">取消</button>
-        <p v-if="stats.pending > 0" class="field__tip">当前有 {{ stats.pending }} 篇待上传,请先同步。</p>
-      </div>
-    </template>
-
-    <!-- 快捷键:上半截可改绑(录键),下半截是改不了的固定键与编辑器内建键 -->
-    <template v-else-if="tab === 'shortcuts'">
-      <p class="field__tip">
-        点「修改」后直接按下新的组合键;<code>Backspace</code> 解绑,<code>Esc</code> 取消录制。
-        改动只存这台设备,不进同步。不带主键的裸键(如 <code>?</code>)在输入框与正文里不会触发;
-        <code>Ctrl + N / T / W</code> 这类组合被浏览器占用,页面根本收不到。
-      </p>
-
-      <h4 class="sub sub--first">可修改</h4>
-      <ul class="binds">
-        <li v-for="c in SHORTCUT_COMMANDS" :key="c.id" class="binds__row">
-          <span class="binds__name">
-            {{ c.label }}
-            <em v-if="isChanged(c.id)" class="binds__def">默认 {{ displayOfBinding(c.default) }}</em>
-          </span>
-          <span class="binds__keys">
-            <span v-if="recording === c.id" class="binds__rec">按下新组合键…</span>
-            <kbd v-else-if="ui.bindings[c.id] !== ''" class="keys__cap">{{
-              displayOfBinding(ui.bindings[c.id])
-            }}</kbd>
-            <span v-else class="binds__none">未绑定</span>
-          </span>
-          <button class="btn btn--ghost" type="button" @click="toggleRecord(c.id)">
-            {{ recording === c.id ? '取消' : '修改' }}
-          </button>
-          <button
-            v-if="isChanged(c.id)"
-            class="btn btn--ghost"
-            type="button"
-            @click="ui.resetBinding(c.id)"
-          >恢复默认</button>
-        </li>
-      </ul>
-      <p v-if="recordError" class="field__error">{{ recordError }}</p>
-
-      <h4 class="sub">改不了的按键</h4>
-      <p class="field__tip">
-        这些是应用交互与编辑器内核(Vditor)的内置行为,不参与改绑;标题、表格两组只在光标落进对应块时生效。
-        若把上面的快捷键设成同样的组合,两者会同时触发。
-      </p>
-
-      <!-- 每组一个区块:左列键帽右对齐成一栏,右列说明——从上往下扫,不用来回找键 -->
-      <section v-for="g in FIXED_SHORTCUTS" :key="g.group" class="keys">
-        <h5 class="keys__group">{{ g.group }}</h5>
-        <ul class="keys__list">
-          <li v-for="(row, i) in g.rows" :key="i" class="keys__row">
-            <span class="keys__caps">
-              <template v-for="(cap, j) in row.keys" :key="j">
-                <span v-if="j > 0" class="keys__plus">+</span>
-                <kbd class="keys__cap">{{ cap }}</kbd>
-              </template>
-            </span>
-            <span class="keys__desc">{{ row.desc }}</span>
-          </li>
-        </ul>
-      </section>
-    </template>
-
-    <!-- 关于:纯静态文案,兜底分支,列出不支持项以免用户误以为丢数据 -->
-    <template v-else>
-      <p class="about">
-        WebVault 是一个纯静态的单页应用:笔记是你的普通 <code>.md</code>
-        文件,存在本机浏览器里,通过你自己的 Gitee 仓库在设备之间同步。没有账号系统,没有服务器,没有人能看到你的笔记。
-      </p>
-
-      <h4 class="sub">装到桌面 / 手机</h4>
-      <ul class="plain">
-        <li><strong>桌面 Chrome / Edge:</strong>地址栏右侧会出现安装图标,点一下即可作为独立窗口应用运行。</li>
-        <li><strong>Android Chrome:</strong>菜单 →「安装应用」或「添加到主屏幕」。</li>
-        <li>
-          <strong>iOS Safari:</strong>分享按钮 →「添加到主屏幕」。<em>必须这样做</em>,否则 Safari
-          的防跟踪策略会在约 7 天不用之后清空本机笔记缓存。装到主屏幕后仍可能被清,应用会在启动时检测并自动从 Gitee 恢复。
-        </li>
-      </ul>
-
-      <h4 class="sub">已知限制</h4>
-      <ul class="plain">
-        <li>附件(图片等)只会被索引为链接,暂不支持在编辑器里预览或上传。</li>
-        <li>即时渲染模式会在首次编辑时规范化部分 Markdown 语法(列表符号、空行等),这是编辑器内核的行为。</li>
-        <li>与 Obsidian 桌面版可以共用同一个 git 仓库,但 iOS 版 Obsidian 没有 git 同步,无法直接互通。</li>
-        <li>本地与远端同时改了同一篇笔记时:能自动合并的部分会合并,合不了的会保留本地版本,并把远端版本另存为
-          <code>标题.conflict-时间戳.md</code>,两个文件都会上传。<strong>不会</strong>在正文里插入冲突标记。</li>
-      </ul>
-    </template>
-
-    <template #footer>
-      <span class="spacer"></span>
+      </template>
       <button class="btn" type="button" @click="emit('close')">关闭</button>
     </template>
   </Modal>
 </template>
 
 <style scoped>
-/* 负上 margin：抵掉 Modal 内容区的内边距，让导航条贴着弹窗顶部形成一条分隔线 */
-.tabs {
-  display: flex;
-  gap: 4px;
-  margin: -4px 0 14px;
-  padding-bottom: 10px;
-  border-bottom: 1px solid var(--border);
+/* —— 左导航 + 右内容：导航 sticky 贴顶、不随正文滚；窄屏(640px)塌成横排 chip —— */
+.pane {
+  display: grid;
+  grid-template-columns: 150px 1fr;
 }
 
-.tabs__btn {
-  padding: 5px 11px;
+.snav {
+  position: sticky;
+  /* 负值贴齐 Modal body 的 16px 内边距，滚动时导航条不露底色 */
+  top: -16px;
+  align-self: start;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 10px 8px 0;
+}
+
+.snav__btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 10px;
   border-radius: 7px;
   font-size: 12.5px;
   color: var(--text-muted);
+  text-align: left;
 }
 
-.tabs__btn:hover {
+.snav__btn:hover {
   background: var(--bg-hover);
   color: var(--text);
 }
 
-.tabs__btn--on {
+.snav__btn--on {
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  font-weight: 500;
+}
+
+/* 选中项必须自己盖过 hover：否则 .snav__btn:hover 用 --bg-hover 压掉 --on 的淡底，
+   鼠标移上去像是高亮丢了（与 SideBar 同样的处理） */
+.snav__btn--on:hover {
   background: var(--accent-soft);
   color: var(--accent-text);
 }
 
-/* 选中页签必须自己盖过 hover：否则 .tabs__btn:hover(0,2,0) 会用 --bg-hover
-   压掉 --on(0,1,0) 的淡底，鼠标移上去像是高亮丢了（与 SideBar 同样的处理） */
-.tabs__btn--on:hover {
-  background: var(--accent-soft);
-  color: var(--accent-text);
+.snav__ico {
+  flex: none;
 }
 
-/* —— 提示块与首次使用步骤 —— */
+.pane__main {
+  min-width: 0; /* 防长串令牌 / 日志把 1fr 列撑破 */
+  padding-left: 18px;
+  border-left: 1px solid var(--border);
+}
+
+/* —— 分节：每页 2–4 个小节，标题给层级、说明挨着标题走 —— */
+.sect {
+  margin-top: 20px;
+}
+
+.sect--first {
+  margin-top: 0;
+}
+
+.sect__t {
+  margin: 0 0 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.sect__d {
+  margin: 0 0 10px;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--text-muted);
+}
+
+.sect__d code {
+  padding: 0 4px;
+  border-radius: 4px;
+  background: var(--bg-hover);
+  color: var(--accent);
+}
+
+.sect__d strong {
+  color: var(--text);
+}
+
+/* —— 行式表单：左标签、右控件，行间细分隔线；控件列定宽，整页控件右缘对齐成一条线 —— */
+.frow {
+  display: grid;
+  grid-template-columns: minmax(150px, 1fr) minmax(240px, 340px);
+  gap: 16px;
+  align-items: center;
+  padding: 11px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.frow:last-child {
+  border-bottom: none;
+}
+
+/* 宽行：按钮组这类放不进 340px 列的控件；右缘仍对齐，放不下就换行 */
+.frow--wide {
+  grid-template-columns: minmax(150px, 1fr) auto;
+}
+
+.frow__label {
+  font-size: 13px;
+  color: var(--text);
+}
+
+/* 标签自带的补注：下沉到标签下方，不挤占控件列 */
+.frow__desc {
+  display: block;
+  margin-top: 3px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-muted);
+}
+
+.frow__desc strong {
+  color: var(--text);
+}
+
+.frow__ctl {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: 0;
+}
+
+/* 输入类撑满控件列；按钮保持内容宽、不被压扁 */
+.frow__ctl .field,
+.frow__ctl .field__row {
+  flex: 1;
+  min-width: 0;
+}
+
+.frow__ctl .btn {
+  flex: none;
+}
+
+.frow__ctl input[type='checkbox'] {
+  width: 16px;
+  height: 16px;
+}
+
+/* —— 提示块：图标置顶、语义淡底的圆角卡片；扫读顺序是图标 → 加粗结论 → 正文 —— */
 .callout {
-  margin: 0 0 14px;
-  padding: 10px 12px;
-  border-radius: 8px;
-  border-left: 3px solid var(--accent);
-  background: var(--bg);
+  margin: 0 0 12px;
+  padding: 11px 13px;
+  border-radius: 9px;
+  border: 1px solid color-mix(in srgb, var(--accent) 26%, var(--border));
+  background: color-mix(in srgb, var(--accent) 7%, var(--bg-elevated));
   font-size: 12.5px;
   line-height: 1.75;
   color: var(--text-muted);
@@ -1088,21 +1382,47 @@ onMounted(() => {
 }
 
 .callout--warn {
-  border-left-color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 34%, var(--border));
+  background: color-mix(in srgb, var(--warn) 9%, var(--bg-elevated));
+}
+
+/* 图标独占一行置顶：callout 是块级扫读，不与正文抢行 */
+.callout .tip__ico {
+  display: block;
+  margin: 0 0 6px;
+}
+
+/* —— 提示分级:⚠ 警告 / ⓘ 说明 —— 图标只是扫读锚点,语义仍由旁边的文字承载 —— */
+.tip__ico {
+  flex: none;
+}
+
+/* 颜色按图标 kind 走,与它所在的容器无关(TipIcon 的 class 决定) */
+.tip__ico--warn {
+  color: var(--warn);
+}
+
+.tip__ico--info {
+  color: var(--text-muted);
+}
+
+.tip--warn,
+.tip--info {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.tip--warn .tip__ico,
+.tip--info .tip__ico {
+  margin-top: 2px;
 }
 
 .steps {
-  margin: 0 0 16px;
+  margin: 6px 0 0;
   padding: 10px 12px;
   border-radius: 8px;
   background: var(--bg);
-}
-
-.steps__title {
-  margin: 0 0 6px;
-  font-size: 12.5px;
-  font-weight: 600;
-  color: var(--text);
 }
 
 .steps ol {
@@ -1120,24 +1440,71 @@ onMounted(() => {
   color: var(--accent);
 }
 
-/* min-width:0 必需：网格子项默认最小宽度是内容宽度，粘贴一长串令牌会把对话框撑破 */
-.grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
-  gap: 12px;
-  margin-bottom: 14px;
-}
-
-.field__wrap {
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-  min-width: 0;
-}
-
-.field__label {
-  font-size: 12px;
+/* —— 折叠件:原生 <details>,零 JS、键盘可达、开合语义由浏览器暴露给读屏 —— */
+.disclose {
+  margin: -4px 0 14px;
+  font-size: 12.5px;
+  line-height: 1.75;
   color: var(--text-muted);
+}
+
+.disclose__sum {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 3px 0;
+  list-style: none;
+  cursor: pointer;
+  font-weight: 500;
+  color: var(--text);
+}
+
+/* 三种写法各盖一个引擎:marker 清零(Chromium)、display:flex 摘掉 list-item(部分 Firefox)、
+   webkit 伪元素(Safari 旧版);缺一个就有一处露出浏览器默认的 ▸ */
+.disclose__sum::marker {
+  content: '';
+}
+
+.disclose__sum::-webkit-details-marker {
+  display: none;
+}
+
+/* 关合箭头:只画右、下两条边框,rotate(-45deg) 指右、rotate(45deg) 指下 */
+.disclose__sum::before {
+  content: '';
+  flex: none;
+  width: 4px;
+  height: 4px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(-45deg);
+  transition: transform 0.15s ease;
+}
+
+.disclose[open] .disclose__sum::before {
+  transform: rotate(45deg);
+}
+
+/* 正文左缩进 + 细线,表达「这是从属于摘要的展开内容」 */
+.disclose__body {
+  padding: 5px 0 0 14px;
+  border-left: 2px solid var(--border);
+}
+
+.disclose code {
+  padding: 0 4px;
+  border-radius: 4px;
+  background: var(--bg-hover);
+  color: var(--accent);
+}
+
+.disclose strong {
+  color: var(--text);
+}
+
+/* callout 内嵌的折叠件:去掉外边距,摘要颜色跟随 callout 的行内节奏 */
+.disclose--inline {
+  margin: 7px 0 0;
 }
 
 .field__row {
@@ -1164,33 +1531,6 @@ onMounted(() => {
 
 .field--select {
   width: auto;
-}
-
-.row {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  flex-wrap: wrap;
-  margin-bottom: 8px;
-}
-
-.row--end {
-  justify-content: flex-end;
-  gap: 8px;
-  margin-top: 14px;
-}
-
-.check {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 13px;
-  cursor: pointer;
-}
-
-.check__label {
-  font-size: 12.5px;
-  color: var(--text-muted);
 }
 
 .field__tip {
@@ -1274,16 +1614,23 @@ onMounted(() => {
   color: var(--text-muted);
 }
 
-/* —— 键值统计表（数据页统计） —— */
+/* —— 键值统计表（数据页统计）：列宽与 .frow 一致，值落在控件列里，整页右缘对齐 —— */
 .info {
   display: grid;
-  grid-template-columns: max-content 1fr;
-  gap: 6px 14px;
-  margin: 0 0 14px;
+  grid-template-columns: minmax(150px, 1fr) minmax(240px, 340px);
+  gap: 0 16px;
+  margin: 4px 0 0;
   font-size: 13px;
 }
 
+.info dt,
+.info dd {
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+
 .info dt {
+  align-self: center;
   color: var(--text-muted);
   font-size: 12.5px;
 }
@@ -1292,11 +1639,14 @@ onMounted(() => {
   margin: 0;
 }
 
-/* —— 同步日志 —— */
+.info dt:last-of-type,
+.info dd:last-of-type {
+  border-bottom: none;
+}
+
+/* —— 同步日志：head 即小节标题（与 .sect__t 同字号），间距靠 margin-top 对齐分节节奏 —— */
 .logs {
-  margin-top: 16px;
-  padding-top: 12px;
-  border-top: 1px dashed var(--border);
+  margin-top: 20px;
 }
 
 .logs__head {
@@ -1304,7 +1654,7 @@ onMounted(() => {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  font-size: 12.5px;
+  font-size: 13px;
   font-weight: 600;
   color: var(--text);
 }
@@ -1368,11 +1718,11 @@ onMounted(() => {
   word-break: break-all;
 }
 
-/* —— 危险区：清空本机正文 —— */
+/* —— 危险区：清空本机正文；独立卡片沉底，间距与 .sect 节奏一致 —— */
 .danger {
-  margin-top: 18px;
-  padding: 12px;
-  border-radius: 8px;
+  margin-top: 20px;
+  padding: 13px;
+  border-radius: 9px;
   border: 1px solid var(--danger-line);
   background: var(--danger-soft);
 }
@@ -1396,20 +1746,6 @@ onMounted(() => {
   border-radius: 4px;
   background: var(--bg-hover);
   color: var(--accent);
-}
-
-.sub {
-  margin: 16px 0 6px;
-  font-size: 13px;
-  font-weight: 600;
-}
-
-.appearance__tip {
-  margin-top: 0;
-}
-
-.sub--first {
-  margin-top: 4px;
 }
 
 /* —— 外观页：主题缩略卡与强调色色块 —— */
@@ -1578,9 +1914,10 @@ onMounted(() => {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 5px 0;
+  padding: 10px 0;
   font-size: 12.5px;
-  border-bottom: 1px dashed var(--border);
+  /* 与 .frow 同款细分隔线：整页只有一种行分隔语汇 */
+  border-bottom: 1px solid var(--border);
 }
 
 .binds__row:last-child {
@@ -1688,7 +2025,70 @@ onMounted(() => {
   color: var(--text-muted);
 }
 
+/* footer 左侧的脏状态：琥珀小圆点 + 短文案，比按钮 disabled 更早告诉用户「有东西没存」 */
+.foot__dirty {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--warn);
+}
+
+.foot__dirty i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
 .spacer {
   flex: 1;
+}
+
+/* 窄屏：导航塌成横排 chip（可横向滚动），表单行堆叠为上下结构 */
+@media (max-width: 640px) {
+  .pane {
+    grid-template-columns: 1fr;
+  }
+
+  .snav {
+    position: static;
+    flex-direction: row;
+    overflow-x: auto;
+    padding: 0 0 8px;
+    margin-bottom: 12px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .snav__btn {
+    flex: none;
+    width: auto;
+  }
+
+  .pane__main {
+    padding-left: 0;
+    border-left: none;
+  }
+
+  .frow,
+  .frow--wide,
+  .info {
+    grid-template-columns: 1fr;
+    gap: 6px;
+  }
+
+  .frow__ctl {
+    justify-content: flex-start;
+  }
+
+  /* 堆叠后标签与值成对阅读：值自己带底线，标签不再重复画线 */
+  .info dt {
+    padding-bottom: 2px;
+    border-bottom: none;
+  }
+
+  .info dd {
+    padding-top: 0;
+  }
 }
 </style>

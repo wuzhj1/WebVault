@@ -252,7 +252,7 @@ ok('AiError is an Error', err instanceof Error, '')
 ok('isAborted true for user abort', isAborted(new AiError(0, '已停止', false)), '')
 ok('isAborted false for other failures', !isAborted(new AiError(500, '挂了', true)), '')
 ok('isAborted false for non-AiError', !isAborted(new Error('已停止')), '')
-// 预设只回填地址与模型建议,能不能用以「测试连接」为准——名字与地址不能重复,否则按钮同名分不清
+// 预设只回填地址与模型名——名字与地址不能重复,否则按钮同名分不清
 check('preset count', AI_PRESETS.length, 4)
 check('preset names unique', new Set(AI_PRESETS.map((p) => p.name)).size, AI_PRESETS.length)
 check('preset baseUrls unique', new Set(AI_PRESETS.map((p) => p.baseUrl)).size, AI_PRESETS.length)
