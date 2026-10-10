@@ -8,6 +8,7 @@
  * 编辑器落盘，避免防抖窗口内的输入丢失。所有"打开笔记"的请求也统一经由这里分发。
  */
 import { defineAsyncComponent, onBeforeUnmount, onMounted, ref } from 'vue'
+import CalendarView from './components/CalendarView.vue'
 import NoteEditor from './components/NoteEditor.vue'
 import Notices from './components/Notices.vue'
 import RightPanel from './components/RightPanel.vue'
@@ -49,10 +50,16 @@ const aiStore = useAiStore()
 
 /** NoteEditor 实例：插入 [[链接]] 与强制落盘（flushSave）都经由它转发。 */
 const editorRef = ref<InstanceType<typeof NoteEditor> | null>(null)
-/** 侧栏实例:快捷键要透过它把分区切到 AI / 日历(section 是 SideBar 的本地状态)。 */
+/** 侧栏实例:快捷键要透过它把分区切到 AI(section 是 SideBar 的本地状态)。 */
 const sidebarRef = ref<InstanceType<typeof SideBar> | null>(null)
 /** 当前挂载的浮层，同一时刻至多一个。 */
 const overlay = ref<Overlay>(null)
+/**
+ * 主区是否处于日历视图：日历不是浮层（不遮任何东西、右栏与它互斥），而是接管主区的一档显示模式。
+ * 置真时 `<main>` 换成 CalendarView、`<aside class="app__right">` 整个 v-if 掉——
+ * main 的 flex:1 随即吃满原右栏宽度，日历就此占据右边两栏，布局本身一行都不用改。
+ */
+const calendarMode = ref(false)
 /** 打开搜索面板时带上的初始查询（侧栏点标签就是走这条路）。 */
 const searchQuery = ref('')
 /** 左右侧栏显隐：宽屏是折叠面板，窄屏（<960px）是互斥的抽屉。 */
@@ -80,11 +87,14 @@ function syncDrawerState(): void {
 }
 
 /**
- * 打开一篇笔记：先关掉浮层，再交给 vault 加载；窄屏下同时收起两侧抽屉，
+ * 打开一篇笔记：先关掉浮层与日历视图，再交给 vault 加载；窄屏下同时收起两侧抽屉，
  * 避免抽屉遮住刚打开的正文。
+ * 退出日历放在这里而不是各处调用点：无论从侧栏文件树、日历格子的标题、搜索还是反链进来，
+ * 「要读正文了」都意味着日历该让位——一处收口，漏不掉。
  */
 async function openNote(path: string): Promise<void> {
   overlay.value = null
+  calendarMode.value = false
   await vault.openNote(path)
   if (narrow?.matches) {
     sidebarOpen.value = false
@@ -112,6 +122,26 @@ function closeDrawers(): void {
   sidebarOpen.value = false
   rightOpen.value = false
   syncDrawerState()
+}
+
+/**
+ * 切换主区日历视图。进入前必须先把编辑器的防抖窗口写干净：
+ * 日历模式用 v-if 卸载 NoteEditor，而它的 onBeforeUnmount 里的 `await flushSave()`
+ * 是异步钩子、Vue 不会等它跑完——不在这儿显式 await，最后几百毫秒的输入就悬在半空。
+ * 窄屏下两侧抽屉一起收起，否则日历被抽屉盖住等于没打开。
+ */
+async function toggleCalendar(): Promise<void> {
+  if (calendarMode.value) {
+    calendarMode.value = false
+    return
+  }
+  await editorRef.value?.flushSave()
+  if (narrow?.matches) {
+    sidebarOpen.value = false
+    rightOpen.value = false
+  }
+  syncDrawerState()
+  calendarMode.value = true
 }
 
 /** 设置对话框可落位的页签；与 SettingsDialog 的 TABS 保持一致（那边是权威定义）。 */
@@ -163,10 +193,11 @@ async function quoteNote(): Promise<void> {
 }
 
 /**
- * 打开侧栏某个分区（快捷键入口共用）：窄屏下两侧是互斥抽屉，先关右栏、开左栏，
+ * 打开侧栏 AI 分区（快捷键入口共用）：窄屏下两侧是互斥抽屉，先关右栏、开左栏，
  * 再让 SideBar 把 section 切过去——section 是 SideBar 的本地状态，走它暴露的 showSection。
+ * 日历不再走这条路：它已从侧栏分区升格为主区视图，见 toggleCalendar。
  */
-function openSideSection(next: 'ai' | 'calendar'): void {
+function openSideSection(next: 'ai'): void {
   if (narrow?.matches) {
     sidebarOpen.value = true
     rightOpen.value = false
@@ -185,7 +216,7 @@ const ACTIONS: Record<ShortcutId, () => void> = {
   settings: () => show('settings'),
   cheatsheet: () => show('settings', 'shortcuts'),
   graph: () => show('graph'),
-  calendar: () => openSideSection('calendar'),
+  calendar: () => void toggleCalendar(),
   ai: () => openSideSection('ai'),
 }
 
@@ -194,10 +225,21 @@ const ACTIONS: Record<ShortcutId, () => void> = {
  * - 不带主键的绑定（出厂的 `?`）在输入框/正文里一律放行；输入法合成中整段不拦——
  *   中文输入法选词时的按键不该弹出设置。
  * - Esc 不在此列：Modal 在 document 层 stopPropagation，各浮层自己关自己，走到这里时
- *   已经没有需要收口的面板；录制新键时设置页在捕获阶段截走事件，同样走不到这里。
+ *   已经没有需要收口的弹窗；唯一例外是日历视图（它不是浮层），见函数体开头那条分支。
+ *   录制新键时设置页在捕获阶段截走事件，同样走不到这里。
  * - 具体哪些组合可用、哪个组合被谁占用，都在 ui 与设置页里裁决，这里只管执行。
  */
 function onKeydown(event: KeyboardEvent): void {
+  // Esc 退出日历视图。日历是主区视图而不是浮层，没有自己的 focus trap，收口只能放这儿；
+  // 浮层的 Esc 在 document 层就 stopPropagation 了（见 core/ui/focus-trap.ts），
+  // 所以走到 window 这层时已经没有需要先关掉的弹窗。
+  if (event.key === 'Escape' && calendarMode.value) {
+    // 焦点在输入框里时放行：日历的就地输入框自己 stop 掉了 Esc（取消输入而非退视图），
+    // 这里兜的是焦点落在侧栏过滤框之类的地方——Esc 该还给那个上下文，不该顺手关掉日历。
+    if (isTypingTarget(event.target)) return
+    calendarMode.value = false
+    return
+  }
   const binding = bindingOfEvent(event)
   if (binding === null) return
   const id = ui.commandOf(binding)
@@ -421,13 +463,19 @@ onBeforeUnmount(() => {
             @search="showSearch"
             @quote-note="quoteNote"
             @insert="insertAiMarkdown"
+            @calendar="toggleCalendar"
             @open-ai-settings="show('settings', 'ai')"
           />
         </aside>
 
-        <!-- 主区是 flex column：编辑器占满整个主区（曾经贴底停靠的收集箱面板已随卡片盒移除） -->
+        <!-- 主区是 flex column。日历模式下 NoteEditor 整个被 v-if 卸载（进入前已 flushSave），
+             同时右栏也 v-if 掉——main 的 flex:1 随即吃满两栏宽度，日历就此占据右边两栏。
+             用 v-if 而不是 v-show：卸载即销毁 vditor 实例，切回来重新建，代价是几百毫秒，
+             换来的是编辑器不会在 display:none 里量错尺寸、也不会留一份指向已卸载实例的定时器。 -->
         <main class="app__main">
+          <CalendarView v-if="calendarMode" @open="openNote" @exit="calendarMode = false" />
           <NoteEditor
+            v-else
             ref="editorRef"
             @open-link="openNote"
             @pick-link="show('picker')"
@@ -436,7 +484,7 @@ onBeforeUnmount(() => {
           />
         </main>
 
-        <aside class="app__right" :class="{ 'app__right--open': rightOpen }">
+        <aside v-if="!calendarMode" class="app__right" :class="{ 'app__right--open': rightOpen }">
           <RightPanel @open="openNote" />
         </aside>
       </div>

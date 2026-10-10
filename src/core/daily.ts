@@ -1,22 +1,34 @@
 /**
  * 日记日历的纯函数层：日期字符串 ↔ 路径、今天、月矩阵。
  *
- * 契约：日记固定落在 `日记/YYYY-MM-DD.md`（见 DAILY_DIR），文件名即日期，不引入 frontmatter
- * 字段、不加 Dexie 列——因此徽标计数与日历打点都能直接从路径算出来，删除/改名自然跟着走。
+ * 契约：**一天一个目录**，`日记/YYYY-MM-DD/标题.md`（见 DAILY_DIR）——目录段是日期、文件名段
+ * 是标题，一天可以有很多篇。这样仍是「不引入 frontmatter 字段、不加 Dexie 列」：哪天有哪些日记
+ * 直接从路径算出来，徽标、打点与格子里的标题列表都跟着删除/改名自然走。标题就是文件名，因此
+ * `titleOf`（core/vault/paths.ts）原样可用，不需要为日记单开一个取标题的函数。
  *
  * 硬约束/注意事项：
- * - 全部是无依赖、无浏览器 API 的纯函数：store（stores/vault.ts 的 dailyDates）与
+ * - 全部是无依赖、无浏览器 API 的纯函数：store（stores/vault.ts 的 dailyByDate）与
  *   scripts/verify-daily.mts（裸 node 直跑）共用同一份实现，日期算错会立刻在 CI 暴露。
  * - 所有日期字符串都是本地日历日（`todayStr` 取 getFullYear/getMonth/getDate）；**绝不能**
  *   改成 `toISOString()`——UTC+8 的 0–8 点会算成前一天。
  * - 日期运算一律走 UTC（addDays/monthMatrix），免得夏令时把格子挪一位。
+ * - 旧版单文件形态 `日记/YYYY-MM-DD.md` **已不识别**：一天多篇之后它只是 `日记/` 下的普通笔记，
+ *   不进日历（存量几乎为零，不为它保留第二套判定）。
  */
 
 /** 日记目录常量；不设配置项，路径约定就是索引。 */
 export const DAILY_DIR = '日记'
 
-/** 严格匹配 `日记/YYYY-MM-DD.md`（扩展名大小写不敏感，对齐 paths.ts 的 OPFS 口径）；日期是否真实存在由 `dateOfDaily` 再验一轮。 */
-const DAILY_RE = /^日记\/(\d{4})-(\d{2})-(\d{2})\.md$/i
+/**
+ * 严格匹配 `日记/YYYY-MM-DD/标题.md`（扩展名大小写不敏感，对齐 paths.ts 的 OPFS 口径）。
+ * 两处刻意的写法：标题段用字符类 `[^/]+` 而不是 `(.+)`——`.` 只排除换行、**照样匹配** `/`，
+ * 用它会让 `日记/2026-10-10/上午/晨间.md` 这种多嵌一层的路径也通过；`[^/]+` 把标题锁死在一段里，
+ * 深层嵌套因此进不来。日期是否真实存在由 `dateOfDaily` 再验一轮。
+ */
+const DAILY_RE = /^日记\/(\d{4})-(\d{2})-(\d{2})\/([^/]+)\.md$/i
+
+/** 会让日期目录下凭空多出一层、或路径折叠后语义漂移的标题；`.` 与 `..` 必须显式拦，normalizePath 只拦 `..` 逃逸。 */
+const BAD_DAILY_TITLE = /^(?:\.{1,2})$/
 
 /** 月历表头，周一开头（与 `monthMatrix` 的列位一致）。 */
 export const WEEKDAY_NAMES = ['一', '二', '三', '四', '五', '六', '日'] as const
@@ -56,15 +68,34 @@ export function daysInMonth(year: number, month1: number): number {
   return utcDate(year, month1 + 1, 0).getUTCDate()
 }
 
-/** `YYYY-MM-DD` -> `日记/YYYY-MM-DD.md`。入参须是 `todayStr`/`monthMatrix` 产出的规范串。 */
-export function dailyPathOf(date: string): string {
-  return `${DAILY_DIR}/${date}.md`
+/**
+ * `YYYY-MM-DD` -> `日记/YYYY-MM-DD`（该日的目录）。
+ * 入参须是 `todayStr`/`monthMatrix` 产出的规范串；本函数不校验日期是否真实存在，
+ * 调用方通常紧接着就拼标题成路径。
+ */
+export function dailyDirOf(date: string): string {
+  return `${DAILY_DIR}/${date}`
 }
 
-/** 该路径的日期部分（`2026-10-10`）；不是合法日记路径则 null（含目录不符、日期不存在）。 */
+/**
+ * `YYYY-MM-DD` + 标题 -> `日记/YYYY-MM-DD/标题.md`。
+ * 标题按 paths.ts 的 `sanitizeTitle` 口径由调用方先洗过；这里只再挡一次 `.`/`..`
+ * ——它们会让路径折叠到上一层，写出日期目录之外的文件。
+ */
+export function dailyPathOf(date: string, title: string): string {
+  if (BAD_DAILY_TITLE.test(title)) throw new Error(`日记标题不能是 ${title}`)
+  return `${dailyDirOf(date)}/${title}.md`
+}
+
+/**
+ * 该路径的日期部分（`2026-10-10`，取自目录段）；不是合法日记路径则 null。
+ * 标题段不在此处解析：日记的标题就是文件名，`titleOf`（core/vault/paths.ts）原样可用，
+ * 与文件树 / 搜索 / 反链的显示名同源，不为日记单开一套取名逻辑。
+ */
 export function dateOfDaily(path: string): string | null {
   const m = DAILY_RE.exec(path)
   if (!m) return null
+  if (BAD_DAILY_TITLE.test(m[4])) return null
   const y = Number(m[1])
   const mo = Number(m[2])
   const d = Number(m[3])

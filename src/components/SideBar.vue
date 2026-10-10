@@ -2,7 +2,6 @@
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { cardPath, dirOf, sanitizeTitle, titleOf } from '@/core/vault/paths.ts'
 import AiPanel from './AiPanel.vue'
-import CalendarPanel from './CalendarPanel.vue'
 import FileTree from './FileTree.vue'
 import Modal from './Modal.vue'
 import { useAiStore } from '@/stores/ai.ts'
@@ -11,10 +10,12 @@ import { useUiStore } from '@/stores/ui.ts'
 import { useVaultStore, type TreeNode } from '@/stores/vault.ts'
 
 /**
- * 三条出口：
+ * 五条出口：
  * - `open(path)`：打开某篇笔记（文件树、书签行、待建行、新建/重命名后跳转、AI 产出行）。
  * - `search(query)`：点标签行时把 `#标签` 交给 App 打开全库搜索面板——标签的「结果列表」
  *   本来就是搜索的强项，比在侧栏里另造一个列表更省事，也复用了现成的命中摘要。
+ * - `calendar`：rail 的日历图标。日历已升格为主区视图（App 的 calendarMode），不是侧栏分区，
+ *   这里只能上抛——主区怎么显示是 App 的事，侧栏够不着。
  * - `quote-note` / `insert` / `open-ai-settings`：AI 面板的三条上行通道——引用当前笔记要先
  *   `flushSave`（只有 App 拿得到编辑器）、插入要走编辑器、打开设置页要走 App 的 overlay，
  *   三者都够不着，统一分发给 App 处理（面板自己永远不碰编辑器与浮层）。
@@ -24,6 +25,7 @@ const emit = defineEmits<{
   (e: 'search', query: string): void
   (e: 'quote-note'): void
   (e: 'insert', markdown: string): void
+  (e: 'calendar'): void
   (e: 'open-ai-settings'): void
 }>()
 
@@ -36,8 +38,9 @@ const sync = useSyncStore()
 const aiStore = useAiStore()
 
 /**
- * 让 App（快捷键 `mod+alt+a` / `mod+alt+d`）把侧栏切到 AI / 日历分区：section 是本组件的本地状态，
+ * 让 App（快捷键 `mod+alt+a`）把侧栏切到 AI 分区：section 是本组件的本地状态，
  * 没进 ui store，外部要改只能走暴露的方法——保持「分区状态不落盘」的既有纪律。
+ * 日历不在此列：它已升格为主区视图，走的是 emit('calendar') → App 的 calendarMode。
  */
 function showSection(next: Section): void {
   section.value = next
@@ -57,19 +60,18 @@ const renameInput = ref<HTMLInputElement | null>(null)
 const createInput = ref<HTMLInputElement | null>(null)
 
 /**
- * 五个分区；数组顺序即活动栏图标顺序，也是指示条按下标平移的依据。
- * 日历排在标签之后、AI 之前：它和笔记 / 待建 / 标签一样是「库里已有的东西」。
- * AI 分区排最后：它是「草稿与外脑」，与前四个库内概念不同级，
- * 放在「＋新建」上方会被当成笔记的一种——单独压一档在 gap 之前收尾。
+ * 四个分区；数组顺序即活动栏图标顺序，也是指示条按下标平移的依据。
+ * 笔记 / 待建 / 标签是「库里已有的东西」，AI 是「草稿与外脑」——后者与前三者不同级，
+ * 放在「＋新建」上方会被当成笔记的一种，故压在最后单独一档。
+ * 日历曾经是第五个分区，现已升格为主区视图（App 的 calendarMode），rail 上的图标只负责上抛。
  */
-const SECTIONS = ['files', 'unresolved', 'tags', 'calendar', 'ai'] as const
+const SECTIONS = ['files', 'unresolved', 'tags', 'ai'] as const
 type Section = (typeof SECTIONS)[number]
 
 const SECTION_LABELS: Record<Section, string> = {
   files: '笔记',
   unresolved: '待建',
   tags: '标签',
-  calendar: '日历',
   ai: 'AI 助手',
 }
 
@@ -136,9 +138,8 @@ onBeforeUnmount(() => {
 
 /**
  * 待建 / 标签 / AI 分区的占位文案；笔记分区跟着当前标签走，见下方 FILE_TAB_PLACEHOLDERS。
- * 日历分区不入表：月视图没有可过滤的列表，那个输入框根本不渲染（见模板的 v-if）。
  */
-const FILTER_PLACEHOLDERS: Record<Exclude<Section, 'files' | 'calendar'>, string> = {
+const FILTER_PLACEHOLDERS: Record<Exclude<Section, 'files'>, string> = {
   unresolved: '过滤待建目标…',
   tags: '过滤标签…',
   // 只对「产出」页签有意义；对话页签里这个输入框不渲染（见模板的 v-if）。
@@ -155,8 +156,6 @@ const FILE_TAB_PLACEHOLDERS: Record<FileTab, string> = {
 /** 实际渲染的占位文案：笔记分区看标签，其余分区看分区。aria-label 同源，读屏听到的与看到的一致。 */
 const filterPlaceholder = computed(() => {
   if (section.value === 'files') return FILE_TAB_PLACEHOLDERS[fileTab.value]
-  // 日历分区的过滤框不渲染，空串只是把类型补全，永远不会被输入框读到。
-  if (section.value === 'calendar') return ''
   return FILTER_PLACEHOLDERS[section.value]
 })
 
@@ -191,11 +190,16 @@ const sectionCounts = computed<Record<Section, number>>(() => ({
   files: vault.notes.length,
   unresolved: vault.unresolvedTargets.length,
   tags: vault.allTags.length,
-  // 日历徽标 = 日记总篇数，与面板里的打点同读 vault.dailyDates 这一个来源。
-  calendar: vault.dailyDates.size,
   // AI 分区计会话数（对话页签是默认视图）；产出条数在页签上自己显示，两处不重复计。
   ai: aiStore.sessions.length,
 }))
+
+/**
+ * rail 日历图标上的徽标 = 有日记的天数。日历已不是分区，故不进 sectionCounts——
+ * 那里每一项都得是「点进去能看到的列表长度」，而日历点进去是主区月历，没有这样一个列表。
+ * 保留徽标是因为它在 rail 上是个有用的「有没有东西可看」的信号（与打点同一份 dailyByDate）。
+ */
+const diaryDays = computed(() => vault.dailyByDate.size)
 
 /** 徽标数字：99 以上一律 99+，免得「1024」把 44px 宽的活动栏图标挤变形。 */
 function railText(n: number): string {
@@ -458,13 +462,35 @@ onBeforeUnmount(closeMenu)
         <span v-if="sectionCounts.tags > 0" class="rail__badge">{{ railText(sectionCounts.tags) }}</span>
       </button>
 
-      <!-- 日历分区：日记的月视图，图标用「日历页」与标签/待建拉开 -->
+      <!-- AI 分区：对话与产出都在这里，图标用「火花」与库内概念拉开 -->
       <button
         class="rail__btn"
-        :class="{ 'rail__btn--on': section === 'calendar' }"
+        :class="{ 'rail__btn--on': section === 'ai' }"
+        title="AI 助手 (Ctrl/⌘+Alt+A)"
+        aria-label="AI 助手"
+        @click="section = 'ai'"
+      >
+        <svg viewBox="0 0 16 16" width="18" height="18" aria-hidden="true">
+          <path
+            d="M7.4 2.4l1.3 3.3 3.3 1.3-3.3 1.3-1.3 3.3-1.3-3.3L2.8 7l3.3-1.3z"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.3"
+            stroke-linejoin="round"
+          />
+          <path d="M12.4 10.6l.55 1.45 1.45.55-1.45.55-.55 1.45-.55-1.45-1.45-.55 1.45-.55z" fill="currentColor" />
+        </svg>
+        <span v-if="sectionCounts.ai > 0" class="rail__badge">{{ railText(sectionCounts.ai) }}</span>
+      </button>
+
+      <!-- 日历：主区视图开关（不是分区，故没有 --on 态）。必须排在四个分区**之后**——
+           指示条按下标 × 37px 平移（见 sectionIndex），中间插一个非分区的按钮会把它顶偏一档。
+           徽标是「有日记的天数」，与月历格子的打点同源 -->
+      <button
+        class="rail__btn"
         title="日历 (Ctrl/⌘+Alt+D)"
         aria-label="日历"
-        @click="section = 'calendar'"
+        @click="emit('calendar')"
       >
         <svg viewBox="0 0 16 16" width="18" height="18" aria-hidden="true">
           <rect
@@ -486,30 +512,7 @@ onBeforeUnmount(closeMenu)
           />
           <rect x="5.2" y="8.6" width="2.2" height="2.2" rx="0.6" fill="currentColor" />
         </svg>
-        <span v-if="sectionCounts.calendar > 0" class="rail__badge">
-          {{ railText(sectionCounts.calendar) }}
-        </span>
-      </button>
-
-      <!-- AI 分区：对话与产出都在这里，图标用「火花」与库内概念拉开 -->
-      <button
-        class="rail__btn"
-        :class="{ 'rail__btn--on': section === 'ai' }"
-        title="AI 助手 (Ctrl/⌘+Alt+A)"
-        aria-label="AI 助手"
-        @click="section = 'ai'"
-      >
-        <svg viewBox="0 0 16 16" width="18" height="18" aria-hidden="true">
-          <path
-            d="M7.4 2.4l1.3 3.3 3.3 1.3-3.3 1.3-1.3 3.3-1.3-3.3L2.8 7l3.3-1.3z"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="1.3"
-            stroke-linejoin="round"
-          />
-          <path d="M12.4 10.6l.55 1.45 1.45.55-1.45.55-.55 1.45-.55-1.45-1.45-.55 1.45-.55z" fill="currentColor" />
-        </svg>
-        <span v-if="sectionCounts.ai > 0" class="rail__badge">{{ railText(sectionCounts.ai) }}</span>
+        <span v-if="diaryDays > 0" class="rail__badge">{{ railText(diaryDays) }}</span>
       </button>
 
       <div class="rail__gap"></div>
@@ -581,12 +584,8 @@ onBeforeUnmount(closeMenu)
       </div>
 
       <!-- 分区内过滤：一个输入框管当前分区/标签，× 一键清掉；空串时不参与任何匹配。
-           AI 对话页签与日历分区不渲染它——前者没有可过滤的列表，后者是月视图，
-           占着 36px 只会让面板离手更远 -->
-      <div
-        v-if="section !== 'calendar' && !(section === 'ai' && aiTab === 'chat')"
-        class="sidebar__filter"
-      >
+           AI 对话页签不渲染它——那里没有可过滤的列表，占着 36px 只会让面板离手更远 -->
+      <div v-if="!(section === 'ai' && aiTab === 'chat')" class="sidebar__filter">
         <input
           v-model="filter"
           class="sidebar__filter-input"
@@ -711,11 +710,6 @@ onBeforeUnmount(closeMenu)
             </button>
           </li>
         </ul>
-      </template>
-
-      <template v-else-if="section === 'calendar'">
-        <!-- 切分区即卸载/重挂（v-if），视图自然回到当月——不需要额外的记忆或复位逻辑 -->
-        <CalendarPanel @open="open" />
       </template>
 
       <template v-else-if="section === 'ai'">

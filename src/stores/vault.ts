@@ -171,17 +171,24 @@ export const useVaultStore = defineStore('vault', () => {
   /** 全库标签及计数，按次数倒序，供标签面板使用。 */
   const allTags = shallowRef<{ tag: string; count: number }[]>([])
   /**
-   * 有日记的日期集合（`YYYY-MM-DD`），供侧栏日历徽标与月历打点共用这一份真相。
+   * 按日期分组的日记：`YYYY-MM-DD` → 该日所有日记路径（按 `titleOf` 排序）。
+   * 供主区日历视图的格子列标题、侧栏 rail 徽标、打点共用这一份真相。
    * 直接从路径形状算出来（core/daily.ts），不新增 frontmatter 字段或 Dexie 列：
    * 新建/删除/改名都换掉 notes 数组，本 computed 自然跟着走，无需差额维护。
    */
-  const dailyDates = computed<ReadonlySet<string>>(() => {
-    const out = new Set<string>()
+  const dailyByDate = computed<ReadonlyMap<string, string[]>>(() => {
+    const out = new Map<string, string[]>()
     for (const n of notes.value) {
       if (n.removedLocal) continue
       const d = dateOfDaily(n.path)
-      if (d) out.add(d)
+      if (!d) continue
+      const list = out.get(d)
+      if (list) list.push(n.path)
+      else out.set(d, [n.path])
     }
+    // 同一天的多篇按标题排序，而不是按数组顺序：后写入的排在后面会让格子里的列表
+    // 每次重建都可能换位，用户刚看到的行转眼就跳走了。
+    for (const list of out.values()) list.sort((a, b) => titleOf(a).localeCompare(titleOf(b)))
     return out
   })
   /**
@@ -1083,7 +1090,7 @@ export const useVaultStore = defineStore('vault', () => {
     outgoing,
     unresolvedTargets,
     allTags,
-    dailyDates,
+    dailyByDate,
     cards,
     cardByPath,
     revision,

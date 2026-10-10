@@ -14,6 +14,7 @@
  */
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { db } from '@/core/db.ts'
+import { isDailyPath } from '@/core/daily.ts'
 import { useFocusTrap } from '@/core/ui/focus-trap.ts'
 import { cssColor } from '@/core/theme/apply.ts'
 import { titleOf } from '@/core/vault/paths.ts'
@@ -33,6 +34,8 @@ const wrap = ref<HTMLElement | null>(null)
 const box = ref<HTMLElement | null>(null)
 /** 筛选：只看当前笔记的一跳邻居（无激活笔记时开关禁用）。 */
 const local = ref(false)
+/** 筛选：日记默认不进图。默认关——日记之间的链接密度极高（同一个人连着写），会把图糊成一团。 */
+const includeDaily = ref(false)
 /** 工具条：常显所有节点的标题（默认开；大库嫌吵可关，悬停/当前的高亮标签不受它影响）。 */
 const labels = ref(true)
 /** 头部统计：当前图里的节点数与去重后的边数。 */
@@ -164,16 +167,22 @@ watch(
 const hasActive = computed(() => vault.activePath !== null)
 
 /**
- * 按当前筛选（全局 ↔ 只看邻居）重建节点与边。
+ * 按当前筛选（全局 ↔ 只看邻居、含不含日记）重建节点与边。
  * 复用上一版节点的坐标，使得在两种范围之间切换时布局不会重新炸开。
  */
 async function load(): Promise<void> {
   const rows = await db.links.toArray()
   const active = vault.activePath
-  const scope = vault.notes.filter((n) => !n.removedLocal)
+  // 节点范围：默认把日记整个摘掉（工具条「包含日记」可勾回来）。当前打开的那篇无条件放行——
+  // 图例有 dot--active、「只看邻居」以它为圆心，把它排除掉会让图例与事实对不上。
+  const scope = vault.notes.filter(
+    (n) => !n.removedLocal && (includeDaily.value || !isDailyPath(n.path) || n.path === active),
+  )
 
   // 信息卡的链路档案：按整张 links 表统计，与下面的范围筛选无关——
   // 出链包含 targetPath 为空的悬空链接（目标还没创建，图里没有对应节点，但账要算上）。
+  // 这意味着勾掉「包含日记」后，一张指向某日记的边不画了，但信息卡里的数字仍算上它：
+  // 链接关系本身没有变，变的只是这张图要不要画出来。
   const profile = new Map<string, LinkStat>()
   const bump = (path: string): LinkStat => {
     let s = profile.get(path)
@@ -235,6 +244,8 @@ async function load(): Promise<void> {
     if (!r.targetPath) continue
     const a = index.get(r.src)
     const b = index.get(r.targetPath)
+    // 端点只要有一个不在当前范围内（日记被摘掉、或被「只看邻居」挡在圈外），
+    // index.get 就返回 undefined，这条边自动跳过——范围筛选不必为边单写一套规则。
     if (a === undefined || b === undefined || a === b) continue
     const key = a < b ? `${a}:${b}` : `${b}:${a}`
     if (seen.has(key)) continue
@@ -669,8 +680,8 @@ useFocusTrap(box, {
   },
 })
 
-// 「只看邻居」开关变化 → 重建图（load 会复用旧坐标，布局不至于重置）。
-watch(local, () => {
+// 两个范围筛选开关变化 → 重建图（load 会复用旧坐标，布局不至于重置）。
+watch([local, includeDaily], () => {
   void load()
 })
 
@@ -713,6 +724,10 @@ onBeforeUnmount(() => {
           <label class="graph__toggle">
             <input v-model="labels" type="checkbox" />
             <span>显示标题</span>
+          </label>
+          <label class="graph__toggle">
+            <input v-model="includeDaily" type="checkbox" />
+            <span>包含日记</span>
           </label>
           <span class="graph__stats">{{ stats.nodes }} 篇 · {{ stats.edges }} 条链接</span>
           <div class="graph__gap"></div>

@@ -1,13 +1,15 @@
 /**
  * 日历纯函数验证（src/core/daily.ts）：
- * - 路径契约：日记只认 `日记/YYYY-MM-DD.md`（大小写不敏感的扩展名，对齐 paths.ts 口径），
- *   日期必须真实存在——`2026-02-30`、`2026-13-01` 一律拒收，否则徽标会点亮一个造不出来的文件；
+ * - 路径契约：**一天一个目录**，日记只认 `日记/YYYY-MM-DD/标题.md`（大小写不敏感的扩展名，
+ *   对齐 paths.ts 口径）。日期在目录段、标题在文件名段——因此标题就是文件名，`titleOf` 原样可用，
+ *   一天可以有任意多篇。日期必须真实存在——`2026-02-30`、`2026-13-01` 一律拒收，
+ *   否则徽标会点亮一个造不出来的文件；
  * - 本地日：`todayStr` 走 getFullYear/getMonth/getDate，UTC+8 的 0–8 点不能退成前一天
  *   （与 toISOString 的 UTC 日对照钉死这一点）；
  * - 日期运算：addDays 跨月/跨年/闰日，daysInMonth 与闰年（2024-02 = 29 天）；
  * - 星期口径：weekdayOf 是 0=周一…6=周日（月矩阵列序），比 JS 的 getDay() 少偏一位；
  * - 月矩阵：周一开头、行数 = ceil((首日偏移 + 当月天数) / 7) 即 4–6 行、首尾格可跨相邻月
- *   且 inMonth 标记正确、当月每一天恰好出现一次——这是日历面板渲染与方向键漫游的地基。
+ *   且 inMonth 标记正确、当月每一天恰好出现一次——这是日历视图渲染与方向键漫游的地基。
  *
  * 运行：pnpm verify（第 17 个套件；裸 node 直跑本文件）。全部通过退出码 0，否则 1。
  */
@@ -15,6 +17,7 @@ import {
   DAILY_DIR,
   WEEKDAY_NAMES,
   addDays,
+  dailyDirOf,
   dailyPathOf,
   dateOfDaily,
   daysInMonth,
@@ -24,6 +27,7 @@ import {
   todayStr,
   weekdayOf,
 } from '../src/core/daily.ts'
+import { titleOf } from '../src/core/vault/paths.ts'
 
 let pass = 0
 let fail = 0
@@ -39,32 +43,66 @@ function check(name: string, actual: unknown, expected: unknown) {
   }
 }
 
+/** 断言某段代码必须抛错：用于「构造本身就不该被接受」的入口（如 dailyPathOf 的标题守卫）。 */
+function checkThrows(name: string, fn: () => unknown): void {
+  try {
+    fn()
+    fail++
+    console.log(`FAIL ${name}\n  expected a throw, but it returned normally`)
+  } catch {
+    pass++
+  }
+}
+
 // ---- 目录常量与往返 ----
 check('DAILY_DIR is 日记', DAILY_DIR, '日记')
-check('path round trip', dateOfDaily(dailyPathOf('2026-10-10')), '2026-10-10')
-check('dailyPathOf shape', dailyPathOf('2026-01-05'), '日记/2026-01-05.md')
+check('dailyDirOf', dailyDirOf('2026-10-10'), '日记/2026-10-10')
+check('dailyPathOf shape', dailyPathOf('2026-01-05', '晨间'), '日记/2026-01-05/晨间.md')
+check('path round trip', dateOfDaily(dailyPathOf('2026-10-10', '晨间')), '2026-10-10')
+// 标题就是文件名，故全库通用的 titleOf 原样可用——这是「日记不单开一个取标题函数」的依据
+check('title comes from filename', titleOf(dailyPathOf('2026-10-10', '晨间')), '晨间')
+// 日期只认目录段：标题里再出现一个日期也不会被误判
+check('date lives in dir segment', dateOfDaily('日记/2026-10-10/2026-09-09 晨间.md'), '2026-10-10')
+// 一天多篇：同一天的两个不同标题归到同一个日期
+check(
+  'two diaries share one date',
+  [dateOfDaily('日记/2026-10-10/晨间.md'), dateOfDaily('日记/2026-10-10/会议.md')],
+  ['2026-10-10', '2026-10-10'],
+)
 
-// ---- 严格路径契约：目录、补零、扩展名、真实日期，缺一不可 ----
-check('accept normal', isDailyPath('日记/2026-10-10.md'), true)
-check('accept upper ext', isDailyPath('日记/2026-10-10.MD'), true)
-check('reject wrong dir', isDailyPath('notes/2026-10-10.md'), false)
-check('reject subdir', isDailyPath('日记/2026/10-10.md'), false)
-check('reject bare filename', isDailyPath('2026-10-10.md'), false)
-check('reject unpadded', isDailyPath('日记/2026-1-5.md'), false)
-check('reject wrong ext', isDailyPath('日记/2026-10-10.txt'), false)
-check('reject prefix bleed', isDailyPath('日记本/2026-10-10.md'), false)
-check('reject no dir slash', isDailyPath('日记2026-10-10.md'), false)
-check('reject feb 30', isDailyPath('日记/2026-02-30.md'), false)
-check('reject month 13', isDailyPath('日记/2026-13-01.md'), false)
-check('reject month 00', isDailyPath('日记/2026-00-10.md'), false)
-check('reject day 00', isDailyPath('日记/2026-10-00.md'), false)
-check('reject day 32', isDailyPath('日记/2026-10-32.md'), false)
-check('accept leap day', isDailyPath('日记/2024-02-29.md'), true)
-check('reject leap day in common year', isDailyPath('日记/2026-02-29.md'), false)
-check('accept century leap day', isDailyPath('日记/2000-02-29.md'), true)
-check('reject non-century 1900', isDailyPath('日记/1900-02-29.md'), false)
+// ---- 标题守卫：`.` 与 `..` 会让路径折叠到日期目录之外，构造阶段就该拒 ----
+checkThrows('dailyPathOf rejects dot', () => dailyPathOf('2026-10-10', '.'))
+checkThrows('dailyPathOf rejects dotdot', () => dailyPathOf('2026-10-10', '..'))
+check('accept normal', isDailyPath('日记/2026-10-10/晨间.md'), true)
+check('accept upper ext', isDailyPath('日记/2026-10-10/晨间.MD'), true)
+check('accept ascii title', isDailyPath('日记/2026-10-10/morning.md'), true)
+check('accept title with space', isDailyPath('日记/2026-10-10/2026-10-10 周六.md'), true)
+// 旧版单文件形态已不识别：一天多篇之后它只是 日记/ 下的普通笔记
+check('reject legacy single-file form', isDailyPath('日记/2026-10-10.md'), false)
+check('reject wrong dir', isDailyPath('notes/2026-10-10/晨间.md'), false)
+check('reject bare filename', isDailyPath('2026-10-10/晨间.md'), false)
+check('reject unpadded', isDailyPath('日记/2026-1-5/晨间.md'), false)
+check('reject wrong ext', isDailyPath('日记/2026-10-10/晨间.txt'), false)
+check('reject prefix bleed', isDailyPath('日记本/2026-10-10/晨间.md'), false)
+check('reject no dir slash', isDailyPath('日记2026-10-10/晨间.md'), false)
+// 标题段锁在一层里（正则用 `[^/]+`），故深层嵌套天然进不来
+check('reject deep nesting', isDailyPath('日记/2026-10-10/上午/晨间.md'), false)
+check('reject empty title', isDailyPath('日记/2026-10-10/.md'), false)
+check('reject dot title', isDailyPath('日记/2026-10-10/..md'), false)
+check('reject dotdot title', isDailyPath('日记/2026-10-10/...md'), false)
+check('reject feb 30', isDailyPath('日记/2026-02-30/晨间.md'), false)
+check('reject month 13', isDailyPath('日记/2026-13-01/晨间.md'), false)
+check('reject month 00', isDailyPath('日记/2026-00-10/晨间.md'), false)
+check('reject day 00', isDailyPath('日记/2026-10-00/晨间.md'), false)
+check('reject day 32', isDailyPath('日记/2026-10-32/晨间.md'), false)
+check('accept leap day', isDailyPath('日记/2024-02-29/leap.md'), true)
+check('reject leap day in common year', isDailyPath('日记/2026-02-29/x.md'), false)
+check('accept century leap day', isDailyPath('日记/2000-02-29/x.md'), true)
+check('reject non-century 1900', isDailyPath('日记/1900-02-29/x.md'), false)
+// 日期目录本身不是笔记：它没有文件名段，读进来也不该被当成一篇日记
+check('reject the date dir itself', isDailyPath('日记/2026-10-10'), false)
 check('dateOfDaily on non-daily', dateOfDaily('notes/a.md'), null)
-check('dateOfDaily on feb 30', dateOfDaily('日记/2026-02-30.md'), null)
+check('dateOfDaily on feb 30', dateOfDaily('日记/2026-02-30/晨间.md'), null)
 
 // ---- isRealDate：年 0–99 也不会被 Date.UTC 拉到 1900 年代 ----
 check('real date ok', isRealDate(2026, 10, 10), true)
@@ -130,8 +168,12 @@ function matrixShape(year: number, month1: number, rows: number): void {
     flat.every((c) => c.inMonth === c.date.startsWith(`${year}-${String(month1).padStart(2, '0')}`)),
     true,
   )
-  // 每一格的日期都是合法日记路径——方向键漫游到哪都能建文件
-  check(`${year}-${month1} every cell is daily path`, flat.every((c) => isDailyPath(dailyPathOf(c.date))), true)
+  // 每一格的日期都能拼出合法日记路径——方向键漫游到哪都能建文件
+  check(
+    `${year}-${month1} every cell is daily path`,
+    flat.every((c) => isDailyPath(dailyPathOf(c.date, '标题'))),
+    true,
+  )
   check(
     `${year}-${month1} day numbers from date`,
     flat.every((c) => c.day === Number(c.date.slice(8, 10))),
