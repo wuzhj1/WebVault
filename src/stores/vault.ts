@@ -172,7 +172,7 @@ export const useVaultStore = defineStore('vault', () => {
   const allTags = shallowRef<{ tag: string; count: number }[]>([])
   /**
    * 按日期分组的日记：`YYYY-MM-DD` → 该日所有日记路径（按 `titleOf` 排序）。
-   * 供主区日历视图的格子列标题、侧栏 rail 徽标、打点共用这一份真相。
+   * 供全窗日历视图的格子列标题、侧栏 rail 徽标、打点共用这一份真相。
    * 直接从路径形状算出来（core/daily.ts），不新增 frontmatter 字段或 Dexie 列：
    * 新建/删除/改名都换掉 notes 数组，本 computed 自然跟着走，无需差额维护。
    */

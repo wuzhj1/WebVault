@@ -55,9 +55,9 @@ const sidebarRef = ref<InstanceType<typeof SideBar> | null>(null)
 /** 当前挂载的浮层，同一时刻至多一个。 */
 const overlay = ref<Overlay>(null)
 /**
- * 主区是否处于日历视图：日历不是浮层（不遮任何东西、右栏与它互斥），而是接管主区的一档显示模式。
- * 置真时 `<main>` 换成 CalendarView、`<aside class="app__right">` 整个 v-if 掉——
- * main 的 flex:1 随即吃满原右栏宽度，日历就此占据右边两栏，布局本身一行都不用改。
+ * 主区是否处于日历视图：日历不是浮层（不遮任何东西），而是接管**整个窗口**的一档显示模式。
+ * 置真时左栏 `app__side`、主区里的 NoteEditor、右栏 `app__right` 三者全部 v-if 掉，
+ * 日历就此占满整屏——布局本身一行都不用改（三栏都是 flex 子项，让掉两栏另一栏自然吃满）。
  */
 const calendarMode = ref(false)
 /** 打开搜索面板时带上的初始查询（侧栏点标签就是走这条路）。 */
@@ -105,6 +105,15 @@ async function openNote(path: string): Promise<void> {
 
 /** 切换左侧栏；窄屏下左右抽屉互斥，打开左边就关掉右边。 */
 function toggleSidebar(): void {
+  // 日历是全窗视图，侧栏被它整个让位（v-if 掉）。此时点「笔记列表」的意图是「给我看侧栏」，
+  // 而不是把一个看不见的侧栏翻成关——所以先退出日历，并直接置为打开。
+  if (calendarMode.value) {
+    calendarMode.value = false
+    sidebarOpen.value = true
+    if (narrow?.matches) rightOpen.value = false
+    syncDrawerState()
+    return
+  }
   sidebarOpen.value = !sidebarOpen.value
   if (sidebarOpen.value && narrow?.matches) rightOpen.value = false
   syncDrawerState()
@@ -112,6 +121,14 @@ function toggleSidebar(): void {
 
 /** 切换右侧栏；与 toggleSidebar 对称，窄屏下同样保持互斥。 */
 function toggleRight(): void {
+  // 同 toggleSidebar：日历模式下右栏也不存在，这次点击应当是「退出日历并展开右栏」。
+  if (calendarMode.value) {
+    calendarMode.value = false
+    rightOpen.value = true
+    if (narrow?.matches) sidebarOpen.value = false
+    syncDrawerState()
+    return
+  }
   rightOpen.value = !rightOpen.value
   if (rightOpen.value && narrow?.matches) sidebarOpen.value = false
   syncDrawerState()
@@ -125,10 +142,10 @@ function closeDrawers(): void {
 }
 
 /**
- * 切换主区日历视图。进入前必须先把编辑器的防抖窗口写干净：
+ * 切换日历视图。进入前必须先把编辑器的防抖窗口写干净：
  * 日历模式用 v-if 卸载 NoteEditor，而它的 onBeforeUnmount 里的 `await flushSave()`
  * 是异步钩子、Vue 不会等它跑完——不在这儿显式 await，最后几百毫秒的输入就悬在半空。
- * 窄屏下两侧抽屉一起收起，否则日历被抽屉盖住等于没打开。
+ * 窄屏下两侧抽屉一起收起，否则退出去时抽屉状态会和 v-if 掉的栏对不上。
  */
 async function toggleCalendar(): Promise<void> {
   if (calendarMode.value) {
@@ -195,7 +212,7 @@ async function quoteNote(): Promise<void> {
 /**
  * 打开侧栏 AI 分区（快捷键入口共用）：窄屏下两侧是互斥抽屉，先关右栏、开左栏，
  * 再让 SideBar 把 section 切过去——section 是 SideBar 的本地状态，走它暴露的 showSection。
- * 日历不再走这条路：它已从侧栏分区升格为主区视图，见 toggleCalendar。
+ * 日历不再走这条路：它已从侧栏分区升格为全窗视图，见 toggleCalendar。
  */
 function openSideSection(next: 'ai'): void {
   if (narrow?.matches) {
@@ -230,7 +247,7 @@ const ACTIONS: Record<ShortcutId, () => void> = {
  * - 具体哪些组合可用、哪个组合被谁占用，都在 ui 与设置页里裁决，这里只管执行。
  */
 function onKeydown(event: KeyboardEvent): void {
-  // Esc 退出日历视图。日历是主区视图而不是浮层，没有自己的 focus trap，收口只能放这儿；
+  // Esc 退出日历视图。日历是全窗视图而不是浮层，没有自己的 focus trap，收口只能放这儿；
   // 浮层的 Esc 在 document 层就 stopPropagation 了（见 core/ui/focus-trap.ts），
   // 所以走到 window 这层时已经没有需要先关掉的弹窗。
   if (event.key === 'Escape' && calendarMode.value) {
@@ -448,7 +465,8 @@ onBeforeUnmount(() => {
         </template>
       </div>
 
-      <!-- 主体三栏：左文件树 / 中编辑器 / 右信息面板。窄屏下左右栏变成浮层抽屉，由 scrim 挡住内容并承接点击关闭 -->
+      <!-- 主体三栏：左文件树 / 中编辑器 / 右信息面板。窄屏下左右栏变成浮层抽屉，由 scrim 挡住内容并承接点击关闭。
+           日历模式下三栏里的左右两栏与中栏的编辑器一起让位（见各自的 v-if），日历占满整屏 -->
       <div class="app__body">
         <div
           class="scrim"
@@ -456,7 +474,7 @@ onBeforeUnmount(() => {
           @click="closeDrawers"
         ></div>
 
-        <aside class="app__side" :class="{ 'app__side--open': sidebarOpen }">
+        <aside v-if="!calendarMode" class="app__side" :class="{ 'app__side--open': sidebarOpen }">
           <SideBar
             ref="sidebarRef"
             @open="openNote"
@@ -469,7 +487,7 @@ onBeforeUnmount(() => {
         </aside>
 
         <!-- 主区是 flex column。日历模式下 NoteEditor 整个被 v-if 卸载（进入前已 flushSave），
-             同时右栏也 v-if 掉——main 的 flex:1 随即吃满两栏宽度，日历就此占据右边两栏。
+             左右两栏也 v-if 掉——三栏都是 flex 子项，让掉两栏剩下的这栏自然吃满整屏。
              用 v-if 而不是 v-show：卸载即销毁 vditor 实例，切回来重新建，代价是几百毫秒，
              换来的是编辑器不会在 display:none 里量错尺寸、也不会留一份指向已卸载实例的定时器。 -->
         <main class="app__main">

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 /**
- * 日历视图：占据主区（宽屏下连右栏一起，`app__right` 被 v-if 移除后 main 的 flex:1 自然吃满）。
+ * 日历视图：**占满整个窗口**。日历模式下 App 把左栏（文件树）、右栏（反链面板）和编辑器
+ * 一并 v-if 掉，三栏都是 flex 子项，让掉两栏剩下的这栏自然吃满——布局本身一行都不用改。
  *
  * 分隔纪律在这块 UI 上的落点：
  * - **一天一个目录**：`日记/YYYY-MM-DD/标题.md`，格子里直接列出该日各篇的标题（core/daily.ts
@@ -9,7 +10,7 @@
  * - 交互分工是刻意的：点**标题**打开那一篇，点**格子空白/日期号**就地输入标题新建一篇
  *   （多篇日记的意义就在标题，先建空文件再改名会攒出一堆「未命名」）；
  * - 本组件够不着的只有两件事，全部上抛：打开笔记（App 走 openNote，顺带退出日历）、
- *   退出视图（Esc 或「返回笔记」）。
+ *   退出视图（Esc / 「返回笔记」/ 再按一次快捷键 / 顶栏的两个面板开关）。
  *
  * 键盘延续侧栏既有标准：真 <button> + aria-label + roving tabindex（±1/±7 漫游，跨月自动翻页）。
  * 日期号按钮铺满整格做底层，标题按钮叠在上层——button 不能嵌套，两层并列是唯一解。
@@ -254,18 +255,20 @@ async function submitCompose(date: string): Promise<void> {
           </tr>
         </tbody>
       </table>
-
-      <p v-if="vault.dailyByDate.size === 0" class="calview__hint">
-        还没有日记。点任意一天的空白处,就地输入标题回车,会创建
-        <code>{{ dailyDirOf('2026-01-01') }}/标题.md</code> 这样的文件并打开;
-        一天可以写很多篇。方向键在日期间漫游,Enter 新建,Esc 返回编辑器。
-      </p>
     </div>
+
+    <!-- 提示放在滚动区**外面**：它属于「日历的说明」而不是「月历内容」，跟着滚的话会把
+         本就吃满视口的 .calview__grid 顶出去一截（实测 656px 高的窗口下多滚 74px） -->
+    <p v-if="vault.dailyByDate.size === 0" class="calview__hint">
+      还没有日记。点任意一天的空白处,就地输入标题回车,会创建
+      <code>{{ dailyDirOf('2026-01-01') }}/标题.md</code> 这样的文件并打开;
+      一天可以写很多篇。方向键在日期间漫游,Enter 新建,Esc 返回编辑器。
+    </p>
   </section>
 </template>
 
 <style scoped>
-/* 宽屏下本组件吃满 main（app__right 被 v-if 移除后 flex:1 自然扩张），窄屏就是 main 全宽。
+/* 日历模式下左栏、右栏、编辑器都被 App v-if 掉了，本组件就是整个窗口（宽屏窄屏一样）。
    颜色全部走 CSS 变量（verify-theme 禁止写死色值）。 */
 .calview {
   display: flex;
@@ -342,6 +345,9 @@ async function submitCompose(date: string): Promise<void> {
 
 .calview__grid {
   width: 100%;
+  /* 占满可视高度：日历现在吃的是整个窗口，行高固定 104px 会在下面留一大片空白。
+     表格的 height 在这里是「最小值」，多出来的空间按行分配，每格一起长高。 */
+  height: 100%;
   border-collapse: separate;
   border-spacing: 3px;
   table-layout: fixed;
@@ -355,7 +361,8 @@ async function submitCompose(date: string): Promise<void> {
   text-align: left;
 }
 
-/* td 是格子本体：日期号与标题列表都绝对/相对叠在里面，格高由内容撑开但有下限 */
+/* td 是格子本体：日期号与标题列表都绝对/相对叠在里面。height 在表格里当最小值用，
+   真正撑高的是 .calview__grid 的 height:100%（见那边），保证窄屏/行数少时也不会塌成一条 */
 .calview__td {
   position: relative;
   height: 104px;
@@ -480,9 +487,10 @@ async function submitCompose(date: string): Promise<void> {
   color: var(--text-muted);
 }
 
-/* 空态提示：组件各自 scoped，样式在本组件内自建，不借别人的 .hint */
+/* 空态提示：组件各自 scoped，样式在本组件内自建，不借别人的 .hint。
+   它是滚动区下方的固定页脚（见模板里的说明），下边距交给 .calview 自己的 padding-bottom */
 .calview__hint {
-  margin: 14px 4px;
+  margin: 10px 4px 0;
   font-size: 12.5px;
   line-height: 1.8;
   color: var(--text-muted);

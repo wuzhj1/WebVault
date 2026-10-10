@@ -14,8 +14,8 @@ import { useVaultStore, type TreeNode } from '@/stores/vault.ts'
  * - `open(path)`：打开某篇笔记（文件树、书签行、待建行、新建/重命名后跳转、AI 产出行）。
  * - `search(query)`：点标签行时把 `#标签` 交给 App 打开全库搜索面板——标签的「结果列表」
  *   本来就是搜索的强项，比在侧栏里另造一个列表更省事，也复用了现成的命中摘要。
- * - `calendar`：rail 的日历图标。日历已升格为主区视图（App 的 calendarMode），不是侧栏分区，
- *   这里只能上抛——主区怎么显示是 App 的事，侧栏够不着。
+ * - `calendar`：rail 的日历图标。日历已升格为全窗视图（App 的 calendarMode），不是侧栏分区，
+ *   这里只能上抛——整屏怎么显示是 App 的事，侧栏够不着（它自己在日历模式下也被 v-if 掉了）。
  * - `quote-note` / `insert` / `open-ai-settings`：AI 面板的三条上行通道——引用当前笔记要先
  *   `flushSave`（只有 App 拿得到编辑器）、插入要走编辑器、打开设置页要走 App 的 overlay，
  *   三者都够不着，统一分发给 App 处理（面板自己永远不碰编辑器与浮层）。
@@ -40,7 +40,7 @@ const aiStore = useAiStore()
 /**
  * 让 App（快捷键 `mod+alt+a`）把侧栏切到 AI 分区：section 是本组件的本地状态，
  * 没进 ui store，外部要改只能走暴露的方法——保持「分区状态不落盘」的既有纪律。
- * 日历不在此列：它已升格为主区视图，走的是 emit('calendar') → App 的 calendarMode。
+ * 日历不在此列：它已升格为全窗视图，走的是 emit('calendar') → App 的 calendarMode。
  */
 function showSection(next: Section): void {
   section.value = next
@@ -63,7 +63,7 @@ const createInput = ref<HTMLInputElement | null>(null)
  * 四个分区；数组顺序即活动栏图标顺序，也是指示条按下标平移的依据。
  * 笔记 / 待建 / 标签是「库里已有的东西」，AI 是「草稿与外脑」——后者与前三者不同级，
  * 放在「＋新建」上方会被当成笔记的一种，故压在最后单独一档。
- * 日历曾经是第五个分区，现已升格为主区视图（App 的 calendarMode），rail 上的图标只负责上抛。
+ * 日历曾经是第五个分区，现已升格为全窗视图（App 的 calendarMode），rail 上的图标只负责上抛。
  */
 const SECTIONS = ['files', 'unresolved', 'tags', 'ai'] as const
 type Section = (typeof SECTIONS)[number]
@@ -483,7 +483,7 @@ onBeforeUnmount(closeMenu)
         <span v-if="sectionCounts.ai > 0" class="rail__badge">{{ railText(sectionCounts.ai) }}</span>
       </button>
 
-      <!-- 日历：主区视图开关（不是分区，故没有 --on 态）。必须排在四个分区**之后**——
+      <!-- 日历：全窗视图开关（不是分区，故没有 --on 态）。必须排在四个分区**之后**——
            指示条按下标 × 37px 平移（见 sectionIndex），中间插一个非分区的按钮会把它顶偏一档。
            徽标是「有日记的天数」，与月历格子的打点同源 -->
       <button
