@@ -14,6 +14,7 @@
 import { defineStore } from 'pinia'
 import { computed, ref, shallowRef } from 'vue'
 import { db, putSetting, type CardRow, type LinkRow, type NoteMeta, type TagRow } from '@/core/db.ts'
+import { dateOfDaily } from '@/core/daily.ts'
 import { flushToFiles, hydrateFromFiles } from '@/core/vault/datafiles.ts'
 // 键名只在 core/vault/config-layout.ts 声明一次，那里同时决定它落进 .webvault/workspace.json。
 import { SETTING_KEYS } from '@/core/vault/config-layout.ts'
@@ -169,6 +170,20 @@ export const useVaultStore = defineStore('vault', () => {
   const unresolvedTargets = shallowRef<string[]>([])
   /** 全库标签及计数，按次数倒序，供标签面板使用。 */
   const allTags = shallowRef<{ tag: string; count: number }[]>([])
+  /**
+   * 有日记的日期集合（`YYYY-MM-DD`），供侧栏日历徽标与月历打点共用这一份真相。
+   * 直接从路径形状算出来（core/daily.ts），不新增 frontmatter 字段或 Dexie 列：
+   * 新建/删除/改名都换掉 notes 数组，本 computed 自然跟着走，无需差额维护。
+   */
+  const dailyDates = computed<ReadonlySet<string>>(() => {
+    const out = new Set<string>()
+    for (const n of notes.value) {
+      if (n.removedLocal) continue
+      const d = dateOfDaily(n.path)
+      if (d) out.add(d)
+    }
+    return out
+  })
   /**
    * 未解析目标 → 出现次数的**内存镜像**，与 `db.links` 始终同步：
    * `reindexContent` 在每次正文写入时按差额调整，`refreshDerived` 全量重建收口。
@@ -1068,6 +1083,7 @@ export const useVaultStore = defineStore('vault', () => {
     outgoing,
     unresolvedTargets,
     allTags,
+    dailyDates,
     cards,
     cardByPath,
     revision,

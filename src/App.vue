@@ -49,7 +49,7 @@ const aiStore = useAiStore()
 
 /** NoteEditor 实例：插入 [[链接]] 与强制落盘（flushSave）都经由它转发。 */
 const editorRef = ref<InstanceType<typeof NoteEditor> | null>(null)
-/** 侧栏实例:快捷键要透过它把分区切到 AI(section 是 SideBar 的本地状态)。 */
+/** 侧栏实例:快捷键要透过它把分区切到 AI / 日历(section 是 SideBar 的本地状态)。 */
 const sidebarRef = ref<InstanceType<typeof SideBar> | null>(null)
 /** 当前挂载的浮层，同一时刻至多一个。 */
 const overlay = ref<Overlay>(null)
@@ -163,16 +163,16 @@ async function quoteNote(): Promise<void> {
 }
 
 /**
- * 打开侧栏 AI 分区（快捷键与顶栏入口共用）：窄屏下两侧是互斥抽屉，先关右栏、开左栏，
+ * 打开侧栏某个分区（快捷键入口共用）：窄屏下两侧是互斥抽屉，先关右栏、开左栏，
  * 再让 SideBar 把 section 切过去——section 是 SideBar 的本地状态，走它暴露的 showSection。
  */
-function openAiPanel(): void {
+function openSideSection(next: 'ai' | 'calendar'): void {
   if (narrow?.matches) {
     sidebarOpen.value = true
     rightOpen.value = false
     syncDrawerState()
   }
-  sidebarRef.value?.showSection('ai')
+  sidebarRef.value?.showSection(next)
 }
 
 /**
@@ -185,7 +185,8 @@ const ACTIONS: Record<ShortcutId, () => void> = {
   settings: () => show('settings'),
   cheatsheet: () => show('settings', 'shortcuts'),
   graph: () => show('graph'),
-  ai: openAiPanel,
+  calendar: () => openSideSection('calendar'),
+  ai: () => openSideSection('ai'),
 }
 
 /**

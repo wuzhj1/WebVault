@@ -33,7 +33,7 @@ const PINNED_KEY = SETTING_KEYS.pinnedPaths
 const RECENT_MAX = 10
 
 /** 可改快捷键的命令：id 即存储键名，label 是设置页显示名，default 是出厂绑定（规范串）。 */
-export type ShortcutId = 'picker' | 'search' | 'settings' | 'cheatsheet' | 'graph' | 'ai'
+export type ShortcutId = 'picker' | 'search' | 'settings' | 'cheatsheet' | 'graph' | 'calendar' | 'ai'
 
 export const SHORTCUT_COMMANDS: ReadonlyArray<{ id: ShortcutId; label: string; default: string }> = [
   { id: 'picker', label: '链接选择器', default: 'mod+k' },
@@ -41,6 +41,8 @@ export const SHORTCUT_COMMANDS: ReadonlyArray<{ id: ShortcutId; label: string; d
   { id: 'settings', label: '打开设置', default: 'mod+,' },
   { id: 'cheatsheet', label: '快捷键速查表', default: '?' },
   { id: 'graph', label: '关系图谱', default: 'mod+g' },
+  // mod+alt+d：与 AI 的 mod+alt+a 同族（避开 mod+shift+d——部分浏览器绑「收藏全部标签页」）。
+  { id: 'calendar', label: '日历', default: 'mod+alt+d' },
   // 选 mod+alt+a 而不是更顺手的 mod+shift+a：后者在 Chrome 里是「搜索标签页」，
   // 浏览器在页面之前就吃掉了，绑定看似成功、按下却永远没反应。
   { id: 'ai', label: 'AI 助手', default: 'mod+alt+a' },

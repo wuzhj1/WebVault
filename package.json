@@ -9,7 +9,7 @@
     "og": "node scripts/make-og-cover.mjs",
     "build": "vue-tsc --noEmit && node scripts/make-icons.mjs && node scripts/copy-vditor.mjs && vite build",
     "typecheck": "vue-tsc --noEmit",
-    "verify": "node scripts/copy-vditor.mjs && node scripts/verify-config.mts && node scripts/verify-parse.mts && node scripts/verify-frontmatter.mts && node scripts/verify-rewrite.mts && node scripts/verify-merge.mts && node scripts/verify-remote-diff.mts && node scripts/verify-search.mts && node scripts/verify-theme.mts && node scripts/verify-paths.mts && node scripts/verify-hash.mts && node scripts/verify-resolve.mts && node scripts/verify-flush-state.mts && node scripts/verify-zip.mts && node scripts/verify-redact.mts && node scripts/verify-config-layout.mts && node scripts/verify-ai-prompts.mts",
+    "verify": "node scripts/copy-vditor.mjs && node scripts/verify-config.mts && node scripts/verify-parse.mts && node scripts/verify-frontmatter.mts && node scripts/verify-rewrite.mts && node scripts/verify-merge.mts && node scripts/verify-remote-diff.mts && node scripts/verify-search.mts && node scripts/verify-theme.mts && node scripts/verify-paths.mts && node scripts/verify-hash.mts && node scripts/verify-resolve.mts && node scripts/verify-flush-state.mts && node scripts/verify-zip.mts && node scripts/verify-redact.mts && node scripts/verify-config-layout.mts && node scripts/verify-ai-prompts.mts && node scripts/verify-daily.mts",
     "preview": "vite preview"
   },
   "dependencies": {
