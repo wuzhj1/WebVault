@@ -48,8 +48,8 @@ const emit = defineEmits<{
   /** 选区浮层里的「去设置」:本组件碰不到 overlay,交 App 打开设置的 AI 页。 */
   (e: 'open-ai-settings'): void
   /**
-   * 本篇的大纲变了(换文、增删标题、打字)。交给 App 转给右栏——右栏可能在本组件
-   * 卸载时(日历模式)仍是关闭的,状态必须存在比两者生命周期更长的地方。
+   * 本篇的大纲变了(换文、增删标题、打字)。交给 App 转给右栏——右栏会被顶栏开关随时关闭重挂,
+   * 状态必须存在比两者生命周期更长的地方。
    */
   (e: 'outline', items: OutlineItem[]): void
 }>()
@@ -795,9 +795,8 @@ watch(
  * `applyEditable` 见 `state !== 'ready'` 会把解锁原样丢掉,所以任何路径(顶栏那把锁、
  * 只读提示条、AI 面板的 `insertMarkdown`)在正文没就绪时把 `editable` 翻真,都只会得到
  * 一个假的「编辑中」:顶栏据此禁用锁并写明原因,这里则在正文掉出 ready 时把锁态一并收回。
- * `NoteEditor` 带 `v-if` 只在日历模式下会卸载重建(见 App 的 calendarMode),`immediate` 是为了
- * 让初始空态与默认值对齐;「新建即可编辑」走的是直达 ready 的路,中途不经过 ready 之外的状态,
- * 不会被这条收回。
+ * `NoteEditor` 不带 v-if、整个生命周期只挂载一次,`immediate` 只是让初始空态与默认值对齐;
+ * 「新建即可编辑」走的是直达 ready 的路,中途不经过 ready 之外的状态,不会被这条收回。
  */
 watch(
   state,
