@@ -12,6 +12,7 @@
 - 双链 `[[笔记]]`、别名 `[[路径|显示名]]`；`[[笔记#小节]]`、`[[笔记#^block]]`、`![[笔记]]` 会被解析并索引，在反链面板上标注出来，重命名时原样保留
 - 编辑器里的双链**直接渲染成可点击的链接**：方括号和别名前的路径隐藏，只显示你要读的那段文字；已存在的笔记是实色胶囊，还没创建的目标是虚线灰字（点一下就建），附件用点线区分。光标进入某一行时该行自动展开成原始 markdown，方便改写链接本身
 - 反向链接 / 出链 / 待创建目标面板，点击不存在的链接直接建笔记
+- 右栏第三个页签是**大纲**：跟着打字实时列出本文标题（级数用缩进与 `#` 的个数表示），点一条就把编辑器滚到那一节并落光标。大纲从**编辑器的 IR DOM** 读而不是解析 markdown 源码——源码那套 ATX 正则抓不到引用块里的 `> # 标题` 和 setext 的 `标题` + `===`，而它们在编辑器里都是真标题，按源码顺序给 DOM 下标必然跳错位；反过来代码围栏里的 `# 代码` 渲染在 `<pre>` 里不是 heading，天然不进大纲
 - 重命名或移动笔记时，全库指向它的 `[[双链]]` 自动改写
 - 旧笔记里遗留的卡片盒元数据块（frontmatter 的 `id` / `type` / `tags` 等）**原样保留、永不改写**，`[[202609151423]]` 这样的永久 ID 链接依旧能解析、改名不断链
 - 侧栏是 44px **活动栏**：笔记 / 待建 / 标签 / AI 四个图标切换右侧内容面板，图标上挂计数徽标；第五个日历图标不是分区，而是切换**全窗日历视图**的开关。分区都能过滤，笔记区内**目录 / 置顶 / 最近**三个标签页切换视图（书签不再和目录树混排），点标签行直接全库搜索 `#标签`
@@ -40,7 +41,7 @@ pnpm dev           # http://localhost:5173
 自检命令：
 
 ```bash
-pnpm verify        # 17 个验证套件,1214 条断言(配置 / 解析 / frontmatter 与 ID 兼容 / 链接改写 / 三方合并 / 远端删除判定 / 搜索 / 主题 / 路径与标题 / 内容指纹 / 链接解析 / 落盘簿记 / ZIP 打包 / 凭据抹除 / 配置目录形状 / AI 标记与提示词 / 日历日期)
+pnpm verify        # 18 个验证套件,1242 条断言(配置 / 解析 / frontmatter 与 ID 兼容 / 链接改写 / 三方合并 / 远端删除判定 / 搜索 / 主题 / 路径与标题 / 内容指纹 / 链接解析 / 落盘簿记 / ZIP 打包 / 凭据抹除 / 配置目录形状 / AI 标记与提示词 / 日历日期 / 大纲文本)
 pnpm typecheck     # vue-tsc --noEmit
 pnpm build         # 类型检查 → 生成 PWA 图标与 vditor 静态资源 → 产出 dist/
 ```
@@ -306,7 +307,7 @@ Safari 的防跟踪策略（ITP）会在大约 7 天不使用后清空该站点�
 ## 已知限制
 
 - 附件（图片等）只会被当作链接索引进「待创建」列表，**不支持预览或上传**。
-- `![[嵌入]]` 不会内联渲染，`[[笔记#小节]]` 跳转后也不会自动滚动到该小节——锚点部分只用于索引与反链展示，导航时会被忽略。
+- `![[嵌入]]` 不会内联渲染，`[[笔记#小节]]` 跳转后也不会自动滚动到该小节——锚点部分只用于索引与反链展示，导航时会被忽略。（要按小节跳过去，用右栏「大纲」页签：它走的是编辑器自己的标题序列，与双链锚点是两条互不相干的路。）
 - Vditor 即时渲染模式在首次编辑时会规范化部分 Markdown 语法（列表符号、空行等），这是编辑器内核的行为，不是同步造成的。
 - 和桌面版 Obsidian 可以共用同一个 git 仓库（都是普通 `.md` + `[[双链]]`）；**iOS 版 Obsidian 没有 git 同步，无法直接互通**。
 - 只同步 `.md` 文件。仓库里的其它文件既不会被下载，也不会被删除。
@@ -340,7 +341,7 @@ src/
     daily.ts           日记日历的纯函数:日期 ↔ 路径(一天一个目录 `日记/日期/标题.md`)、今天、月矩阵(周一开头)
     vault/             OPFS 读写与文件 mtime、路径规范化、git blob sha、.webvault 配置目录形状与落盘簿记、
                        zip 打包与导出备份(含凭据抹除)
-    editor/            编辑器内双链胶囊的 DOM 装饰(字符原样保留,不影响 Lute 序列化)
+    editor/            编辑器内双链胶囊的 DOM 装饰(字符原样保留,不影响 Lute 序列化)与大纲读取(IR DOM → 标题序列)
     index/             双链与标签解析、链接目标解析规则(含按 ID 解析)
     parse/             Markdown 扫描:[[链接]]、#标签、标题锚点;frontmatter 的逐行无损读写
     search/            CJK 分词 + MiniSearch 索引与摘要
@@ -355,8 +356,8 @@ src/
                        SearchPanel、LinkPicker、GraphView、SettingsDialog、Notices、
                        AiPanel(侧栏 AI 分区)、AiSelection(选区浮层)、
                        CalendarView(全窗日历视图,占满整个窗口)
-scripts/               图标生成、vditor 资源拷贝 + 17 个 Node 验证套件(pnpm verify),CI 见 .github/workflows/
+scripts/               图标生成、vditor 资源拷贝 + 18 个 Node 验证套件(pnpm verify),CI 见 .github/workflows/
 public/vditor/         自托管的编辑器资源,由 scripts/copy-vditor.mjs 从 node_modules 拷出,不入库
 ```
 
-`core/parse/frontmatter.ts`、`core/zettel/*`、`core/vault/flush-state.ts`、`core/vault/zip.ts`、`core/vault/redact.ts`、`core/vault/config-layout.ts`、`core/daily.ts` 和 `core/ai/{marks,prompts}.ts` 是纯函数模块，有两条硬约束：**只用相对导入**（验证脚本以 `node scripts/*.mts` 直跑，没有 `@/` 别名解析），且**不得在运行时导入 `db.ts`**（它在模块作用域就构造 Dexie，需要 IndexedDB）。用 `import type` 引类型是安全的，编译后会被擦除。违反任一条，验证脚本会静默失效或直接崩掉。
+`core/parse/frontmatter.ts`、`core/zettel/*`、`core/vault/flush-state.ts`、`core/vault/zip.ts`、`core/vault/redact.ts`、`core/vault/config-layout.ts`、`core/daily.ts`、`core/ai/{marks,prompts}.ts` 和 `core/editor/outline.ts` 是纯函数模块，有两条硬约束：**只用相对导入**（验证脚本以 `node scripts/*.mts` 直跑，没有 `@/` 别名解析），且**不得在运行时导入 `db.ts`**（它在模块作用域就构造 Dexie，需要 IndexedDB）。用 `import type` 引类型是安全的，编译后会被擦除。违反任一条，验证脚本会静默失效或直接崩掉。

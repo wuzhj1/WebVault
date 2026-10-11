@@ -18,6 +18,7 @@ import { getSetting } from './core/db.ts'
 import { SETTING_KEYS } from './core/vault/config-layout.ts'
 import { splitFrontmatter } from './core/parse/frontmatter.ts'
 import { dropPendingSave, readPendingSave, snapshotPendingSave } from './core/editor/pending-save.ts'
+import type { OutlineItem } from './core/editor/outline.ts'
 import { onFlushError } from './core/vault/datafiles.ts'
 import { bindingOfEvent, hasMod, isTypingTarget } from './core/hotkeys.ts'
 import { registerAppSW } from './core/pwa.ts'
@@ -48,8 +49,14 @@ const aiSettings = useAiSettingsStore()
 /** AI 对话（quoteNote 往里放引用芯片；历史也在启动时读一次）。 */
 const aiStore = useAiStore()
 
-/** NoteEditor 实例：插入 [[链接]] 与强制落盘（flushSave）都经由它转发。 */
+/** NoteEditor 实例：插入 [[链接]]、强制落盘（flushSave）与大纲跳转都经由它转发。 */
 const editorRef = ref<InstanceType<typeof NoteEditor> | null>(null)
+/**
+ * 当前笔记的大纲，由 NoteEditor 的 `outline` 事件喂进来。
+ * 存在这里而不是右栏本地：右栏会被顶栏开关随时关闭重挂，state 留在本地一关就丢了；
+ * 也不进 store——它和 `searchQuery` 一样是纯 UI 状态，没有跨组件共享之外的用处。
+ */
+const outline = ref<OutlineItem[]>([])
 /** 侧栏实例:快捷键要透过它把分区切到 AI(section 是 SideBar 的本地状态)。 */
 const sidebarRef = ref<InstanceType<typeof SideBar> | null>(null)
 /** 当前挂载的浮层，同一时刻至多一个。 */
@@ -498,12 +505,17 @@ onBeforeUnmount(() => {
             @open-link="openNote"
             @pick-link="show('picker')"
             @open-ai-settings="show('settings', 'ai')"
+            @outline="outline = $event"
             :startup-done="startupDone"
           />
         </main>
 
         <aside v-if="!calendarMode" class="app__right" :class="{ 'app__right--open': rightOpen }">
-          <RightPanel @open="openNote" />
+          <RightPanel
+            :outline="outline"
+            @open="openNote"
+            @jump="(i) => editorRef?.jumpToHeading(i)"
+          />
         </aside>
       </div>
     </template>

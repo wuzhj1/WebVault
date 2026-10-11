@@ -1,20 +1,25 @@
 <script setup lang="ts">
 /**
- * 右侧面板：当前笔记的「链接」与「信息」两个分区。
+ * 右侧面板：当前笔记的「链接 / 信息 / 大纲」三个分区。
  * - 链接：反向链接、出链、待创建（unresolved wikilink）、附件。
  * - 信息：路径 / 同步状态 / 字数 / 修改时间 / 标签。
+ * - 大纲：正文里的标题列表，按下标跳回编辑器。
  *
- * 数据源分工：链接结构来自 vault store；而标签、字数这类要从正文算的字段走本地
+ * 数据源分工：链接结构来自 vault store；标签、字数这类要从正文算的字段走本地
  * loadDetails() 异步查 Dexie + readBody，因为未下载的笔记（cached=false）根本没有正文可读。
+ * 大纲另走一条：它是**未落盘**的编辑器实时状态，只能由 NoteEditor 上抛，本组件只负责渲染。
  *
  * emits：
  * - 'open'(path)：跳转到某篇笔记（反链行、出链行、新建的待建笔记）。
+ * - 'jump'(index)：大纲条目被点中。只交下标——这一节在 DOM 里的位置才是权威，
+ *   拿标题文字去搜在同名标题时会找错，且右栏拿到的可能是编辑器卸载前的旧值。
  *
  * 依赖 store：vault（当前笔记与链接图）。卡片盒的类型/ID/别名/相关卡片与收集箱待整理
  * 条目已随卡片盒功能一并移除；元数据块只在信息分区做重复键告警，不再读取展示卡片字段。
  */
 import { computed, ref, watch } from 'vue'
 import { db } from '@/core/db.ts'
+import type { OutlineItem } from '@/core/editor/outline.ts'
 import { parseFrontmatter } from '@/core/parse/frontmatter.ts'
 import { useSyncStore } from '@/stores/sync.ts'
 import { useVaultStore } from '@/stores/vault.ts'
@@ -22,6 +27,13 @@ import { useVaultStore } from '@/stores/vault.ts'
 const emit = defineEmits<{
   /** 跳转到某篇笔记:反链行、出链行、新建的待建笔记都会发这个事件。 */
   (e: 'open', path: string): void
+  /** 大纲条目被点中:交出它的下标,由 App 让编辑器滚到那一节。 */
+  (e: 'jump', index: number): void
+}>()
+
+const { outline } = defineProps<{
+  /** 当前笔记的大纲,App 从 NoteEditor 的 outline 事件转发过来。 */
+  outline: OutlineItem[]
 }>()
 
 const vault = useVaultStore()
@@ -34,8 +46,17 @@ const tags = ref<string[]>([])
 const words = ref<number | null>(null)
 /** 元数据块里重复出现的键（同步合并可能造成），只提示不自动改。 */
 const duplicateKeys = ref<string[]>([])
-/** 当前分区:链接 / 信息;切换只决定渲染哪一段,不影响各分区的计算属性。 */
-const section = ref<'links' | 'info'>('links')
+/** 当前分区:链接 / 信息 / 大纲;切换只决定渲染哪一段,不影响各分区的计算属性。 */
+const section = ref<'links' | 'info' | 'outline'>('links')
+
+/**
+ * 级数画成 `#` 重复几遍。级数本该恒为 1-6(取自 `h1..h6` 标签名,见 core/editor/outline.ts),
+ * 但万一传进 NaN,`'#'.repeat(NaN)` 会抛 RangeError 并把整个 App 打崩 —— 一道夹取换掉白屏。
+ */
+function marks(level: number): string {
+  const n = Number.isFinite(level) ? Math.min(Math.max(Math.trunc(level), 1), 6) : 1
+  return '#'.repeat(n)
+}
 
 /** 当前笔记元信息；为空表示没打开任何笔记，整个面板退化为提示文案。 */
 const meta = computed(() => vault.activeNote)
@@ -135,16 +156,23 @@ watch(
         >
           信息
         </button>
+        <button
+          class="tabs__btn"
+          :class="{ 'tabs__btn--on': section === 'outline' }"
+          @click="section = 'outline'"
+        >
+          大纲
+        </button>
       </nav>
     </div>
 
     <div class="panel__scroll">
-      <!-- 元数据块异常提示:置于两个分区之上,切换页签也始终可见 -->
+      <!-- 元数据块异常提示:置于各分区之上,切换页签也始终可见 -->
       <p v-if="duplicateKeys.length > 0" class="warn">
         元数据块里有重复的键 <code>{{ duplicateKeys.join(', ') }}</code>(可能是同步合并造成的)。已保留第一处,请在编辑器里手动删掉多余的行。
       </p>
 
-      <p v-if="!meta" class="hint">打开一篇笔记后,这里会显示它的反向链接与笔记信息。</p>
+      <p v-if="!meta" class="hint">打开一篇笔记后,这里会显示它的反向链接、笔记信息与大纲。</p>
 
       <!-- 链接分区:反向链接 → 出链 → 待创建 → 附件,后三组无内容时整组隐藏 -->
       <template v-else-if="section === 'links'">
@@ -214,6 +242,32 @@ watch(
         </section>
       </template>
 
+      <!-- 大纲分区:条目直接来自编辑器的实时状态,故不落盘、不同步、切页签也不会重算 -->
+      <template v-else-if="section === 'outline'">
+        <section class="group">
+          <h4 class="group__title">
+            大纲
+            <span class="group__count">{{ outline.length }}</span>
+          </h4>
+          <p v-if="outline.length === 0" class="hint">
+            这篇笔记还没有标题。编辑器里行首输入 <code># </code> 是一级,<code>## </code> 是二级,依次往下。
+          </p>
+          <ul v-else class="toc">
+            <li v-for="(h, i) in outline" :key="i">
+              <button
+                class="toc__row"
+                :style="{ paddingLeft: `${8 + (h.level - 1) * 10}px` }"
+                :title="h.text || '无标题'"
+                @click="emit('jump', i)"
+              >
+                <span class="toc__mark" aria-hidden="true">{{ marks(h.level) }}</span>
+                <span class="toc__text">{{ h.text || '(无标题)' }}</span>
+              </button>
+            </li>
+          </ul>
+        </section>
+      </template>
+
       <!-- 信息分区:路径、同步状态与从正文算出来的字段(卡片元数据展示已随卡片盒移除) -->
       <template v-else>
         <dl class="info">
@@ -257,7 +311,7 @@ watch(
   border-bottom: 1px solid var(--border);
 }
 
-/* —— 顶部「链接 / 信息」页签 —— */
+/* —— 顶部「链接 / 信息 / 大纲」页签 —— */
 .tabs {
   display: flex;
   gap: 2px;
@@ -390,6 +444,47 @@ watch(
 
 .links__row--new .links__title {
   color: var(--warn);
+}
+
+/* —— 大纲列表:按级数往右缩,级数本身用 `#` 的个数画出来 —— */
+.toc {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* 与 .links__row 同源:悬停时亮出左侧 accent 指示条,让同面板里的行长得像一行的 */
+.toc__row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  width: 100%;
+  padding: 4px 8px;
+  border-left: 2px solid transparent;
+  border-radius: 6px;
+  text-align: left;
+}
+
+.toc__row:hover {
+  background: var(--bg-hover);
+  border-left-color: var(--accent);
+}
+
+.toc__mark {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: -0.5px;
+  color: var(--text-muted);
+}
+
+.toc__text {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .hint {

@@ -3,9 +3,10 @@
  * 主编辑器:承载一个 Vditor 实例(IR / live-preview 模式),编辑 `vault.activePath` 指向的那篇笔记。
  *
  * props.startupDone 只在空态占位页上用;emits `open-link`(点到的 wikilink 解析成了某个路径,交给
- * App 去打开)、`pick-link`(空态那个按钮要呼出链接选择器)与 `open-ai-settings`(选区 AI 浮层的
- * 「去设置」)。父组件通过 defineExpose 的三个方法反向操控本组件:`flushSave` 落盘、
- * `insertLink` 从选择器插链、`insertMarkdown` 插入带标记的 AI 内容(选区浮层与侧栏 AI 面板共用)。
+ * App 去打开)、`pick-link`(空态那个按钮要呼出链接选择器)、`open-ai-settings`(选区 AI 浮层的
+ * 「去设置」)与 `outline`(本篇的大纲变了,交 App 转给右栏)。父组件通过 defineExpose 的四个方法
+ * 反向操控本组件:`flushSave` 落盘、`insertLink` 从选择器插链、`insertMarkdown` 插入带标记的
+ * AI 内容(选区浮层与侧栏 AI 面板共用)、`jumpToHeading` 按大纲下标滚到某一节。
  *
  * 读 vault(正文与 resolver)、appearance(明暗翻转)、sync(notify 与 schedulePush / fetchBody)。
  *
@@ -28,6 +29,7 @@ import {
   markActiveBlock,
   type WikilinkLookup,
 } from '@/core/editor/wikilink-dom.ts'
+import { HEADING_SELECTOR, outlineOf, type OutlineItem } from '@/core/editor/outline.ts'
 import AiSelection from './AiSelection.vue'
 import { slashHint } from '@/core/editor/slash-commands.ts'
 import { clearPendingSave, snapshotPendingSave } from '@/core/editor/pending-save.ts'
@@ -45,6 +47,11 @@ const emit = defineEmits<{
   (e: 'pick-link'): void
   /** 选区浮层里的「去设置」:本组件碰不到 overlay,交 App 打开设置的 AI 页。 */
   (e: 'open-ai-settings'): void
+  /**
+   * 本篇的大纲变了(换文、增删标题、打字)。交给 App 转给右栏——右栏可能在本组件
+   * 卸载时(日历模式)仍是关闭的,状态必须存在比两者生命周期更长的地方。
+   */
+  (e: 'outline', items: OutlineItem[]): void
 }>()
 
 const props = withDefaults(defineProps<{
@@ -277,11 +284,33 @@ function queueDecorate(): void {
 }
 
 /**
+ * 上一次抛出去的大纲;用来挡掉内容没变时的重复 emit —— 装饰管线每敲一个字都会跑一轮,
+ * 而绝大多数输入根本不改标题,不该让右栏跟着刷一遍。
+ */
+let outlineLast: OutlineItem[] = []
+
+/** 从 IR DOM 读一遍大纲,变了才抛给 App。 */
+function emitOutline(): void {
+  const next = outlineOf(irRoot)
+  if (next.length === outlineLast.length && next.every((h, i) => {
+    const prev = outlineLast[i]
+    return prev.level === h.level && prev.text === h.text
+  })) return
+  outlineLast = next
+  emit('outline', next)
+}
+
+/**
  * 真正跑一轮装饰:重算活动块,再只对**种子**跑 lookupLink 与胶囊重绘。
  * 上一轮的活动块每次都入种:它在光标下待过、一直是裸 markdown,离开光标才轮到它被装饰。
+ *
+ * 大纲也挂在这条路上:它要的是「标题变了」的信号,而 MutationObserver 盯的正是 IR DOM,
+ * 由 queueDecorate 合并成一个微任务 —— 比在 onInput 里另起一套时机可靠(那时 Vditor
+ * 可能还没把 `# ` 渲染成真正的 h1),也天然覆盖换文与外部改写。
  */
 function runDecorate(): void {
   if (!irRoot) return
+  emitOutline()
   const prevActive = activeBlock
   activeBlock = markActiveBlock(irRoot)
   if (prevActive) seedNodes.add(prevActive)
@@ -766,8 +795,9 @@ watch(
  * `applyEditable` 见 `state !== 'ready'` 会把解锁原样丢掉,所以任何路径(顶栏那把锁、
  * 只读提示条、AI 面板的 `insertMarkdown`)在正文没就绪时把 `editable` 翻真,都只会得到
  * 一个假的「编辑中」:顶栏据此禁用锁并写明原因,这里则在正文掉出 ready 时把锁态一并收回。
- * `NoteEditor` 不带 v-if、整个生命周期只挂载一次,immediate 只是让初始空态与默认值对齐;
- * 「新建即可编辑」走的是直达 ready 的路,中途不经过 ready 之外的状态,不会被这条收回。
+ * `NoteEditor` 带 `v-if` 只在日历模式下会卸载重建(见 App 的 calendarMode),`immediate` 是为了
+ * 让初始空态与默认值对齐;「新建即可编辑」走的是直达 ready 的路,中途不经过 ready 之外的状态,
+ * 不会被这条收回。
  */
 watch(
   state,
@@ -798,8 +828,28 @@ watch(
   },
 )
 
-/** 暴露给父组件的三个反向操控入口:强制落盘、从选择器插链、插入成块 markdown(AI)。 */
-defineExpose({ flushSave, insertLink, insertMarkdown })
+/**
+ * 滚到第 `index` 个标题并把光标放进去(右栏「大纲」页签调用)。
+ *
+ * 下标与 `HEADING_SELECTOR` 查出来的序列一一对应 —— 两者共用同一个常量,分叉了下标就错位。
+ * 越界一律夹到末尾:用户刚删掉一个标题就去点面板,应当落在最后一个标题上而不是什么也没发生。
+ *
+ * 顺序是「先滚、后放光标」:滚动是这次点击唯一保证要发生的事(只读的笔记同样该能跳),
+ * 放光标是锦上添花,只在可编辑时做 —— 锁着的笔记 focus 不进去,硬做只会得到一个假选区。
+ */
+function jumpToHeading(index: number): void {
+  if (!irRoot) return
+  const list = irRoot.querySelectorAll<HTMLElement>(HEADING_SELECTOR)
+  const target = list[Math.min(Math.max(index, 0), Math.max(list.length - 1, 0))]
+  if (!target) return
+  target.scrollIntoView({ block: 'center' })
+  if (!vault.editable) return
+  editor?.focus()
+  setRangeAt(target, true)
+}
+
+/** 暴露给父组件的四个反向操控入口:强制落盘、从选择器插链、插入成块 markdown(AI)、大纲跳转。 */
+defineExpose({ flushSave, insertLink, insertMarkdown, jumpToHeading })
 </script>
 
 <template>
