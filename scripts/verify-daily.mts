@@ -1,9 +1,11 @@
 /**
  * 日历纯函数验证（src/core/daily.ts）：
- * - 路径契约：**一天一个目录**，日记只认 `日记/YYYY-MM-DD/标题.md`（大小写不敏感的扩展名，
- *   对齐 paths.ts 口径）。日期在目录段、标题在文件名段——因此标题就是文件名，`titleOf` 原样可用，
- *   一天可以有任意多篇。日期必须真实存在——`2026-02-30`、`2026-13-01` 一律拒收，
- *   否则徽标会点亮一个造不出来的文件；
+ * - **日期来源（读取端）**：frontmatter 的 `date:`——`dailyDateOf` 是日历唯一认可的日期来源。
+ *   位置不再承担索引职责，因此把日记挪出 `日记/` 也不会从日历上消失；
+ * - **路径契约（写入端与回填）**：新建仍按**一天一个目录**落 `日记/YYYY-MM-DD/标题.md`
+ *   （大小写不敏感的扩展名，对齐 paths.ts 口径），标题即文件名，`titleOf` 原样可用，
+ *   一天可以有任意多篇；`dateOfDaily` 只服务回填（给缺 `date:` 的存量日记补字段）。
+ *   日期必须真实存在——`2026-02-30`、`2026-13-01` 一律拒收，否则徽标会点亮一个造不出来的文件；
  * - 本地日：`todayStr` 走 getFullYear/getMonth/getDate，UTC+8 的 0–8 点不能退成前一天
  *   （与 toISOString 的 UTC 日对照钉死这一点）；
  * - 日期运算：addDays 跨月/跨年/闰日，daysInMonth 与闰年（2024-02 = 29 天）；
@@ -17,10 +19,12 @@ import {
   DAILY_DIR,
   WEEKDAY_NAMES,
   addDays,
+  dailyDateOf,
   dailyDirOf,
   dailyPathOf,
   dateOfDaily,
   daysInMonth,
+  initialDailyContent,
   isDailyPath,
   isRealDate,
   monthMatrix,
@@ -103,6 +107,39 @@ check('reject non-century 1900', isDailyPath('日记/1900-02-29/x.md'), false)
 check('reject the date dir itself', isDailyPath('日记/2026-10-10'), false)
 check('dateOfDaily on non-daily', dateOfDaily('notes/a.md'), null)
 check('dateOfDaily on feb 30', dateOfDaily('日记/2026-02-30/晨间.md'), null)
+
+// ---- dailyDateOf：日历唯一认可的日期来源（frontmatter 的 date:）----
+// 头一条是这次搬家的全部理由：住在日记目录下**再也不是**进日历的充分条件，
+// 判定只看文件里的字段——所以「搬走就丢日期」那条路被彻底封死。
+check('path alone is not enough', dailyDateOf('# 晨间\n\n今天很忙。'), null)
+check('read plain date', dailyDateOf('---\ndate: 2026-10-10\n---\n正文'), '2026-10-10')
+check('read date on a note outside 日记/', dailyDateOf('---\ndate: 2026-10-10\n---\n# 周会'), '2026-10-10')
+check('block without date', dailyDateOf('---\nid: 20261010\n---\n正文'), null)
+check('date hiding in the body is not frontmatter', dailyDateOf('---\nid: x\n---\n建于 date: 2026-10-10'), null)
+check('nested map is not top-level', dailyDateOf('---\nmeta:\n  date: 2026-10-10\n---\nx'), null)
+check('commented out counts as absent', dailyDateOf('---\n# date: 2026-10-10\n---\nx'), null)
+check('list value is not a scalar date', dailyDateOf('---\ndate: [2026-10-10]\n---\nx'), null)
+// 带时间与带引号是最常见的两种手写/模板写法，都只取日期段
+check('value with time', dailyDateOf('---\ndate: 2026-10-10T09:30\n---\nx'), '2026-10-10')
+check('quoted value', dailyDateOf("---\ndate: '2026-10-10'\n---\nx"), '2026-10-10')
+check('trailing comment stripped', dailyDateOf('---\ndate: 2026-10-10 # 当天\n---\nx'), '2026-10-10')
+// 不存在的日子放进日历，月历上会多出一个永远点不中的格子
+check('reject feb 30 in field', dailyDateOf('---\ndate: 2026-02-30\n---\nx'), null)
+check('reject month 13 in field', dailyDateOf('---\ndate: 2026-13-01\n---\nx'), null)
+check('reject bare year', dailyDateOf('---\ndate: 2026\n---\nx'), null)
+check('reject non-date text', dailyDateOf('---\ndate: 昨天\n---\nx'), null)
+check('reject empty value', dailyDateOf('---\ndate:\n---\nx'), null)
+check('accept leap day in field', dailyDateOf('---\ndate: 2024-02-29\n---\nx'), '2024-02-29')
+check('BOM before the block', dailyDateOf('\uFEFF---\ndate: 2026-10-10\n---\nx'), '2026-10-10')
+// 字段说了算：路径是 10-10、字段写 10-09，归到字段那天（反之亦然，见下方初始正文）
+check('field beats the dir segment', dailyDateOf('---\ndate: 2026-10-09\n---\nx'), '2026-10-09')
+
+// ---- initialDailyContent：新建日记的初始正文，必须自己就能被读回 ----
+check('initial content shape', initialDailyContent('2026-10-10'), '---\ndate: 2026-10-10\n---\n')
+check('initial content round trip', dailyDateOf(initialDailyContent('2026-10-10')), '2026-10-10')
+check('initial content has an empty body', initialDailyContent('2026-10-10').endsWith('---\n'), true)
+// 出生即带字段 ⇒ 新建的日记从不依赖回填；回填只服务存量文件
+check('initial content is never dateless', dailyDateOf(initialDailyContent('2024-02-29')), '2024-02-29')
 
 // ---- isRealDate：年 0–99 也不会被 Date.UTC 拉到 1900 年代 ----
 check('real date ok', isRealDate(2026, 10, 10), true)

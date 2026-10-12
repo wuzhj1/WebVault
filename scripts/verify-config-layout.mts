@@ -1,6 +1,6 @@
 /**
  * 配置目录形状验证（src/core/vault/config-layout.ts）：
- * - 目录与文件清单：`.webvault` 是唯一配置目录、旧版 `.config` 只作搬迁源，六张表的文件名不重不漏；
+ * - 目录与文件清单：`.webvault` 是唯一配置目录、旧版 `.config` 只作搬迁源，七张表的文件名不重不漏；
  * - 键名 → 文件的分流：settings 按职责拆成 sync / app / hotkeys / workspace / ai / ai-chats 六档，
  *   每个已登记键落到预期的那档、未知键一律回落 app.json（新设置忘了登记只会落错档，绝不会丢）；
  * - 分流的硬不变量：`partitionRows` 必须让每一行都有桶 —— 漏一行等于悄悄丢设置，
@@ -65,12 +65,12 @@ ok('legacy dir is not nested inside the new one', !CONFIG_DIR.includes(LEGACY_CO
 ok('config dir carries the app name', CONFIG_DIR.includes('vault'))
 ok('config dir has no path separator (must be top-level)', !CONFIG_DIR.includes('/'))
 
-// ---- 2. 表 → 文件清单：六张表、文件名不重不漏 ----
-check('six tables registered', TABLE_FILES.length, 6)
+// ---- 2. 表 → 文件清单：七张表、文件名不重不漏 ----
+check('seven tables registered', TABLE_FILES.length, 7)
 check(
   'table names',
   TABLE_FILES.map(([table]) => table),
-  ['notes', 'links', 'tags', 'cards', 'settings', 'syncLog'],
+  ['notes', 'links', 'tags', 'cards', 'dailies', 'settings', 'syncLog'],
 )
 
 const allFiles: string[] = []
@@ -84,12 +84,13 @@ for (const [table, files] of TABLE_FILES) {
   }
 }
 check('file names are globally unique across tables', new Set(allFiles).size, allFiles.length)
-check('eleven config files in total', allFiles.length, 11)
+check('twelve config files in total', allFiles.length, 12)
 
 check('notes is single-file', filesOf('notes'), ['notes.json'])
 check('links is single-file', filesOf('links'), ['links.json'])
 check('tags is single-file', filesOf('tags'), ['tags.json'])
 check('cards is single-file', filesOf('cards'), ['cards.json'])
+check('dailies is single-file', filesOf('dailies'), ['dailies.json'])
 check('syncLog is single-file', filesOf('syncLog'), ['sync-log.json'])
 check(
   'settings splits into six duty files',

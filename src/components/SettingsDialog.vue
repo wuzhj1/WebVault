@@ -973,7 +973,7 @@ onMounted(() => {
               <dd>{{ backendLabel }}</dd>
               <dt>索引与设置</dt>
               <dd>
-                <code>.webvault/</code> 下的 11 个 JSON({{ vault.storageBackend === 'dir' ? '绑定目录内' : '内置存储内' }}),
+                <code>.webvault/</code> 下的 12 个 JSON({{ vault.storageBackend === 'dir' ? '绑定目录内' : '内置存储内' }}),
                 浏览器 IndexedDB 仅作缓存
               </dd>
               <dt>本机存储占用</dt>

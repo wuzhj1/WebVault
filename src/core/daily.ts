@@ -1,22 +1,34 @@
 /**
- * 日记日历的纯函数层：日期字符串 ↔ 路径、今天、月矩阵。
+ * 日记日历的日期语义：frontmatter `date:` ↔ 日期、新建路径、今天、月矩阵。
  *
- * 契约：**一天一个目录**，`日记/YYYY-MM-DD/标题.md`（见 DAILY_DIR）——目录段是日期、文件名段
- * 是标题，一天可以有很多篇。这样仍是「不引入 frontmatter 字段、不加 Dexie 列」：哪天有哪些日记
- * 直接从路径算出来，徽标、打点与格子里的标题列表都跟着删除/改名自然走。标题就是文件名，因此
- * `titleOf`（core/vault/paths.ts）原样可用，不需要为日记单开一个取标题的函数。
+ * 契约：**日期是笔记的一个字段，不是它的存放位置**。frontmatter 的 `date:` 是权威来源——
+ * 任何笔记只要写了 `date: 2026-10-10` 就是那一天的日记，哪怕它住在 `工作/` 下。位置与含义解耦
+ * 之后，拖动、整理、改名都不会再把一篇日记悄悄踢出日历；那正是「日期在目录段」那版的真实缺陷：
+ * 从 `日记/2026-10-10/会议.md` 挪进 `工作/`，它就无声地从日历上消失了。
+ *
+ * 路径那套仍然留着，但**只用来写、不再用来读**：
+ * - `dailyPathOf` / `dailyDirOf` 照旧把新建的日记放到 `日记/YYYY-MM-DD/标题.md`——一天一个目录
+ *   在文件树里按天折叠仍然好用，目录形态本身不是问题，把它当索引才是；
+ * - `dateOfDaily` 只服务两处**写**（都在 stores/vault.ts）：回填 `repairDailyIndex` 给缺字段的
+ *   存量/外部日记补上 `date:`，以及 `renameNote` 在搬进日期目录时把字段改成目标日期。
+ *   两处都是「让字段跟上文件所在的那一天」，读取端不因此多出任何一条规则。
  *
  * 硬约束/注意事项：
  * - 全部是无依赖、无浏览器 API 的纯函数：store（stores/vault.ts 的 dailyByDate）与
  *   scripts/verify-daily.mts（裸 node 直跑）共用同一份实现，日期算错会立刻在 CI 暴露。
+ *   唯一的相对导入 `./parse/frontmatter.ts` 同样是裸 node 能解析的——那模块自己就有这条约束。
  * - 所有日期字符串都是本地日历日（`todayStr` 取 getFullYear/getMonth/getDate）；**绝不能**
  *   改成 `toISOString()`——UTC+8 的 0–8 点会算成前一天。
  * - 日期运算一律走 UTC（addDays/monthMatrix），免得夏令时把格子挪一位。
- * - 旧版单文件形态 `日记/YYYY-MM-DD.md` **已不识别**：一天多篇之后它只是 `日记/` 下的普通笔记，
- *   不进日历（存量几乎为零，不为它保留第二套判定）。
+ * - 旧版单文件形态 `日记/YYYY-MM-DD.md` **不识别**：它从来就不是按目录算的，回填也补不到它头上
+ *   （存量几乎为零，不为它保留第二套判定）。
  */
+import { parseFrontmatter, readScalar, writeKeys } from './parse/frontmatter.ts'
 
-/** 日记目录常量；不设配置项，路径约定就是索引。 */
+/**
+ * 新建日记的落盘目录；**不是索引**——读取端只看 frontmatter（见模块头）。
+ * 不设配置项，路径约定与 `dailyPathOf` 绑定。
+ */
 export const DAILY_DIR = '日记'
 
 /**
@@ -24,6 +36,8 @@ export const DAILY_DIR = '日记'
  * 两处刻意的写法：标题段用字符类 `[^/]+` 而不是 `(.+)`——`.` 只排除换行、**照样匹配** `/`，
  * 用它会让 `日记/2026-10-10/上午/晨间.md` 这种多嵌一层的路径也通过；`[^/]+` 把标题锁死在一段里，
  * 深层嵌套因此进不来。日期是否真实存在由 `dateOfDaily` 再验一轮。
+ *
+ * 现在它只出现在写入端（回填、搬进日期目录）：认不出形状的文件没有可推的日期，跳过即可。
  */
 const DAILY_RE = /^日记\/(\d{4})-(\d{2})-(\d{2})\/([^/]+)\.md$/i
 
@@ -89,8 +103,10 @@ export function dailyPathOf(date: string, title: string): string {
 
 /**
  * 该路径的日期部分（`2026-10-10`，取自目录段）；不是合法日记路径则 null。
- * 标题段不在此处解析：日记的标题就是文件名，`titleOf`（core/vault/paths.ts）原样可用，
- * 与文件树 / 搜索 / 反链的显示名同源，不为日记单开一套取名逻辑。
+ *
+ * **只用于写入端**：回填（补 `date:`）与搬进日期目录（改 `date:`）两处见 daily.ts 模块头。
+ * 补完之后读取端一律走 `dailyDateOf`，本函数不再是「某篇是不是日记」的判定。
+ * 标题段不在此处解析：日记的标题就是文件名，`titleOf`（core/vault/paths.ts）原样可用。
  */
 export function dateOfDaily(path: string): string | null {
   const m = DAILY_RE.exec(path)
@@ -102,9 +118,41 @@ export function dateOfDaily(path: string): string | null {
   return isRealDate(y, mo, d) ? `${m[1]}-${m[2]}-${m[3]}` : null
 }
 
-/** 是否日记路径。只看路径形状，不查文件是否真的存在。 */
+/** 是否日记**目录**下的路径。只看形状，不看文件里有没有 `date:`——回填用，不是日历判定。 */
 export function isDailyPath(path: string): boolean {
   return dateOfDaily(path) !== null
+}
+
+/**
+ * 正文 frontmatter 的 `date:` -> `YYYY-MM-DD`；缺失、挂成列表、或写不出真实日期一律 null。
+ *
+ * 宽容在两处：值带时间（`2026-10-10T09:30`，Obsidian 模板的常见写法）只取日期段；引号包裹
+ * （`date: '2026-10-10'`）由 `readScalar` 解开。严格在一处：`2026-02-30`、`2026-13-01` 这类
+ * 不存在的日子一律 null——放进日历，月历上会多出一个永远点不中的日期。
+ *
+ * 这是日历唯一认可的日期来源（store 的 `dailyByDate` 由 `dailies` 索引反查，而索引就建在本函数上）。
+ */
+export function dailyDateOf(text: string): string | null {
+  return normalizeDailyDate(readScalar(parseFrontmatter(text), 'date'))
+}
+
+/** 把任意形态的日期值收敛成 `YYYY-MM-DD`；前缀必须是完整年-月-日，其余一律 null。 */
+function normalizeDailyDate(raw: string | null): string | null {
+  if (raw === null) return null
+  const m = /^\s*(\d{4})-(\d{2})-(\d{2})/.exec(raw)
+  if (!m) return null
+  return isRealDate(Number(m[1]), Number(m[2]), Number(m[3])) ? `${m[1]}-${m[2]}-${m[3]}` : null
+}
+
+/**
+ * 新建日记的初始正文：只有 frontmatter 的 `date:`，正文留空。
+ *
+ * 走 `writeKeys` 而不是手拼 `---\ndate: ...\n---`：引号策略、`KEY_ORDER`、无块文件的补块规则
+ * 全由它一处决定，手拼迟早和解析侧的口径漂移（写出带引号、按不带引号解析，或反过来）。
+ * 空字符串入、`---\ndate: X\n---\n` 出，恒等式由 writeKeys 的拼接构造保证。
+ */
+export function initialDailyContent(date: string): string {
+  return writeKeys('', { date })
 }
 
 /**

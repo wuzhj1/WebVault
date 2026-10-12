@@ -3,7 +3,7 @@
  *
  * 职责边界：正文永远写文件层（opfs），索引永远写 Dexie 并由 datafiles 落成 `.webvault` 数据文件
  * （文件为真相源、IndexedDB 只是缓存），正文与索引的最终一致由 reconcile 保证；
- * links/tags/cards 等派生数据随时可清空重建，不承载用户唯一内容。
+ * links/tags/cards/dailies 等派生数据随时可清空重建，不承载用户唯一内容。
  *
  * 硬约束/注意事项：
  * - NoteMeta 的 dirty/removedLocal 脏标记与墓碑语义直接被同步引擎（core/sync/engine.ts）消费，
@@ -13,8 +13,8 @@
  */
 import { defineStore } from 'pinia'
 import { computed, ref, shallowRef } from 'vue'
-import { db, putSetting, type CardRow, type LinkRow, type NoteMeta, type TagRow } from '@/core/db.ts'
-import { dateOfDaily } from '@/core/daily.ts'
+import { db, putSetting, type CardRow, type DailyRow, type LinkRow, type NoteMeta, type TagRow } from '@/core/db.ts'
+import { dailyDateOf, dateOfDaily, isDailyPath } from '@/core/daily.ts'
 import { flushToFiles, hydrateFromFiles } from '@/core/vault/datafiles.ts'
 // 键名只在 core/vault/config-layout.ts 声明一次，那里同时决定它落进 .webvault/workspace.json。
 import { SETTING_KEYS } from '@/core/vault/config-layout.ts'
@@ -28,7 +28,7 @@ import {
   normalizePath,
   titleOf,
 } from '@/core/vault/paths.ts'
-import { parseFrontmatter } from '@/core/parse/frontmatter.ts'
+import { parseFrontmatter, writeKeys } from '@/core/parse/frontmatter.ts'
 import { parseNote } from '@/core/parse/links.ts'
 import { rewriteWikilinks } from '@/core/parse/rewrite.ts'
 import {
@@ -171,24 +171,47 @@ export const useVaultStore = defineStore('vault', () => {
   /** 全库标签及计数，按次数倒序，供标签面板使用。 */
   const allTags = shallowRef<{ tag: string; count: number }[]>([])
   /**
+   * 从 frontmatter `date:` 镜像出的日历索引（见 `db.dailies`）；纯派生数据，随时可从 OPFS 重建。
+   * `date === ''` 的行也在里面——它表示「扫过、这篇没有日期」，缺行才是「还没扫过」，
+   * `repairDailyIndex` 靠这个区别自门控，不必另立一个「已回填」标记位。
+   */
+  const dailies = shallowRef<DailyRow[]>([])
+  /**
    * 按日期分组的日记：`YYYY-MM-DD` → 该日所有日记路径（按 `titleOf` 排序）。
    * 供侧栏日历分区的当天列表、rail 徽标、月历打点共用这一份真相。
-   * 直接从路径形状算出来（core/daily.ts），不新增 frontmatter 字段或 Dexie 列：
-   * 新建/删除/改名都换掉 notes 数组，本 computed 自然跟着走，无需差额维护。
+   *
+   * **从 `dailies` 反查，完全不看路径**：日期是笔记的字段、不是它的存放位置，因此拖动、整理、
+   * 改名都不会把一篇日记踢出日历——旧版「日期在目录段」正是栽在这一点上。
+   * 墓碑行与无日期行一并滤掉。
    */
   const dailyByDate = computed<ReadonlyMap<string, string[]>>(() => {
     const out = new Map<string, string[]>()
-    for (const n of notes.value) {
-      if (n.removedLocal) continue
-      const d = dateOfDaily(n.path)
-      if (!d) continue
-      const list = out.get(d)
-      if (list) list.push(n.path)
-      else out.set(d, [n.path])
+    const live = byPath.value
+    for (const d of dailies.value) {
+      if (d.date === '') continue
+      const n = live.get(d.path)
+      if (!n || n.removedLocal) continue
+      const list = out.get(d.date)
+      if (list) list.push(d.path)
+      else out.set(d.date, [d.path])
     }
     // 同一天的多篇按标题排序，而不是按数组顺序：后写入的排在后面会让格子里的列表
     // 每次重建都可能换位，用户刚看到的行转眼就跳走了。
     for (const list of out.values()) list.sort((a, b) => titleOf(a).localeCompare(titleOf(b)))
+    return out
+  })
+  /**
+   * 日记路径集合（已滤墓碑与无日期行）。关系图的「是否显示日记」按它判定，
+   * 而不是逐篇看路径形状——那会把已经搬出 `日记/` 的日记当成非日记漏掉。
+   */
+  const dailyPaths = computed<ReadonlySet<string>>(() => {
+    const out = new Set<string>()
+    const live = byPath.value
+    for (const d of dailies.value) {
+      if (d.date === '') continue
+      const n = live.get(d.path)
+      if (n && !n.removedLocal) out.add(d.path)
+    }
     return out
   })
   /**
@@ -464,6 +487,7 @@ export const useVaultStore = defineStore('vault', () => {
       await db.links.clear()
       await db.tags.clear()
       await db.cards.clear()
+      await db.dailies.clear()
       // 镜像计数与扫描基线一并作废：下面的 refreshDerived 会强制全量重建。
       unresolvedCount.clear()
       tagCount.clear()
@@ -471,6 +495,66 @@ export const useVaultStore = defineStore('vault', () => {
     }
 
     notes.value = await db.notes.toArray()
+    await refreshDerived()
+    // 必须在 notes.value 落定之后：下面要读 byPath、还要逐篇 reindexContent。
+    // 放在 ready 之前，日历从第一帧起就是对的，用户看不到「先空一会儿」。
+    await repairDailyIndex()
+  }
+
+  /**
+   * 把日历索引补齐到与正文一致，并给缺 `date:` 的日记目录文件补上字段。
+   * `reconcile` 每轮收尾调一次，**自门控、不需要「已回填」标记位**：
+   *
+   * - **缺行的笔记** → 读正文、解析 `date:`、写一行。升级到本版之前建的笔记全都没有行，
+   *   于是第一轮就是全库扫一遍；之后每篇都有一行，候选归零、此后一次都不用读。
+   * - **住在日记目录却没有 `date:`** → 从路径推日期补进 frontmatter。这是**唯一会改写正文的
+   *   时机**：应用内保存从不回填（用户删掉 `date:` 是明确意图，该被尊重），只有从应用之外进来
+   *   的文件会被补齐——桌面 Obsidian 按同一套 `日记/日期/` 目录约定写出来的日记拉进来后照样
+   *   进日历，而不是永远缺席。
+   *
+   * 补完仍解析不出日期的就让它缺席：宁可少一天，也不要顺手再开一条按路径读取的规则——
+   * 那会把「搬动即丢日期」的老问题原样请回来。两种分支都会在写入或写行后终止，不会每轮重来。
+   *
+   * 未缓存的 stub 跳过（没有正文可读），但它同样没有行，下一轮仍是候选；等正文被下载或
+   * 保存落地时再扫，不会永久漏掉。
+   */
+  async function repairDailyIndex(): Promise<void> {
+    const known = new Map((await db.dailies.toArray()).map((r) => [r.path, r.date]))
+    const candidates = notes.value.filter((n) => {
+      if (n.removedLocal || !n.cached) return false
+      const date = known.get(n.path)
+      if (date === undefined) return true // 从没扫过（升级前建的笔记全在此列）
+      return date === '' && isDailyPath(n.path) // 扫过、没日期、却住在日记目录下
+    })
+    if (candidates.length === 0) return
+
+    const touched: NoteMeta[] = []
+    for (const n of candidates) {
+      const content = await opfs.readNote(n.path)
+      if (content === null) continue
+      let text = content
+      // 只有「解析不出日期」才回填；frontmatter 里已经有一个真实日期的一律不碰——
+      // 它可以与路径不同（`日记/2026-10-10/补记.md` 写着 `date: 2026-10-09`），字段说了算。
+      const pathDate = dailyDateOf(content) === null ? dateOfDaily(n.path) : null
+      if (pathDate) {
+        // writeKeys 改写 `date` 那一行，其余字节原样保留——一次回填不该顺手重排别人的 YAML。
+        text = writeKeys(content, { date: pathDate })
+      }
+      if (text !== content) {
+        // 补字段就是一次真实的本地修改：sha/size/mtime 跟着走并标脏。不标脏它就推不上去，
+        // 另一台设备上仍留着没有 date 的旧文件，下次拉回来还是不在日历里。
+        const fileMtime = await opfs.writeNote(n.path, text)
+        const sha = await gitBlobSha(text)
+        const meta = byPath.value.get(n.path)
+        if (meta) {
+          touched.push({ ...meta, localSha: sha, size: text.length, mtime: Date.now(), fileMtime, dirty: 1 })
+        }
+      }
+      await reindexContent(n.path, text, { deferCards: true })
+    }
+    if (touched.length > 0) await db.notes.bulkPut(touched)
+    notes.value = await db.notes.toArray()
+    // 收口：cards/dailies 是分块直写 Dexie 的（deferCards），内存镜像在这里一次性拉回来。
     await refreshDerived()
   }
 
@@ -601,6 +685,12 @@ export const useVaultStore = defineStore('vault', () => {
     if (staleCards.length > 0) await db.cards.bulkDelete(staleCards.map((c) => c.path))
     cards.value = cardRows.filter((c) => live.has(c.path))
 
+    // 日历索引同理：墓碑行随 live 集合清掉，内存镜像只留活笔记的。
+    const dailyRows = await db.dailies.toArray()
+    const staleDaily = dailyRows.filter((d) => !live.has(d.path))
+    if (staleDaily.length > 0) await db.dailies.bulkDelete(staleDaily.map((d) => d.path))
+    dailies.value = dailyRows.filter((d) => live.has(d.path))
+
     const r = buildResolver(notes.value, cards.value)
 
     // 只有「从未扫过」或「与上次扫描时不等价」才需要动链接表：等价 ⇒ 任何 target 的答案
@@ -704,11 +794,14 @@ export const useVaultStore = defineStore('vault', () => {
       ...frontmatterTagRows(path, content, tags, fm),
     ]
     const card = cardFromBody(path, content, fm, tags)
+    // 日历索引的唯一写入点（除回填的补字段外）：日期从 frontmatter 取，取不到就是空串——
+    // 「扫过、但没有日期」这行本身有信息量，缺行才是「还没扫过」。
+    const daily: DailyRow = { path, date: dailyDateOf(content) ?? '' }
     const zidChanged = (cardByPath.value.get(path)?.zid ?? '') !== card.zid
 
     let oldLinks: LinkRow[] = []
     let oldTags: TagRow[] = []
-    await db.transaction('rw', db.links, db.tags, db.cards, async () => {
+    await db.transaction('rw', db.links, db.tags, db.cards, db.dailies, async () => {
       // 差额的「旧值」必须与删除在同一事务里读出：库走到哪，内存计数就跟到哪。
       oldLinks = await db.links.where('src').equals(path).toArray()
       oldTags = await db.tags.where('path').equals(path).toArray()
@@ -717,6 +810,7 @@ export const useVaultStore = defineStore('vault', () => {
       if (linkRows.length) await db.links.bulkAdd(linkRows)
       if (tagRows.length) await db.tags.bulkAdd(tagRows)
       await db.cards.put(card)
+      await db.dailies.put(daily)
     })
     // 事务提交后才动内存：中途抛出会直接跳过这里，镜像计数保持与库一致。
     let linksTouched = false
@@ -732,7 +826,10 @@ export const useVaultStore = defineStore('vault', () => {
     for (const t of tagRows) tagsTouched = bumpCount(tagCount, t.tag, 1) || tagsTouched
     if (tagsTouched) rebuildTagRef()
 
-    if (!opts?.deferCards) cards.value = [...cards.value.filter((c) => c.path !== path), card]
+    if (!opts?.deferCards) {
+      cards.value = [...cards.value.filter((c) => c.path !== path), card]
+      dailies.value = [...dailies.value.filter((d) => d.path !== path), daily]
+    }
     return zidChanged
   }
 
@@ -858,6 +955,10 @@ export const useVaultStore = defineStore('vault', () => {
   /**
    * 重命名/移动笔记：搬正文、迁元数据与派生索引，并改写全库所有入链 `[[link]]`，
    * 避免静默变成悬空引用。目标已存在时抛错。
+   *
+   * 日期的分界线就在这儿：**搬进 `日记/日期/` 目录会把 frontmatter 的 `date:` 改成目标日期**
+   * （把文件放进日期目录就是想换一天），**搬出日期目录则一个字节都不改字段**——
+   * 那只是整理，日期跟着文件走。见 daily.ts 模块头：读只有 frontmatter 一条路，写只有两处。
    */
   async function renameNote(from: string, rawTo: string): Promise<string> {
     const to = normalizePath(ensureMdExt(rawTo))
@@ -865,8 +966,14 @@ export const useVaultStore = defineStore('vault', () => {
     if (occupiedBy(to)) throw new Error(`已存在同名笔记: ${to}`)
 
     const body = (await opfs.readNote(from)) ?? ''
+    // 搬进「日期目录」= 想把这篇归到那一天，字段跟着目标日期改掉；搬出日期目录（进 `工作/` 之类）
+    // **绝不**动字段——那只是整理，日期跟着文件走，这正是把日期从路径搬进 frontmatter 换来的。
+    // 写规则统共两条：回填（repairDailyIndex）与这里；读规则始终只有 frontmatter 一条。
+    const targetDate = dateOfDaily(to)
+    const reDate = targetDate !== null && targetDate !== dailyDateOf(body)
+    const text = reDate ? writeKeys(body, { date: targetDate }) : body
     // 先把新路径写成：正文落盘是这一步唯一的硬失败点，失败时旧路径原封不动、索引还没动。
-    const toMtime = await opfs.writeNote(to, body)
+    const toMtime = await opfs.writeNote(to, text)
 
     const prev = byPath.value.get(from) ?? newMeta(from)
     await db.notes.delete(from)
@@ -880,6 +987,11 @@ export const useVaultStore = defineStore('vault', () => {
       dirty: 1,
       cached: 1,
       removedLocal: 0,
+    }
+    // 换了日期就换了正文：sha 与长度必须跟着走，沿用旧值会让推送拿旧 blob 判成「没变过」。
+    if (reDate) {
+      meta.localSha = await gitBlobSha(text)
+      meta.size = text.length
     }
     await db.notes.put(meta)
 
@@ -899,17 +1011,21 @@ export const useVaultStore = defineStore('vault', () => {
     }
     await db.notes.put(tombstone)
 
-    await db.transaction('rw', db.links, db.tags, db.cards, async () => {
+    await db.transaction('rw', db.links, db.tags, db.cards, db.dailies, async () => {
       const ownLinks = await db.links.where('src').equals(from).toArray()
       const ownTags = await db.tags.where('path').equals(from).toArray()
       const ownCard = await db.cards.get(from)
       await db.links.where('src').equals(from).delete()
       await db.tags.where('path').equals(from).delete()
       await db.cards.delete(from)
+      await db.dailies.delete(from)
       if (ownLinks.length) await db.links.bulkAdd(ownLinks.map((l) => ({ ...l, src: to })))
       if (ownTags.length) await db.tags.bulkAdd(ownTags.map((t) => ({ ...t, path: to })))
       // id 存在文件里而非文件名里，因此随卡片原样迁移，zid 不变。
       if (ownCard) await db.cards.put({ ...ownCard, path: to })
+      // 日期也读自内容而非路径，但可能刚被上面的 reDate 改过——所以落的是 `text` 的现算值，
+      // 不是把旧行搬过来。搬出日期目录时两者相等，等于原样随文件迁移。
+      await db.dailies.put({ path: to, date: dailyDateOf(text) ?? '' })
     })
 
     await rewriteInboundLinks(from, to)
@@ -1091,6 +1207,7 @@ export const useVaultStore = defineStore('vault', () => {
     unresolvedTargets,
     allTags,
     dailyByDate,
+    dailyPaths,
     cards,
     cardByPath,
     revision,

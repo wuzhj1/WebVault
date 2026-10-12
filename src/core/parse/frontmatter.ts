@@ -2,7 +2,7 @@
  * YAML frontmatter 的读取与字节稳定（byte-stable）改写。
  *
  * 这不是一个 YAML 解析器，也永远不能变成一个是。Vault 里的文件同时被其他工具编辑，所以这里的契约
- * 比通用解析更窄、更强：识别文件开头的 `---` 块、从中读出五个 key、把这五个 key 写回去且不动其他任何
+ * 比通用解析更窄、更强：识别文件开头的 `---` 块、从中读出六个 key、把这六个 key 写回去且不动其他任何
  * 一个字节。未知 key、注释行、嵌套结构、引号风格、重复 key、空行都必须原样存活——一次「顺手整理」别人
  * YAML 的重写就是一次悄悄毁掉它的重写；任何一个多余字节的翻转都会改变 `gitBlobSha`、把笔记标成脏、
  * 并扩大三方合并的冲突面。
@@ -12,8 +12,14 @@
  * 2. 不得在运行时导入 `../db.ts`；它在模块作用域构造 Dexie。类型用 `import type` 没问题。
  */
 
-/** 本应用持有的五个 key。块内其他一切内容都是不透明负载，原样保留。 */
-export const OWNED_KEYS = ['id', 'type', 'created', 'tags', 'aliases'] as const
+/**
+ * 本应用持有的六个 key。块内其他一切内容都是不透明负载，原样保留。
+ *
+ * `date` 是日记日历的日期来源（见 core/daily.ts 的 `dailyDateOf`）。它排在最后不是随手放的：
+ * `insertBefore` 按 KEY_ORDER 的名次找插入点，追加在末尾意味着**既有五个 key 的插入点一个都不变**
+ * ——给它插在中间会让 `writeKeys` 从此改动它前面那些 key 的落点，那是一次波及所有存量文件的重排。
+ */
+export const OWNED_KEYS = ['id', 'type', 'created', 'tags', 'aliases', 'date'] as const
 
 /** `OWNED_KEYS` 中某个 key 的字面量类型，即本模块有权读写的元数据字段名。 */
 export type OwnedKey = (typeof OWNED_KEYS)[number]

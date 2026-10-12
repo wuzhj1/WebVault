@@ -318,8 +318,14 @@ check('G3 block -> block is fine', frontmatterLostGuard('---\nid: x\n---\nbody',
 check('G4 clearing the document on purpose is not caught', frontmatterLostGuard('---\nid: x\n---\nbody', ''), false)
 check('G4 nor is clearing it to whitespace', frontmatterLostGuard('---\nid: x\n---\nbody', '   \n'), false)
 check('G5 an unterminated block was never an identity to lose', frontmatterLostGuard('---\nid: x\nbody', 'body'), false)
-check('G6 KEY_ORDER owns exactly the documented keys', [...KEY_ORDER], ['id', 'type', 'created', 'tags', 'aliases'])
+check('G6 KEY_ORDER owns exactly the documented keys', [...KEY_ORDER], ['id', 'type', 'created', 'tags', 'aliases', 'date'])
 check('G6 and no title key (it would go stale on every rename)', OWNED_KEYS.includes('title' as never), false)
+// date 排在 KEY_ORDER 末尾不是随手放的：insertBefore 按名次找插入点，追加在末尾才保证
+// 既有五个 key 的插入点一个都没变（插中间会重排所有存量文件的 frontmatter）。
+check('G6 date is last in KEY_ORDER', KEY_ORDER[KEY_ORDER.length - 1], 'date')
+check('G6 date is writable', writeKeys('---\nid: x\n---\nbody', { date: '2026-10-10' }), '---\nid: x\ndate: 2026-10-10\n---\nbody')
+check('G6 date lands at the block tail, others untouched', writeKeys('---\nslug: s\n# 注释\ntags: [a]\n---\nbody', { date: '2026-10-10' }), '---\nslug: s\n# 注释\ntags: [a]\ndate: 2026-10-10\n---\nbody')
+check('G6 rewriting an existing date changes only that line', writeKeys('---\nid: x\ndate: 2020-01-01\n---\nbody', { date: '2026-10-10' }), '---\nid: x\ndate: 2026-10-10\n---\nbody')
 
 console.log(`\n${pass} passed, ${fail} failed`)
 process.exit(fail === 0 ? 0 : 1)

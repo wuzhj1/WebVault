@@ -62,6 +62,7 @@ export const TABLE_FILES: readonly (readonly [table: string, files: readonly str
   ['links', ['links.json']],
   ['tags', ['tags.json']],
   ['cards', ['cards.json']],
+  ['dailies', ['dailies.json']],
   ['settings', ['sync.json', 'app.json', 'hotkeys.json', 'workspace.json', 'ai.json', 'ai-chats.json']],
   ['syncLog', ['sync-log.json']],
 ]

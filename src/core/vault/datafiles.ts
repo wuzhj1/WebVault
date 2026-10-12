@@ -6,7 +6,7 @@
  * - 启动与每次后端切换（绑定 / 换目录 / 授权 / 解绑）先 `hydrateFromFiles()`：以文件覆盖 Dexie
  *   表；文件缺失、损坏或读不出来才回退浏览器里现成的数据，随后回写修复 —— 被删掉的 `.webvault`
  *   就此重建。搬进一个装着旧版文件的目录时，还会顺手把 `.config/` 一次性迁过来。
- * - 运行期给六张表注册 Dexie hooks，任何写入防抖 300ms 后全量落盘；页面隐藏或关闭时强刷一次。
+ * - 运行期给七张表注册 Dexie hooks，任何写入防抖 300ms 后全量落盘；页面隐藏或关闭时强刷一次。
  *
  * settings 是唯一「一表多文件」的表：按职责拆成 sync / app / hotkeys / workspace / ai / ai-chats
  * 六个文件（对标 Obsidian 的配置目录形状），行归哪个文件由 config-layout 的 `settingsFileOf` 决定。
@@ -274,7 +274,7 @@ async function keepCorruptEvidence(file: string, text: string): Promise<void> {
   }
 }
 
-/** 注册六张表的写监听与页面生命周期强刷；幂等，只有第一次生效。 */
+/** 注册七张表的写监听与页面生命周期强刷；幂等，只有第一次生效。 */
 function startFilePersist(): void {
   if (persistStarted) return
   persistStarted = true
@@ -294,7 +294,7 @@ function startFilePersist(): void {
   if (typeof window !== 'undefined') {
     // 页面隐藏/关闭只需把「改过而没存」的表推下去，而脏标就是那份清单 —— force（全量）
     // 留给 hydrate 尾部：那里表没脏，但文件可能缺失或损坏，必须照表写一遍才能补上。
-    // 原先这里也用 force，等于每次切标签页都把六张表全量序列化一遍，大库上白烧。
+    // 原先这里也用 force，等于每次切标签页都把七张表全量序列化一遍，大库上白烧。
     window.addEventListener('pagehide', () => void flushToFiles())
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'hidden') void flushToFiles()

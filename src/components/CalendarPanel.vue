@@ -7,9 +7,10 @@
  * 笔记 / 待建 / 标签同级的一个分区，读与写都在同一屏里。
  *
  * 分隔纪律在这块 UI 上的落点：
- * - **一天一个目录**：`日记/YYYY-MM-DD/标题.md`，列表直接列出该日各篇（core/daily.ts 从路径
- *   算出日期分组，store 的 dailyByDate 是唯一真相）——不引入 frontmatter 字段、Dexie 列
- *   或日期库，删除/改名都跟着走；
+ * - **日记的判定只看 frontmatter `date:`**（store 的 dailyByDate 由 `dailies` 索引反查，索引建在
+ *   core/daily.ts 的 `dailyDateOf` 上）——日期是笔记的字段、不是它的存放位置，因此把日记拖出
+ *   `日记/` 也不会从日历上消失。新建仍落到 `日记/YYYY-MM-DD/标题.md`，但那只是组织习惯，
+ *   文件一出生就带着 `date:`（`initialDailyContent`），路径不再承担索引职责；
  * - **格子只负责选日期，篇目一律放在下方列表**：侧栏 300px 切 7 列每列只有 42px，格子里
  *   放不下标题；集中到列表后，某天写了十篇也只是列表自己滚，格子始终是 30px 高，整月的
  *   行距纹丝不动；
@@ -24,6 +25,7 @@ import {
   addDays,
   dailyDirOf,
   dailyPathOf,
+  initialDailyContent,
   monthMatrix,
   todayStr,
   weekdayOf,
@@ -173,7 +175,10 @@ function cancelCompose(): void {
 }
 
 /**
- * 提交内联输入：洗标题 → 建空文件 → 上抛打开。
+ * 提交内联输入：洗标题 → 建文件（**带着 `date:` 出生**）→ 上抛打开。
+ *
+ * 正文不是空的：文件一落地就必须带 `date: YYYY-MM-DD`，否则它只是日记目录下的一个普通文件，
+ * 不进日历——判定只看字段，不看它住在哪儿。路径仍然按天分目录，那是给文件树看的组织习惯。
  * 洗完为空（比如输入的全是 `/` 和空格）就留在输入态并提示，不建一个空文件名出来；
  * 写失败同样不收起输入框，用户改完还能重试。
  */
@@ -184,7 +189,10 @@ async function submitCompose(): Promise<void> {
     return
   }
   try {
-    const path = await vault.createNote(dailyPathOf(selected.value, title))
+    const path = await vault.createNote(
+      dailyPathOf(selected.value, title),
+      initialDailyContent(selected.value),
+    )
     cancelCompose()
     emit('open', path)
   } catch (err) {
@@ -314,8 +322,9 @@ watch(selected, cancelCompose)
 
       <p v-else-if="vault.dailyByDate.size === 0" class="calp__hint">
         还没有日记。在上面点一天,点「新建」,会创建
-        <code>{{ dailyDirOf(selected) }}/标题.md</code> 这样的文件并打开;一天可以写很多篇。
-        方向键在日期间漫游,会顺带选中那一天。
+        <code>{{ dailyDirOf(selected) }}/标题.md</code> 这样的文件并打开,它带着
+        <code>date: {{ selected }}</code>——日历按这个字段归日,把它挪到别的目录也不会丢;
+        一天可以写很多篇。方向键在日期间漫游,会顺带选中那一天。
       </p>
       <p v-else class="calp__hint">这一天还没有日记。</p>
     </div>

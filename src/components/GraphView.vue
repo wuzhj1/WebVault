@@ -14,7 +14,6 @@
  */
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { db } from '@/core/db.ts'
-import { isDailyPath } from '@/core/daily.ts'
 import { useFocusTrap } from '@/core/ui/focus-trap.ts'
 import { cssColor } from '@/core/theme/apply.ts'
 import { titleOf } from '@/core/vault/paths.ts'
@@ -175,8 +174,11 @@ async function load(): Promise<void> {
   const active = vault.activePath
   // 节点范围：默认把日记整个摘掉（工具条「包含日记」可勾回来）。当前打开的那篇无条件放行——
   // 图例有 dot--active、「只看邻居」以它为圆心，把它排除掉会让图例与事实对不上。
+  // 「是不是日记」按 frontmatter `date:` 判（vault.dailyPaths），不看路径形状：否则搬出 `日记/`
+  // 的那篇会在这里被当成非日记放行，与日历那边的判定对不上。
+  const daily = vault.dailyPaths
   const scope = vault.notes.filter(
-    (n) => !n.removedLocal && (includeDaily.value || !isDailyPath(n.path) || n.path === active),
+    (n) => !n.removedLocal && (includeDaily.value || !daily.has(n.path) || n.path === active),
   )
 
   // 信息卡的链路档案：按整张 links 表统计，与下面的范围筛选无关——

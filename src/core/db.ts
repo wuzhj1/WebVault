@@ -6,9 +6,9 @@
  * - NoteMeta 的 baseSha/localSha/remoteSha 三方合并语义，以及 dirty/cached/removedLocal/removedRemote
  *   四个标志位，是同步引擎（core/sync/engine.ts）的全部判定依据，只可增补注释、不可改名或改类型。
  * - version(1) 的五个 store 一经发布即冻结；新增 store 只能挂新版本号
- *   （见 cards 的 version(2)、config 的 version(3)）。不写 upgrade 函数意味着没有数据转换风险，
- *   表从空开始由回填补齐。
- * - links/tags/cards 均为纯派生索引：随时可从 OPFS 正文清空重建，不承载用户唯一数据。
+ *   （见 cards 的 version(2)、config 的 version(3)、dailies 的 version(4)）。不写 upgrade 函数
+ *   意味着没有数据转换风险，表从空开始由回填补齐。
+ * - links/tags/cards/dailies 均为纯派生索引：随时可从 OPFS 正文清空重建，不承载用户唯一数据。
  */
 import Dexie, { type EntityTable } from 'dexie'
 import type { CardType } from './zettel/card.ts'
@@ -108,6 +108,23 @@ export interface CardRow {
   parsed: 0 | 1
 }
 
+/** 日历派生索引的一行：这篇笔记的 frontmatter `date:`。 */
+export interface DailyRow {
+  /** 兼作与 `notes` 关联的主键 */
+  path: string
+  /**
+   * 从 frontmatter 的 `date:` 归一出的 `YYYY-MM-DD`；没有该字段或写不出真实日期时为 `''`。
+   *
+   * **每篇笔记都有一行**，不只是日记——行存在即「这篇的 frontmatter 已经扫过」，`date` 为空的
+   * 行只是「扫过、没有日期」。缺行的笔记才是待扫的候选，`repairDailyIndex` 据此自门控：
+   * 升级后第一轮全库扫一次，之后零候选、零读取。若只给日记建行，「没有行」就同时表示
+   * 「待扫」和「扫过且没有日期」两种情况，每次启动都要把全库重读一遍才能区分。
+   *
+   * 与 `links`、`tags`、`cards` 一样是纯派生数据：任何时候都能清空并从 OPFS 重建。
+   */
+  date: string
+}
+
 /** 键值设置表；value 一律以 JSON 字符串存取（见 getSetting/putSetting）。 */
 export interface SettingRow {
   key: string
@@ -137,6 +154,7 @@ class VaultDB extends Dexie {
   links!: EntityTable<LinkRow, 'id'>
   tags!: EntityTable<TagRow, 'id'>
   cards!: EntityTable<CardRow, 'path'>
+  dailies!: EntityTable<DailyRow, 'path'>
   settings!: EntityTable<SettingRow, 'key'>
   config!: EntityTable<ConfigRow, 'key'>
   syncLog!: EntityTable<SyncLogRow, 'id'>
@@ -156,6 +174,10 @@ class VaultDB extends Dexie {
     })
     this.version(3).stores({
       config: 'key',
+    })
+    // 主键 path 是与 notes 的关联键；第二个索引 date 是月历打点与「某天有哪些日记」的查询口径。
+    this.version(4).stores({
+      dailies: 'path, date',
     })
   }
 }
