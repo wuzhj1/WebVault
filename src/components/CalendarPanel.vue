@@ -589,4 +589,30 @@ watch(selected, cancelCompose)
   background: var(--bg-hover);
   color: var(--accent);
 }
+
+/* —— 窄屏（<960px）：面板铺满整个 body 区，走全屏面板形态（见 App.vue 里的媒体查询）。
+   这里只管触控目标。格子彼此紧挨，靠伪元素扩命中区会互相抢点击，只能真加高——
+   月历从 ~209px 涨到 ~269px，全屏面板里有的是地方，列表仍吃得到剩余高度。 */
+@media (max-width: 959px) {
+  .calp__td {
+    height: 40px;
+  }
+
+  /* 打点跟着往上挪：格子从 30 加高到 40 之后它若还钉在 bottom:4，就和居中的日期号
+     脱开一大截（桌面 30px 格子上两者差 2px，这里要维持同一个身位） */
+  .calp__dot {
+    bottom: 9px;
+  }
+
+  /* 表头那排跟着放大，才不至于「格子好点、‹ › 难点」——24px 的箭头在手机上基本点不中 */
+  .calp__nav {
+    width: 32px;
+    height: 32px;
+  }
+
+  .calp__today {
+    padding: 7px 12px;
+    font-size: 12px;
+  }
+}
 </style>

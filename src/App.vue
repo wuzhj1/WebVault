@@ -62,7 +62,7 @@ const sidebarRef = ref<InstanceType<typeof SideBar> | null>(null)
 const overlay = ref<Overlay>(null)
 /** 打开搜索面板时带上的初始查询（侧栏点标签就是走这条路）。 */
 const searchQuery = ref('')
-/** 左右侧栏显隐：宽屏是折叠面板，窄屏（<960px）是互斥的抽屉。 */
+/** 左右侧栏显隐：宽屏是折叠面板，窄屏（<960px）是互斥的全屏面板。 */
 const sidebarOpen = ref(true)
 const rightOpen = ref(true)
 /** 启动流程是否完成，透传给编辑器控制空态占位页何时可见。 */
@@ -73,22 +73,16 @@ const startupDone = ref(false)
  */
 const updateReady = ref(false)
 
-/** 窄屏媒体查询；为 null（非浏览器环境兜底）时抽屉相关逻辑整体退化。 */
-const narrow = typeof window !== 'undefined' ? window.matchMedia('(max-width: 959px)') : null
-/** 窄屏下是否有抽屉打开，决定遮罩是否出现、点击遮罩能否关闭。 */
-const drawerOpen = ref(false)
-
 /**
- * 把"哪一侧打开"折算成 drawerOpen：仅窄屏且至少一侧打开时才显示遮罩。
- * 三个状态必须同步演进，否则会出现遮罩与抽屉不一致的死角。
+ * 窄屏媒体查询；为 null（非浏览器环境兜底）时抽屉相关逻辑整体退化。
+ * 遮罩已经不再需要：窄屏下左右栏铺满整个 body 区（见样式里的媒体查询），没有「外面」可点，
+ * 关闭改为面板头部的 ×、Esc、以及打开笔记时自动收起。
  */
-function syncDrawerState(): void {
-  drawerOpen.value = !!narrow?.matches && (sidebarOpen.value || rightOpen.value)
-}
+const narrow = typeof window !== 'undefined' ? window.matchMedia('(max-width: 959px)') : null
 
 /**
- * 打开一篇笔记：先关掉浮层，再交给 vault 加载；窄屏下同时收起两侧抽屉，
- * 避免抽屉遮住刚打开的正文。
+ * 打开一篇笔记：先关掉浮层，再交给 vault 加载；窄屏下同时收起两侧面板，
+ * 让刚打开的正文直接可见——窄屏时它们是铺满的全屏层，不收就什么都看不到。
  */
 async function openNote(path: string): Promise<void> {
   overlay.value = null
@@ -97,28 +91,24 @@ async function openNote(path: string): Promise<void> {
     sidebarOpen.value = false
     rightOpen.value = false
   }
-  syncDrawerState()
 }
 
-/** 切换左侧栏；窄屏下左右抽屉互斥，打开左边就关掉右边。 */
+/** 切换左侧栏；窄屏下左右面板互斥，打开左边就关掉右边。 */
 function toggleSidebar(): void {
   sidebarOpen.value = !sidebarOpen.value
   if (sidebarOpen.value && narrow?.matches) rightOpen.value = false
-  syncDrawerState()
 }
 
 /** 切换右侧栏；与 toggleSidebar 对称，窄屏下同样保持互斥。 */
 function toggleRight(): void {
   rightOpen.value = !rightOpen.value
   if (rightOpen.value && narrow?.matches) sidebarOpen.value = false
-  syncDrawerState()
 }
 
-/** 关闭两侧抽屉（点击遮罩时调用）。 */
-function closeDrawers(): void {
+/** 收起两侧面板（窄屏面板头部的 × 走这里）。 */
+function closePanels(): void {
   sidebarOpen.value = false
   rightOpen.value = false
-  syncDrawerState()
 }
 
 /** 设置对话框可落位的页签；与 SettingsDialog 的 TABS 保持一致（那边是权威定义）。 */
@@ -170,14 +160,13 @@ async function quoteNote(): Promise<void> {
 }
 
 /**
- * 打开侧栏的某个分区（快捷键入口共用）：窄屏下两侧是互斥抽屉，先关右栏、开左栏，
+ * 打开侧栏的某个分区（快捷键入口共用）：窄屏下两侧是互斥的全屏面板，先关右栏、开左栏，
  * 再让 SideBar 把 section 切过去——section 是 SideBar 的本地状态，走它暴露的 showSection。
  */
 function openSideSection(next: 'ai' | 'calendar'): void {
   if (narrow?.matches) {
     sidebarOpen.value = true
     rightOpen.value = false
-    syncDrawerState()
   }
   sidebarRef.value?.showSection(next)
 }
@@ -308,8 +297,6 @@ async function reloadForUpdate(): Promise<void> {
 
 onMounted(async () => {
   if (window.innerWidth < 1200) rightOpen.value = false
-  syncDrawerState()
-  narrow?.addEventListener('change', syncDrawerState)
   window.addEventListener('keydown', onKeydown)
   window.addEventListener('beforeunload', flush)
   document.addEventListener('visibilitychange', onVisibility)
@@ -332,10 +319,9 @@ onMounted(async () => {
   startupDone.value = true
 })
 
-// 卸载前注销全部监听：媒体查询、快捷键、关闭前落盘、页面隐藏落盘、.webvault 落盘失败回调。
+// 卸载前注销全部监听：快捷键、关闭前落盘、页面隐藏落盘、.webvault 落盘失败回调。
 onBeforeUnmount(() => {
   offFlushError()
-  narrow?.removeEventListener('change', syncDrawerState)
   window.removeEventListener('keydown', onKeydown)
   window.removeEventListener('beforeunload', flush)
   document.removeEventListener('visibilitychange', onVisibility)
@@ -413,14 +399,9 @@ onBeforeUnmount(() => {
         </template>
       </div>
 
-      <!-- 主体三栏：左文件树 / 中编辑器 / 右信息面板。窄屏下左右栏变成浮层抽屉，由 scrim 挡住内容并承接点击关闭 -->
+      <!-- 主体三栏：左文件树 / 中编辑器 / 右信息面板。窄屏下左右栏铺满整个 body 区，
+           成为互斥的全屏面板（各自的头部带 × 收起），不加遮罩——铺满之后没有「外面」可点 -->
       <div class="app__body">
-        <div
-          class="scrim"
-          :class="{ 'scrim--on': drawerOpen }"
-          @click="closeDrawers"
-        ></div>
-
         <aside class="app__side" :class="{ 'app__side--open': sidebarOpen }">
           <SideBar
             ref="sidebarRef"
@@ -429,6 +410,7 @@ onBeforeUnmount(() => {
             @quote-note="quoteNote"
             @insert="insertAiMarkdown"
             @open-ai-settings="show('settings', 'ai')"
+            @close="closePanels"
           />
         </aside>
 
@@ -448,6 +430,7 @@ onBeforeUnmount(() => {
             :outline="outline"
             @open="openNote"
             @jump="(i) => editorRef?.jumpToHeading(i)"
+            @close="closePanels"
           />
         </aside>
       </div>
@@ -515,10 +498,6 @@ onBeforeUnmount(() => {
   flex: none;
   width: var(--right-w);
   min-width: 0;
-}
-
-.scrim {
-  display: none;
 }
 
 /* —— 启动加载 / 存储失败的整屏状态 —— */
@@ -655,8 +634,11 @@ onBeforeUnmount(() => {
   }
 }
 
-/* 窄屏（<960px）：左右栏改为绝对定位的浮层抽屉，用遮罩承接点击关闭。
-   收起态原本只靠 transform 把抽屉挪到屏外，元素本身还在原位——Tab 照样能命中里面
+/* 窄屏（<960px）：左右栏铺满整个 body 区，成为互斥的全屏面板——不再是「压在正文上的
+   一条抽屉」。300px 的反链/日历面板在 375px 屏上只留得出一条正文缝，压暗遮罩只是让这条
+   缝更难读；与其两样都看不清，不如一次只看一样，看完用头部的 ×、Esc 或打开笔记收起。
+   width 必须显式写 auto：基础规则里有 width: var(--sidebar-w)，单靠 inset 改不动它。
+   收起态原本只靠 transform 把面板挪到屏外，元素本身还在原位——Tab 照样能命中里面
    的按钮（会盲点到看不见的界面上），读屏也照读。visibility 把它彻底摘出焦点顺序与
    无障碍树，只在本媒体查询内生效：宽屏走下面的 display:none。
    visibility 是离散插值，且只要有一端是 visible 中间值就取 visible，所以开时立刻
@@ -665,23 +647,19 @@ onBeforeUnmount(() => {
   .app__side,
   .app__right {
     position: absolute;
-    top: 0;
-    bottom: 0;
+    inset: 0;
+    width: auto;
     z-index: 50;
-    width: min(var(--sidebar-w), 86vw);
     box-shadow: 0 0 30px var(--shadow-color);
     transition: transform 0.18s ease, visibility 0.18s ease;
   }
 
   .app__side {
-    left: 0;
     transform: translateX(-101%);
     visibility: hidden;
   }
 
   .app__right {
-    right: 0;
-    width: min(var(--right-w), 86vw);
     transform: translateX(101%);
     visibility: hidden;
   }
@@ -690,22 +668,6 @@ onBeforeUnmount(() => {
   .app__right--open {
     transform: none;
     visibility: visible;
-  }
-
-  .scrim {
-    display: block;
-    position: absolute;
-    inset: 0;
-    z-index: 40;
-    background: var(--scrim);
-    opacity: 0;
-    pointer-events: none;
-    transition: opacity 0.18s ease;
-  }
-
-  .scrim--on {
-    opacity: 1;
-    pointer-events: auto;
   }
 }
 

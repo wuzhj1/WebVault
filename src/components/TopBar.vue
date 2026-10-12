@@ -214,9 +214,12 @@ function formatClock(ts: number): string {
   display: flex;
   align-items: center;
   gap: 4px;
-  height: 44px;
+  /* 用 min-height 而不是 height：刘海 / 灵动岛机型上 viewport-fit=cover 让整页伸到状态栏
+     下面，padding-top 把那段让出来之后，实际高度是「子元素高度 + 安全区」。
+     height: 44px 配 border-box 会把安全区吃进 44 里，子元素直接溢出到状态栏上。 */
+  min-height: 44px;
   flex: none;
-  padding: 0 8px;
+  padding: env(safe-area-inset-top) 8px 0;
   background: var(--bg-elevated);
   border-bottom: 1px solid var(--border);
 }
@@ -410,19 +413,47 @@ function formatClock(ts: number): string {
   }
 }
 
-/* 窄屏：隐藏按钮文字标签与副行完整路径，顶栏只留图标与笔记标题 */
+/* 窄屏（<720px）：隐藏按钮文字标签与副行完整路径，顶栏只留图标与笔记标题。
+   这一档真正的矛盾是「六个图标钮 + 锁 + 落盘徽标」把标题挤成两三个字——
+   徽标缩成状态色圆点是省宽度的唯一一处（文案没丢，见 .saveflag 的注释）。 */
 @media (max-width: 720px) {
   .tb__label {
     display: none;
   }
 
+  /* 触屏目标：28px 的图标钮在手机上要瞄着点。高度 28 → 40（顶栏 44 放得下），
+     宽度刻意不动——六个按钮已经吃掉 168px，再加宽就轮到标题没地方站了。
+     横向那 2px 由下面的 ::before 补齐。 */
   .tb {
     padding: 0 7px;
+    height: 40px;
   }
 
-  .topbar__title {
-    max-width: 42vw;
+  /* 命中区补齐：伪元素向四周各扩 2px，正好填满 .topbar 的 4px 间距，
+     相邻目标两两相接而不重叠；.tb 是 40 + 4 = 44 与顶栏等高。
+     伪元素没有底色，只是多出一块可点区域，视觉尺寸一格不变。 */
+  .tb,
+  .lockbtn {
+    position: relative;
   }
+
+  .tb::before {
+    content: '';
+    position: absolute;
+    inset: -2px;
+  }
+
+  /* 锁只有 28px 高（.topbar__name 由它撑到 28，再在 44 的顶栏里居中，故上下各余 8），
+     纵向要多扩 6px 才够到 44 —— 否则它会是顶栏里唯一一个难点的控件，而它是唯一的编辑入口 */
+  .lockbtn::before {
+    content: '';
+    position: absolute;
+    inset: -8px -2px;
+  }
+
+  /* 这里曾经有 max-width: 42vw，它是个有害的上界：空间本来就紧的时候它不起作用
+     （flex 自会收窄标题），空间宽裕的时候却把标题卡在 42vw，白白浪费掉中间的空白。
+     .topbar__title 自带 min-width:0、内部文本 overflow:hidden，交给弹性布局即可。 */
 
   .topbar__path {
     display: none;
@@ -435,6 +466,34 @@ function formatClock(ts: number): string {
 
   .lockbtn {
     padding: 0 6px;
+    height: 28px;
+  }
+
+  /* 落盘状态缩成一个状态色圆点。宽屏那句「有未保存修改」要占 ~78px，
+     叠上锁的 26px 与两处 6px 间距，标题会被挤到只剩三个字。
+     文案没有丢：font-size:0 只让它不参与布局，DOM 与无障碍树里都还在，
+     title 属性也照常。颜色沿用各状态的主色（淡底压在 7px 上看不出来）。 */
+  .saveflag {
+    width: 7px;
+    height: 7px;
+    padding: 0;
+    border-radius: 50%;
+    font-size: 0;
+    line-height: 0;
+    overflow: hidden;
+    background: var(--text-muted);
+  }
+
+  .saveflag--dirty {
+    background: var(--warn);
+  }
+
+  .saveflag--saving {
+    background: var(--accent);
+  }
+
+  .saveflag--error {
+    background: var(--danger);
   }
 }
 </style>

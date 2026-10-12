@@ -237,8 +237,12 @@ for (const file of styled) {
 ok('组件里没有写死的颜色', hardcoded.length === 0, hardcoded.join('\n  '))
 
 // 用到的变量必须有人声明,写错名字时 CSS 不会报错,只会静默用初始值。
+// 声明处不止主题文件:组件 scoped 样式里的**局部**自定义属性同样算数。这类变量是
+// 「CSS 定义、脚本读回」的布局常量(如 FileTree 的 --row-h、SideBar 的 --rail-pitch),
+// 把它们抬到全局主题层是错的分层,而只扫主题文件会把每个都判成未声明。
+// 判据没被放松:没人在任何地方声明过的名字(也就是写错的主题变量)照样被抓。
 const declared = new Set<string>()
-for (const file of ['src/styles/themes.css', 'src/styles/main.css']) {
+for (const file of walk('src').filter((f) => f.endsWith('.vue') || f.endsWith('.css'))) {
   for (const m of readFileSync(file, 'utf8').matchAll(/(--[\w-]+)\s*:/g)) declared.add(m[1])
 }
 const used = new Set<string>()

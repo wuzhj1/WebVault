@@ -11,10 +11,12 @@ import { useUiStore } from '@/stores/ui.ts'
 import { useVaultStore, type TreeNode } from '@/stores/vault.ts'
 
 /**
- * 四条出口：
+ * 五条出口：
  * - `open(path)`：打开某篇笔记（文件树、书签行、待建行、新建/重命名后跳转、AI 产出行、日历的日记列表）。
  * - `search(query)`：点标签行时把 `#标签` 交给 App 打开全库搜索面板——标签的「结果列表」
  *   本来就是搜索的强项，比在侧栏里另造一个列表更省事，也复用了现成的命中摘要。
+ * - `close`：窄屏下本面板铺满整个 body 区，头部的 × 请求收起（宽屏该按钮不渲染，
+ *   顶栏的「笔记列表」开关才是那里的显隐入口）。
  * - `quote-note` / `insert` / `open-ai-settings`：AI 面板的三条上行通道——引用当前笔记要先
  *   `flushSave`（只有 App 拿得到编辑器）、插入要走编辑器、打开设置页要走 App 的 overlay，
  *   三者都够不着，统一分发给 App 处理（面板自己永远不碰编辑器与浮层）。
@@ -22,6 +24,7 @@ import { useVaultStore, type TreeNode } from '@/stores/vault.ts'
 const emit = defineEmits<{
   (e: 'open', path: string): void
   (e: 'search', query: string): void
+  (e: 'close'): void
   (e: 'quote-note'): void
   (e: 'insert', markdown: string): void
   (e: 'open-ai-settings'): void
@@ -184,7 +187,7 @@ function filterBookmarks(rows: string[], q: string): string[] {
 const pinnedFiltered = computed(() => filterBookmarks(pinnedRows.value, query.value))
 const recentFiltered = computed(() => filterBookmarks(recentRows.value, query.value))
 
-/** 活动栏指示条的位置：分区在 SECTIONS 里的下标，× CSS 里的 37px 节距就是位移量。 */
+/** 活动栏指示条的位置：分区在 SECTIONS 里的下标，× CSS 的 --rail-pitch 节距就是位移量。 */
 const sectionIndex = computed(() => Math.max(0, SECTIONS.indexOf(section.value)))
 
 /** 分区标题旁的计数徽标：与分区列表同源，点进去看到的数一定对得上。 */
@@ -388,7 +391,7 @@ onBeforeUnmount(closeMenu)
       <!-- 共享指示条：整条在栏内平移，比每个按钮各自 ::before 亮灭多出「滑过去」的方向感 -->
       <span
         class="rail__ind"
-        :style="{ transform: 'translateY(' + sectionIndex * 37 + 'px)' }"
+        :style="{ '--idx': String(sectionIndex) }"
         aria-hidden="true"
       ></span>
       <button
@@ -462,7 +465,7 @@ onBeforeUnmount(closeMenu)
 
       <!-- AI 分区：对话与产出都在这里，图标用「火花」与库内概念拉开 -->
       <!-- 日历分区：上月历、下当天的日记列表。排在 AI **之前**——AI 是「草稿与外脑」，
-           刻意压在最后单独一档（见 SECTIONS 的注释），而指示条按下标 × 37px 平移（见
+           刻意压在最后单独一档（见 SECTIONS 的注释），而指示条按下标 × --rail-pitch 平移（见
            sectionIndex），DOM 顺序必须与 SECTIONS 一致，插错位置会把指示条顶偏一档 -->
       <button
         class="rail__btn"
@@ -539,6 +542,14 @@ onBeforeUnmount(closeMenu)
         <em v-if="sectionCounts[section] > 0" class="head-title__n">
           {{ railText(sectionCounts[section]) }}
         </em>
+        <!-- 窄屏专用收起按钮：此时面板铺满整个 body 区，一次只看一样。顶栏的「笔记列表」
+             同样能收起（且一直可见），但面板自带一个明确的返回点更符合全屏面板的心智。
+             宽屏面板不覆盖正文，收起入口在顶栏，故这个按钮不渲染。 -->
+        <button class="head-close" type="button" aria-label="收起面板" @click="emit('close')">
+          <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+            <path d="M4 4l8 8M12 4l-8 8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
+          </svg>
+        </button>
       </div>
 
       <!-- 笔记分区的视图标签：目录 / 置顶 / 最近，固定在过滤框上方不随列表滚动。
@@ -841,6 +852,10 @@ onBeforeUnmount(closeMenu)
   min-width: 0;
   background: var(--bg-elevated);
   border-right: 1px solid var(--border);
+  /* 底部安全区：刘海屏 / 灵动岛机型的 Home 指示条会盖住视口最下面那一条。
+     env() 在没有指示条的机型上是 0，所以无条件加、不需要再套媒体查询。
+     加在根上，行内的 rail（底下的 ＋）与右侧滚动区一起被顶起来。 */
+  padding-bottom: env(safe-area-inset-bottom);
 }
 
 /* —— 活动栏（Obsidian / VS Code 式图标竖条）:
@@ -856,6 +871,9 @@ onBeforeUnmount(closeMenu)
   padding: 8px 0;
   background: var(--bg);
   border-right: 1px solid var(--border);
+  /* 指示条的位移节距 = 按钮高 + gap（34 + 3）。模板只给 --idx，算式落在这里，
+     于是窄屏改节距只需在媒体查询里换这一个变量，不用回头去改模板里的公式 */
+  --rail-pitch: 37px;
 }
 
 .rail__btn {
@@ -886,9 +904,11 @@ onBeforeUnmount(closeMenu)
   color: var(--accent-text);
 }
 
-/* 共享指示条：top 17 = 栏顶距 8 +（按钮 34 − 条 16）/ 2；位移量由模板按下标 × 37 计算，
-   整条滑过去而不是每个按钮各自亮灭，方向感就是这么来的。reduced-motion 下位移瞬时完成。 */
+/* 共享指示条：top 17 = 栏顶距 8 +（按钮 34 − 条 16）/ 2；位移量是 --idx × --rail-pitch，
+   整条滑过去而不是每个按钮各自亮灭，方向感就是这么来的。reduced-motion 下位移瞬时完成。
+   --idx 由模板按下标写成内联样式，这里的 0 只是它缺省时的落点（第一个分区），不是真值。 */
 .rail__ind {
+  --idx: 0;
   position: absolute;
   left: 0;
   top: 17px;
@@ -896,6 +916,7 @@ onBeforeUnmount(closeMenu)
   height: 16px;
   border-radius: 0 2px 2px 0;
   background: var(--accent);
+  transform: translateY(calc(var(--idx) * var(--rail-pitch)));
   transition: transform 0.18s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
@@ -950,6 +971,13 @@ onBeforeUnmount(closeMenu)
   border-radius: 8px;
   background: var(--bg-hover);
   color: var(--text-muted);
+}
+
+/* 窄屏收起按钮：默认不渲染，只在面板铺满的媒体查询里出现（见模板里的注释）。
+   视觉 30px，命中区靠 ::before 向四周扩 7px 到 44×44——头部 30px + 上下 8px padding
+   = 46px，44 恰好放得下，不会溢出到下一行去抢点击。 */
+.head-close {
+  display: none;
 }
 
 /* —— 分区内过滤输入：贴在分区标题下方，× 只在有内容时出现 —— */
@@ -1242,5 +1270,49 @@ onBeforeUnmount(closeMenu)
   background: var(--danger-soft);
   border-color: var(--danger);
   color: var(--danger);
+}
+
+/* —— 窄屏（<960px）：面板铺满整个 body 区，走全屏面板形态（见 App.vue 里的媒体查询）。
+   这里只管面板内部的触控目标：桌面上 34px 的图标钮在手机上要瞄着点，提到 40px（节距 44）。 */
+@media (max-width: 959px) {
+  .rail {
+    gap: 4px;
+    --rail-pitch: 44px;
+  }
+
+  .rail__btn {
+    width: 40px;
+    height: 40px;
+  }
+
+  /* top 20 = 栏顶距 8 +（按钮 40 − 条 16）/ 2，与 --rail-pitch 一起改才对得上位 */
+  .rail__ind {
+    top: 20px;
+  }
+
+  .head-close {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex: none;
+    width: 30px;
+    height: 30px;
+    margin-left: auto;
+    border-radius: 7px;
+    color: var(--text-muted);
+    transition: background-color 0.12s ease, color 0.12s ease;
+  }
+
+  .head-close::before {
+    content: '';
+    position: absolute;
+    inset: -7px;
+  }
+
+  .head-close:hover {
+    background: var(--bg-hover);
+    color: var(--text);
+  }
 }
 </style>

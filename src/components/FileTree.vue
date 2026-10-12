@@ -10,7 +10,9 @@
  * 依赖:useUiStore 的 `collapsedDirs`(哪些目录收起)、useVaultStore 的 `byPath`/`activePath`。
  *
  * 关键约束:
- * - 行高必须恒定:窗口切片全靠 ROW_H,故 CSS 里 `.row` 显式写死同一高度,两处必须同步改。
+ * - 行高必须恒定:窗口切片按「偏移 ÷ 行高」反推起止行,行高一旦不齐就会掉行。
+ *   行高的唯一定义处是 CSS 的 `--row-h`(.tree 上声明,窄屏媒体查询覆盖),
+ *   脚本在挂载与断点变化时把它读回来(readRowH),不再各写一份常量。
  * - 滚动容器不是自己:树与上下的提示行共用 SideBar 侧的滚动祖先,挂载时向上探测
  *   (overflow-y 为 auto/scroll),窗口用 ul 的上下 padding 占位——总高度不变,滚动条与
  *   全量渲染完全一致,提示行照常随内容滚动;探测不到时退回全量渲染,宁可慢不可缺行。
@@ -40,8 +42,21 @@ const emit = defineEmits<{
 const ui = useUiStore()
 const vault = useVaultStore()
 
-/** 单行高度(px):窗口计算的唯一尺寸来源,必须与 CSS `.row { height }` 一致。 */
-const ROW_H = 24
+/**
+ * 行高：虚拟化切片的唯一尺寸来源是 CSS 里的 `--row-h`（.tree 上声明，窄屏媒体查询覆盖）。
+ * 脚本不再自己写一个常量——过去这里是「JS 常量 + CSS 像素」两处双写，任何一处漏改都会让
+ * 切片算错而掉行。改成挂载与断点变化时从 computed style 读回来，两处天然一致。
+ * 读不到（树还没挂上）退回 24，与 `.tree` 上的声明同值。
+ */
+const ROW_H_FALLBACK = 24
+const rowH = shallowRef(ROW_H_FALLBACK)
+
+function readRowH(): void {
+  const raw = rootEl.value ? getComputedStyle(rootEl.value).getPropertyValue('--row-h') : ''
+  const v = parseFloat(raw)
+  if (Number.isFinite(v) && v > 0) rowH.value = v
+}
+
 /** 视口上下各多渲染的行数:滚动余量;也让滚动祖先里位于树之外的少量内容(提示行)的偏移被吸收。 */
 const OVERSCAN = 8
 
@@ -109,7 +124,15 @@ function findScroller(el: HTMLElement | null): HTMLElement | null {
   return null
 }
 
+const narrowMq = typeof window !== 'undefined' ? window.matchMedia('(max-width: 959px)') : null
+
+function onBreakpointChange(): void {
+  readRowH()
+}
+
 onMounted(() => {
+  readRowH()
+  narrowMq?.addEventListener('change', onBreakpointChange)
   scroller = findScroller(rootEl.value)
   if (!scroller) {
     virtual.value = false
@@ -125,6 +148,7 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  narrowMq?.removeEventListener('change', onBreakpointChange)
   scroller?.removeEventListener('scroll', onScroll)
   observer?.disconnect()
   observer = null
@@ -132,20 +156,21 @@ onBeforeUnmount(() => {
 })
 
 /**
- * 窗口切片。上下 padding = 窗口外行的占位,ul 的总高度恒等于 rows.length × ROW_H,
+ * 窗口切片。上下 padding = 窗口外行的占位,ul 的总高度恒等于 rows.length × rowH,
  * 滚动条比例与全量渲染一致;起止都夹进 [0, rows.length],折叠后残留的深 scrollTop 不会切出负区间。
  */
 const view = computed(() => {
   const all = rows.value
   if (!virtual.value) return { rows: all, padTop: 0, padBottom: 0 }
-  const from = Math.floor(scrollTop.value / ROW_H) - OVERSCAN
-  const to = Math.ceil((scrollTop.value + viewportH.value) / ROW_H) + OVERSCAN
+  const h = rowH.value
+  const from = Math.floor(scrollTop.value / h) - OVERSCAN
+  const to = Math.ceil((scrollTop.value + viewportH.value) / h) + OVERSCAN
   const start = Math.min(all.length, Math.max(0, from))
   const end = Math.min(all.length, Math.max(start, to))
   return {
     rows: all.slice(start, end),
-    padTop: start * ROW_H,
-    padBottom: (all.length - end) * ROW_H,
+    padTop: start * h,
+    padBottom: (all.length - end) * h,
   }
 })
 </script>
@@ -244,6 +269,9 @@ const view = computed(() => {
   margin: 0;
   padding: 0;
   list-style: none;
+  /* 行高：脚本的窗口切片直接读这个变量（readRowH），所以它是行高的唯一定义处。
+     改这里就等于改了 JS 的计算口径，不存在两处对不上的可能。 */
+  --row-h: 24px;
 }
 
 .tree__item {
@@ -256,8 +284,8 @@ const view = computed(() => {
   align-items: center;
   gap: 5px;
   width: 100%;
-  /* 24px 是脚本里 ROW_H 的镜像:窗口切片全靠行高恒定,两处必须同步改 */
-  height: 24px;
+  /* 行高必须恒定——窗口切片按「偏移 ÷ 行高」反推起止行，行高一旦不齐就会算错而掉行 */
+  height: var(--row-h);
   box-sizing: border-box;
   padding-top: 0;
   padding-bottom: 0;
@@ -367,6 +395,15 @@ const view = computed(() => {
 @media (hover: none) {
   .row__more {
     opacity: 1;
+  }
+}
+
+/* 窄屏（<960px）：24px 的行在手机上要瞄着点，提到 32px。
+   这个值就是行高的唯一定义处——脚本挂载与断点变化时会把 --row-h 读回来用于窗口切片
+   （见 readRowH），所以这里改了，切片口径自动跟着改，不存在两边对不上而掉行的可能。 */
+@media (max-width: 959px) {
+  .tree {
+    --row-h: 32px;
   }
 }
 </style>

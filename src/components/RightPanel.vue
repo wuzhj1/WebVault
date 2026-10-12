@@ -29,6 +29,8 @@ const emit = defineEmits<{
   (e: 'open', path: string): void
   /** 大纲条目被点中:交出它的下标,由 App 让编辑器滚到那一节。 */
   (e: 'jump', index: number): void
+  /** 窄屏下本面板铺满整个 body 区,头部的 × 请求收起(宽屏该按钮不渲染)。 */
+  (e: 'close'): void
 }>()
 
 const { outline } = defineProps<{
@@ -164,6 +166,14 @@ watch(
           大纲
         </button>
       </nav>
+      <!-- 窄屏专用收起按钮:此时面板铺满整个 body 区,一次只看一样。顶栏的「反链面板」同样
+           能收起(且一直可见),但面板自带一个明确的返回点更符合全屏面板的心智。
+           宽屏面板不覆盖正文,收起入口在顶栏,故这个按钮不渲染。 -->
+      <button class="head-close" type="button" aria-label="收起面板" @click="emit('close')">
+        <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+          <path d="M4 4l8 8M12 4l-8 8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
+        </svg>
+      </button>
     </div>
 
     <div class="panel__scroll">
@@ -303,10 +313,17 @@ watch(
   min-width: 0;
   background: var(--bg-elevated);
   border-left: 1px solid var(--border);
+  /* 底部安全区:刘海屏 / 灵动岛机型的 Home 指示条会盖住视口最下面那一条。
+     env() 在没有指示条的机型上是 0,所以无条件加、不需要套媒体查询。 */
+  padding-bottom: env(safe-area-inset-bottom);
 }
 
+/* 头部是「页签 + 窄屏收起按钮」一行;按钮宽屏不渲染,页签靠 flex:1 照旧撑满 */
 .panel__head {
   flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
   padding: 8px 10px;
   border-bottom: 1px solid var(--border);
 }
@@ -314,6 +331,7 @@ watch(
 /* —— 顶部「链接 / 信息 / 大纲」页签 —— */
 .tabs {
   display: flex;
+  flex: 1;
   gap: 2px;
 }
 
@@ -544,5 +562,38 @@ watch(
 
 .state--warn {
   color: var(--warn);
+}
+
+/* —— 窄屏收起按钮:默认不渲染,只在面板铺满的媒体查询里出现(见模板里的注释)。
+   视觉 30px,命中区靠 ::before 向四周扩 7px 到 44×44——头部 30px + 上下 8px padding
+   = 46px,44 恰好放得下,不会溢出到下一行去抢点击。 */
+.head-close {
+  display: none;
+}
+
+@media (max-width: 959px) {
+  .head-close {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex: none;
+    width: 30px;
+    height: 30px;
+    border-radius: 7px;
+    color: var(--text-muted);
+    transition: background-color 0.12s ease, color 0.12s ease;
+  }
+
+  .head-close::before {
+    content: '';
+    position: absolute;
+    inset: -7px;
+  }
+
+  .head-close:hover {
+    background: var(--bg-hover);
+    color: var(--text);
+  }
 }
 </style>

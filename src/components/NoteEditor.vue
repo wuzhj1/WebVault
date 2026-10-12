@@ -920,6 +920,10 @@ defineExpose({ flushSave, insertLink, insertMarkdown, jumpToHeading })
   min-height: 0;
   min-width: 0;
   background: var(--bg);
+  /* 底部安全区:刘海屏 / 灵动岛机型的 Home 指示条会盖住视口最下面那一条。
+     env() 在没有指示条的机型上是 0,所以无条件加、不需要套媒体查询。
+     内部滚动归 Vditor 管,只能在外层让出这一段,否则正文最后一行会被压在指示条下面。 */
+  padding-bottom: env(safe-area-inset-bottom);
 }
 
 .editor__host {

@@ -143,7 +143,9 @@ onUnmounted(() => {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
-  padding: 12px 16px;
+  /* 底部安全区:窄屏时对话框铺满视口(见下),底下的按钮会正好落在 Home 指示条上。
+     env() 在没有指示条的机型上是 0,所以无条件加。 */
+  padding: 12px 16px calc(12px + env(safe-area-inset-bottom));
   border-top: 1px solid var(--border);
 }
 

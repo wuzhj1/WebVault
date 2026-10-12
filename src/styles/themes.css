@@ -15,7 +15,7 @@
  *           --accent-text   淡底之上的强调色文字(比 --accent 再亮/再深一档,否则对比度不够)
  *           --check-mark    任务复选框的对勾图标,笔画颜色要能压在 --accent 填充上
  *   语义    --danger / --ok / --warn,以及各自的 *-soft 淡底与 *-line 描边
- *   遮罩    --scrim         弹窗/抽屉背后的压暗层
+ *   遮罩    --scrim         全屏浮层（搜索 / 图谱 / 设置 / 链接选择）背后的压暗层
  *           --shadow-color  所有 box-shadow 的颜色
  *           --selection     文字选区
  *
