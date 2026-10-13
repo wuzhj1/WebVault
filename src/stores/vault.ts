@@ -14,7 +14,7 @@
 import { defineStore } from 'pinia'
 import { computed, ref, shallowRef } from 'vue'
 import { db, putSetting, type CardRow, type DailyRow, type LinkRow, type NoteMeta, type TagRow } from '@/core/db.ts'
-import { dailyDateOf, dateOfDaily, isDailyPath } from '@/core/daily.ts'
+import { dailyDateOf, dailyDirDateOf, dateOfDaily, isDailyPath, uniqueDailyPath } from '@/core/daily.ts'
 import { flushToFiles, hydrateFromFiles } from '@/core/vault/datafiles.ts'
 // 键名只在 core/vault/config-layout.ts 声明一次，那里同时决定它落进 .webvault/workspace.json。
 import { SETTING_KEYS } from '@/core/vault/config-layout.ts'
@@ -499,6 +499,8 @@ export const useVaultStore = defineStore('vault', () => {
     // 必须在 notes.value 落定之后：下面要读 byPath、还要逐篇 reindexContent。
     // 放在 ready 之前，日历从第一帧起就是对的，用户看不到「先空一会儿」。
     await repairDailyIndex()
+    // 拍平排在回填之后：先把日期落进字段，再搬文件（见 flattenDailyDirs）。
+    await flattenDailyDirs()
   }
 
   /**
@@ -507,10 +509,10 @@ export const useVaultStore = defineStore('vault', () => {
    *
    * - **缺行的笔记** → 读正文、解析 `date:`、写一行。升级到本版之前建的笔记全都没有行，
    *   于是第一轮就是全库扫一遍；之后每篇都有一行，候选归零、此后一次都不用读。
-   * - **住在日记目录却没有 `date:`** → 从路径推日期补进 frontmatter。这是**唯一会改写正文的
+   * - **路径里带着日期却没有 `date:`**（`日记/2026-10-10/会议.md`、`日记/2026-10-10.md`、
+   *   根目录的 `2026-10-10.md`）→ 从路径推日期补进 frontmatter。这是**唯一会改写正文的
    *   时机**：应用内保存从不回填（用户删掉 `date:` 是明确意图，该被尊重），只有从应用之外进来
-   *   的文件会被补齐——桌面 Obsidian 按同一套 `日记/日期/` 目录约定写出来的日记拉进来后照样
-   *   进日历，而不是永远缺席。
+   *   的文件会被补齐——桌面 Obsidian 写出来的日记拉进来后照样进日历，而不是永远缺席。
    *
    * 补完仍解析不出日期的就让它缺席：宁可少一天，也不要顺手再开一条按路径读取的规则——
    * 那会把「搬动即丢日期」的老问题原样请回来。两种分支都会在写入或写行后终止，不会每轮重来。
@@ -524,7 +526,7 @@ export const useVaultStore = defineStore('vault', () => {
       if (n.removedLocal || !n.cached) return false
       const date = known.get(n.path)
       if (date === undefined) return true // 从没扫过（升级前建的笔记全在此列）
-      return date === '' && isDailyPath(n.path) // 扫过、没日期、却住在日记目录下
+      return date === '' && isDailyPath(n.path) // 扫过、没日期、路径却写着日期
     })
     if (candidates.length === 0) return
 
@@ -556,6 +558,44 @@ export const useVaultStore = defineStore('vault', () => {
     notes.value = await db.notes.toArray()
     // 收口：cards/dailies 是分块直写 Dexie 的（deferCards），内存镜像在这里一次性拉回来。
     await refreshDerived()
+  }
+
+  /**
+   * 把「一天一个目录」的存量日记拍平到 `日记/标题.md`：日期早已搬进 frontmatter，目录段只剩
+   * 空壳，留着就是文件树上一长串只装一个文件的文件夹。
+   *
+   * 与 `repairDailyIndex` 同一套自门控：候选是 `dailyDirDateOf` 认得的路径（日期还赖在目录段上），
+   * 搬完一轮候选归零，此后每次启动都只是几次 map 查询，不需要「已拍平」标记位。
+   * **顺序排在回填之后**：那时每篇的 `date:` 已经落进字段，这一步纯粹是搬家、不碰正文；
+   * 中途失败留下的也是「已带字段但还在日期目录里」的中间态，下一轮接着搬，幂等。
+   *
+   * 搬移复用 `renameNote`：入链改写、派生索引迁移、旧路径墓碑排队推删除全在它那儿，
+   * 自己再实现一遍就是第二套搬移语义。撞名按 `标题 2 / 3 …` 退让，同一天两篇重名日记各自保留。
+   */
+  async function flattenDailyDirs(): Promise<void> {
+    const candidates = notes.value.filter(
+      (n) => !n.removedLocal && n.cached && dailyDirDateOf(n.path) !== null,
+    )
+    if (candidates.length === 0) return
+
+    const emptied = new Set<string>()
+    let moved = 0
+    for (const n of candidates) {
+      try {
+        const to = uniqueDailyPath(titleOf(n.path), occupiedBy)
+        await renameNote(n.path, to)
+        moved++
+        const slash = n.path.lastIndexOf('/')
+        if (slash > 0) emptied.add(n.path.slice(0, slash))
+      } catch (err) {
+        // 单篇失败不牵连其余：它留在原地、字段已带日期，下一轮 reconcile 还是候选。
+        console.error(`日记拍平失败,留待下次重试: ${n.path}`, err)
+      }
+    }
+    // 清掉搬空了的日期目录：应用的文件树只由文件构成、看不见它们，但绑定目录后它们会一直
+    // 留在用户的文件管理器里。清不掉就算了——里面还有别的东西或权限不允许，都不值得重试。
+    for (const dir of emptied) await opfs.removeEmptyDir(dir)
+    console.info(`日记目录已拍平 ${moved} 篇到 日记/`)
   }
 
   /**
@@ -956,9 +996,10 @@ export const useVaultStore = defineStore('vault', () => {
    * 重命名/移动笔记：搬正文、迁元数据与派生索引，并改写全库所有入链 `[[link]]`，
    * 避免静默变成悬空引用。目标已存在时抛错。
    *
-   * 日期的分界线就在这儿：**搬进 `日记/日期/` 目录会把 frontmatter 的 `date:` 改成目标日期**
-   * （把文件放进日期目录就是想换一天），**搬出日期目录则一个字节都不改字段**——
-   * 那只是整理，日期跟着文件走。见 daily.ts 模块头：读只有 frontmatter 一条路，写只有两处。
+   * 日期的分界线就在这儿：**搬进日期名文件（`日记/2026-10-11.md`、`日记/2026-10-11/会议.md`）
+   * 会把 frontmatter 的 `date:` 改成目标日期**（把文件命名成某一天就是想换一天），
+   * **搬出则一个字节都不改字段**——那只是整理，日期跟着文件走。
+   * 见 daily.ts 模块头：读只有 frontmatter 一条路，写只有两处。
    */
   async function renameNote(from: string, rawTo: string): Promise<string> {
     const to = normalizePath(ensureMdExt(rawTo))
@@ -966,8 +1007,9 @@ export const useVaultStore = defineStore('vault', () => {
     if (occupiedBy(to)) throw new Error(`已存在同名笔记: ${to}`)
 
     const body = (await opfs.readNote(from)) ?? ''
-    // 搬进「日期目录」= 想把这篇归到那一天，字段跟着目标日期改掉；搬出日期目录（进 `工作/` 之类）
-    // **绝不**动字段——那只是整理，日期跟着文件走，这正是把日期从路径搬进 frontmatter 换来的。
+    // 搬进「日期名文件」= 想把这篇归到那一天，字段跟着目标日期改掉；搬出（进 `工作/` 之类、
+    // 或拍平到 `日记/标题.md`）**绝不**动字段——那只是整理，日期跟着文件走，
+    // 这正是把日期从路径搬进 frontmatter 换来的。
     // 写规则统共两条：回填（repairDailyIndex）与这里；读规则始终只有 frontmatter 一条。
     const targetDate = dateOfDaily(to)
     const reDate = targetDate !== null && targetDate !== dailyDateOf(body)
@@ -1024,7 +1066,7 @@ export const useVaultStore = defineStore('vault', () => {
       // id 存在文件里而非文件名里，因此随卡片原样迁移，zid 不变。
       if (ownCard) await db.cards.put({ ...ownCard, path: to })
       // 日期也读自内容而非路径，但可能刚被上面的 reDate 改过——所以落的是 `text` 的现算值，
-      // 不是把旧行搬过来。搬出日期目录时两者相等，等于原样随文件迁移。
+      // 不是把旧行搬过来。没换日期时两者相等，等于原样随文件迁移。
       await db.dailies.put({ path: to, date: dailyDateOf(text) ?? '' })
     })
 
@@ -1231,6 +1273,7 @@ export const useVaultStore = defineStore('vault', () => {
     reloadCards,
     readBody,
     saveBody,
+    occupiedBy,
     createNote,
     renameNote,
     deleteNote,

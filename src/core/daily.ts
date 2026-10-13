@@ -7,10 +7,11 @@
  * 从 `日记/2026-10-10/会议.md` 挪进 `工作/`，它就无声地从日历上消失了。
  *
  * 路径那套仍然留着，但**只用来写、不再用来读**：
- * - `dailyPathOf` / `dailyDirOf` 照旧把新建的日记放到 `日记/YYYY-MM-DD/标题.md`——一天一个目录
- *   在文件树里按天折叠仍然好用，目录形态本身不是问题，把它当索引才是；
+ * - `dailyPathOf` 把新建的日记放到 `日记/标题.md`——**平铺，不再一天一个目录**。日期既然已经
+ *   在字段里，目录段就只是个空壳：留着它，文件树上每天多出一个只装一个文件的文件夹。
+ *   同名由 `uniqueDailyPath` 按 `标题 2 / 3 …` 退让（与 ai/marks.ts 的 `uniqueAiPath` 同一口径）；
  * - `dateOfDaily` 只服务两处**写**（都在 stores/vault.ts）：回填 `repairDailyIndex` 给缺字段的
- *   存量/外部日记补上 `date:`，以及 `renameNote` 在搬进日期目录时把字段改成目标日期。
+ *   存量/外部日记补上 `date:`，以及 `renameNote` 在搬进**日期名文件**时把字段改成目标日期。
  *   两处都是「让字段跟上文件所在的那一天」，读取端不因此多出任何一条规则。
  *
  * 硬约束/注意事项：
@@ -20,8 +21,10 @@
  * - 所有日期字符串都是本地日历日（`todayStr` 取 getFullYear/getMonth/getDate）；**绝不能**
  *   改成 `toISOString()`——UTC+8 的 0–8 点会算成前一天。
  * - 日期运算一律走 UTC（addDays/monthMatrix），免得夏令时把格子挪一位。
- * - 旧版单文件形态 `日记/YYYY-MM-DD.md` **不识别**：它从来就不是按目录算的，回填也补不到它头上
- *   （存量几乎为零，不为它保留第二套判定）。
+ * - `dateOfDaily` 认**三种**历史形态——`日记/YYYY-MM-DD/标题.md`（一天一目录那版）、
+ *   `日记/YYYY-MM-DD.md`（更早的单文件版）与根目录的 `YYYY-MM-DD.md`。它们都是「文件名/目录段
+ *   里写着日期」的存量，回填必须认得，否则升级后整库日记从日历上消失；`dailyDirDateOf`
+ *   只认第一种，供拍平（flattenDailyDirs）挑候选。
  */
 import { parseFrontmatter, readScalar, writeKeys } from './parse/frontmatter.ts'
 
@@ -32,14 +35,20 @@ import { parseFrontmatter, readScalar, writeKeys } from './parse/frontmatter.ts'
 export const DAILY_DIR = '日记'
 
 /**
- * 严格匹配 `日记/YYYY-MM-DD/标题.md`（扩展名大小写不敏感，对齐 paths.ts 的 OPFS 口径）。
+ * 严格匹配 `日记/YYYY-MM-DD/标题.md`（扩展名大小写不敏感，对齐 paths.ts 的 OPFS 口径）——
+ * 一天一目录那版的存量形态，拍平的候选就从这儿来。
  * 两处刻意的写法：标题段用字符类 `[^/]+` 而不是 `(.+)`——`.` 只排除换行、**照样匹配** `/`，
  * 用它会让 `日记/2026-10-10/上午/晨间.md` 这种多嵌一层的路径也通过；`[^/]+` 把标题锁死在一段里，
  * 深层嵌套因此进不来。日期是否真实存在由 `dateOfDaily` 再验一轮。
- *
- * 现在它只出现在写入端（回填、搬进日期目录）：认不出形状的文件没有可推的日期，跳过即可。
  */
-const DAILY_RE = /^日记\/(\d{4})-(\d{2})-(\d{2})\/([^/]+)\.md$/i
+const DAILY_DIR_RE = /^日记\/(\d{4})-(\d{2})-(\d{2})\/([^/]+)\.md$/i
+
+/**
+ * 严格匹配**文件名即日期**的两种存量形态：`日记/YYYY-MM-DD.md`（单文件版）与根目录的
+ * `YYYY-MM-DD.md`。`日记/` 前缀写成可选段而不是两个正则：两者的日期语义完全一致，
+ * 分开只会让「哪些形态算日期文件」这件事散落在两处。
+ */
+const DAILY_FILE_RE = /^(?:日记\/)?(\d{4})-(\d{2})-(\d{2})\.md$/i
 
 /** 会让日期目录下凭空多出一层、或路径折叠后语义漂移的标题；`.` 与 `..` 必须显式拦，normalizePath 只拦 `..` 逃逸。 */
 const BAD_DAILY_TITLE = /^(?:\.{1,2})$/
@@ -83,42 +92,65 @@ export function daysInMonth(year: number, month1: number): number {
 }
 
 /**
- * `YYYY-MM-DD` -> `日记/YYYY-MM-DD`（该日的目录）。
- * 入参须是 `todayStr`/`monthMatrix` 产出的规范串；本函数不校验日期是否真实存在，
- * 调用方通常紧接着就拼标题成路径。
- */
-export function dailyDirOf(date: string): string {
-  return `${DAILY_DIR}/${date}`
-}
-
-/**
- * `YYYY-MM-DD` + 标题 -> `日记/YYYY-MM-DD/标题.md`。
- * 标题按 paths.ts 的 `sanitizeTitle` 口径由调用方先洗过；这里只再挡一次 `.`/`..`
- * ——它们会让路径折叠到上一层，写出日期目录之外的文件。
- */
-export function dailyPathOf(date: string, title: string): string {
-  if (BAD_DAILY_TITLE.test(title)) throw new Error(`日记标题不能是 ${title}`)
-  return `${dailyDirOf(date)}/${title}.md`
-}
-
-/**
- * 该路径的日期部分（`2026-10-10`，取自目录段）；不是合法日记路径则 null。
+ * 标题 -> `日记/标题.md`：**平铺，不再按天分目录**。日期在 frontmatter 里（见模块头），
+ * 目录段承载不了任何含义，于是新建路径也不再掺日期。
  *
- * **只用于写入端**：回填（补 `date:`）与搬进日期目录（改 `date:`）两处见 daily.ts 模块头。
- * 补完之后读取端一律走 `dailyDateOf`，本函数不再是「某篇是不是日记」的判定。
+ * 标题按 paths.ts 的 `sanitizeTitle` 口径由调用方先洗过；这里只再挡一次 `.`/`..`
+ * ——它们会让路径折叠到上一层，写出日记目录之外的文件。
+ */
+export function dailyPathOf(title: string): string {
+  if (BAD_DAILY_TITLE.test(title)) throw new Error(`日记标题不能是 ${title}`)
+  return `${DAILY_DIR}/${title}.md`
+}
+
+/**
+ * 保证 `日记/标题.md` 不撞已存在的笔记：重名按 `标题 2 / 3 / …` 退让。
+ *
+ * `createNote` 对占用路径是**幂等早退**（不写内容直接返回路径）——不先退让的话，
+ * 在两天各建一篇同名日记，第二篇会「提示成功」却一个字都没写进去。
+ * 判定口径与 ai/marks.ts 的 `uniqueAiPath` 一致：`exists` 由调用方给（store 的 `occupiedBy`），
+ * 墓碑不算占用。
+ */
+export function uniqueDailyPath(title: string, exists: (path: string) => boolean): string {
+  for (let n = 1; ; n++) {
+    const path = dailyPathOf(n === 1 ? title : `${title} ${n}`)
+    if (!exists(path)) return path
+  }
+}
+
+/**
+ * 该路径的日期部分（`2026-10-10`）；不是**日期名文件**则 null。
+ *
+ * **只用于写入端**：回填（补 `date:`）与搬进日期名文件（改 `date:`）两处见 daily.ts 模块头。
+ * 补完之后读取端一律走 `dailyDateOf`，本函数不再是「某篇是不是日记」的判定——新建的
+ * `日记/标题.md` 就不经过它，日期只从字段里来。
  * 标题段不在此处解析：日记的标题就是文件名，`titleOf`（core/vault/paths.ts）原样可用。
  */
 export function dateOfDaily(path: string): string | null {
-  const m = DAILY_RE.exec(path)
-  if (!m) return null
-  if (BAD_DAILY_TITLE.test(m[4])) return null
+  const m = DAILY_DIR_RE.exec(path) ?? DAILY_FILE_RE.exec(path)
+  if (m === null) return null
+  return m[4] !== undefined && BAD_DAILY_TITLE.test(m[4]) ? null : realDateOf(m)
+}
+
+/**
+ * 只认 `日记/YYYY-MM-DD/标题.md`（一天一目录那版）——拍平（stores/vault.ts 的
+ * `flattenDailyDirs`）据此挑候选：它要的是「日期还赖在目录段上」的文件，
+ * 文件名即日期的那两种形态不在搬迁之列（它们没有多出来的一层目录）。
+ */
+export function dailyDirDateOf(path: string): string | null {
+  const m = DAILY_DIR_RE.exec(path)
+  return m === null ? null : realDateOf(m)
+}
+
+/** 正则捕获的年月日 -> 规范日期串；不存在的日子（2026-02-30）一律 null。 */
+function realDateOf(m: RegExpExecArray): string | null {
   const y = Number(m[1])
   const mo = Number(m[2])
   const d = Number(m[3])
   return isRealDate(y, mo, d) ? `${m[1]}-${m[2]}-${m[3]}` : null
 }
 
-/** 是否日记**目录**下的路径。只看形状，不看文件里有没有 `date:`——回填用，不是日历判定。 */
+/** 路径形状像日期文件。只看形状，不看文件里有没有 `date:`——回填用，不是日历判定。 */
 export function isDailyPath(path: string): boolean {
   return dateOfDaily(path) !== null
 }

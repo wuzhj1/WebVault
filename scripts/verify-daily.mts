@@ -2,9 +2,11 @@
  * 日历纯函数验证（src/core/daily.ts）：
  * - **日期来源（读取端）**：frontmatter 的 `date:`——`dailyDateOf` 是日历唯一认可的日期来源。
  *   位置不再承担索引职责，因此把日记挪出 `日记/` 也不会从日历上消失；
- * - **路径契约（写入端与回填）**：新建仍按**一天一个目录**落 `日记/YYYY-MM-DD/标题.md`
- *   （大小写不敏感的扩展名，对齐 paths.ts 口径），标题即文件名，`titleOf` 原样可用，
- *   一天可以有任意多篇；`dateOfDaily` 只服务回填（给缺 `date:` 的存量日记补字段）。
+ * - **路径契约（写入端与回填）**：新建**平铺**落 `日记/标题.md`（大小写不敏感的扩展名，
+ *   对齐 paths.ts 口径），标题即文件名、`titleOf` 原样可用，同名由 `uniqueDailyPath` 按
+ *   `标题 2 / 3 …` 退让；`dateOfDaily` 只服务回填与搬移（给缺 `date:` 的存量日记补字段、
+ *   搬进日期名文件时改字段），认三种历史形态——`日记/YYYY-MM-DD/标题.md`（一天一目录那版）、
+ *   `日记/YYYY-MM-DD.md`（单文件那版）与根目录的 `YYYY-MM-DD.md`。
  *   日期必须真实存在——`2026-02-30`、`2026-13-01` 一律拒收，否则徽标会点亮一个造不出来的文件；
  * - 本地日：`todayStr` 走 getFullYear/getMonth/getDate，UTC+8 的 0–8 点不能退成前一天
  *   （与 toISOString 的 UTC 日对照钉死这一点）；
@@ -20,7 +22,7 @@ import {
   WEEKDAY_NAMES,
   addDays,
   dailyDateOf,
-  dailyDirOf,
+  dailyDirDateOf,
   dailyPathOf,
   dateOfDaily,
   daysInMonth,
@@ -29,6 +31,7 @@ import {
   isRealDate,
   monthMatrix,
   todayStr,
+  uniqueDailyPath,
   weekdayOf,
 } from '../src/core/daily.ts'
 import { titleOf } from '../src/core/vault/paths.ts'
@@ -58,14 +61,44 @@ function checkThrows(name: string, fn: () => unknown): void {
   }
 }
 
-// ---- 目录常量与往返 ----
+// ---- 目录常量与新建路径 ----
 check('DAILY_DIR is 日记', DAILY_DIR, '日记')
-check('dailyDirOf', dailyDirOf('2026-10-10'), '日记/2026-10-10')
-check('dailyPathOf shape', dailyPathOf('2026-01-05', '晨间'), '日记/2026-01-05/晨间.md')
-check('path round trip', dateOfDaily(dailyPathOf('2026-10-10', '晨间')), '2026-10-10')
+check('dailyPathOf shape', dailyPathOf('晨间'), '日记/晨间.md')
 // 标题就是文件名，故全库通用的 titleOf 原样可用——这是「日记不单开一个取标题函数」的依据
-check('title comes from filename', titleOf(dailyPathOf('2026-10-10', '晨间')), '晨间')
-// 日期只认目录段：标题里再出现一个日期也不会被误判
+check('title comes from filename', titleOf(dailyPathOf('晨间')), '晨间')
+// 新建路径不带日期：日期在初始正文的字段里。路径推不出日子，才说明两者真的解耦了
+check('new path carries no date', dateOfDaily(dailyPathOf('晨间')), null)
+
+// ---- 标题守卫：`.` 与 `..` 会让路径折叠到日记目录之外，构造阶段就该拒 ----
+checkThrows('dailyPathOf rejects dot', () => dailyPathOf('.'))
+checkThrows('dailyPathOf rejects dotdot', () => dailyPathOf('..'))
+
+// ---- uniqueDailyPath：平铺之后跨天同名是常态，退让要与 createNote 的幂等早退配合 ----
+check('unique path when free', uniqueDailyPath('晨间', () => false), '日记/晨间.md')
+check(
+  'unique path falls back to 2',
+  uniqueDailyPath('晨间', (p) => p === '日记/晨间.md'),
+  '日记/晨间 2.md',
+)
+check(
+  'unique path walks to 3',
+  uniqueDailyPath('晨间', (p) => p === '日记/晨间.md' || p === '日记/晨间 2.md'),
+  '日记/晨间 3.md',
+)
+
+// ---- 路径 → 日期：三种历史形态都认（只服务写入端的回填与搬移）----
+// 认不全的后果很实在：用户库里躺着的是单文件那版，回填就一篇都补不到，
+// 整库日记从日历上无声消失——这正是上一版只认目录形态踩过的坑。
+check('accept per-day dir form', isDailyPath('日记/2026-10-10/晨间.md'), true)
+check('accept flat file form', isDailyPath('日记/2026-10-10.md'), true)
+check('accept root file form', isDailyPath('2026-10-10.md'), true)
+check('accept upper ext', isDailyPath('日记/2026-10-10/晨间.MD'), true)
+check('accept upper ext on flat', isDailyPath('日记/2026-10-10.MD'), true)
+check('accept ascii title', isDailyPath('日记/2026-10-10/morning.md'), true)
+check('accept title with space', isDailyPath('日记/2026-10-10/2026-10-10 周六.md'), true)
+check('flat file date', dateOfDaily('日记/2026-10-10.md'), '2026-10-10')
+check('root file date', dateOfDaily('2026-10-10.md'), '2026-10-10')
+// 目录段说了算：标题里再出现一个日期也不会被误判
 check('date lives in dir segment', dateOfDaily('日记/2026-10-10/2026-09-09 晨间.md'), '2026-10-10')
 // 一天多篇：同一天的两个不同标题归到同一个日期
 check(
@@ -74,15 +107,14 @@ check(
   ['2026-10-10', '2026-10-10'],
 )
 
-// ---- 标题守卫：`.` 与 `..` 会让路径折叠到日期目录之外，构造阶段就该拒 ----
-checkThrows('dailyPathOf rejects dot', () => dailyPathOf('2026-10-10', '.'))
-checkThrows('dailyPathOf rejects dotdot', () => dailyPathOf('2026-10-10', '..'))
-check('accept normal', isDailyPath('日记/2026-10-10/晨间.md'), true)
-check('accept upper ext', isDailyPath('日记/2026-10-10/晨间.MD'), true)
-check('accept ascii title', isDailyPath('日记/2026-10-10/morning.md'), true)
-check('accept title with space', isDailyPath('日记/2026-10-10/2026-10-10 周六.md'), true)
-// 旧版单文件形态已不识别：一天多篇之后它只是 日记/ 下的普通笔记
-check('reject legacy single-file form', isDailyPath('日记/2026-10-10.md'), false)
+// ---- dailyDirDateOf：拍平只搬「日期还赖在目录段上」的那一种 ----
+check('dir form is flatten candidate', dailyDirDateOf('日记/2026-10-10/晨间.md'), '2026-10-10')
+check('flat form is not a candidate', dailyDirDateOf('日记/2026-10-10.md'), null)
+check('root form is not a candidate', dailyDirDateOf('2026-10-10.md'), null)
+check('new daily is not a candidate', dailyDirDateOf(dailyPathOf('晨间')), null)
+check('wrong dir is not a candidate', dailyDirDateOf('notes/2026-10-10/晨间.md'), null)
+check('feb 30 is not a candidate', dailyDirDateOf('日记/2026-02-30/晨间.md'), null)
+
 check('reject wrong dir', isDailyPath('notes/2026-10-10/晨间.md'), false)
 check('reject bare filename', isDailyPath('2026-10-10/晨间.md'), false)
 check('reject unpadded', isDailyPath('日记/2026-1-5/晨间.md'), false)
@@ -95,11 +127,14 @@ check('reject empty title', isDailyPath('日记/2026-10-10/.md'), false)
 check('reject dot title', isDailyPath('日记/2026-10-10/..md'), false)
 check('reject dotdot title', isDailyPath('日记/2026-10-10/...md'), false)
 check('reject feb 30', isDailyPath('日记/2026-02-30/晨间.md'), false)
+check('reject feb 30 on flat', isDailyPath('日记/2026-02-30.md'), false)
+check('reject feb 30 on root', isDailyPath('2026-02-30.md'), false)
 check('reject month 13', isDailyPath('日记/2026-13-01/晨间.md'), false)
 check('reject month 00', isDailyPath('日记/2026-00-10/晨间.md'), false)
 check('reject day 00', isDailyPath('日记/2026-10-00/晨间.md'), false)
 check('reject day 32', isDailyPath('日记/2026-10-32/晨间.md'), false)
 check('accept leap day', isDailyPath('日记/2024-02-29/leap.md'), true)
+check('accept leap day on flat', isDailyPath('日记/2024-02-29.md'), true)
 check('reject leap day in common year', isDailyPath('日记/2026-02-29/x.md'), false)
 check('accept century leap day', isDailyPath('日记/2000-02-29/x.md'), true)
 check('reject non-century 1900', isDailyPath('日记/1900-02-29/x.md'), false)
@@ -205,10 +240,10 @@ function matrixShape(year: number, month1: number, rows: number): void {
     flat.every((c) => c.inMonth === c.date.startsWith(`${year}-${String(month1).padStart(2, '0')}`)),
     true,
   )
-  // 每一格的日期都能拼出合法日记路径——方向键漫游到哪都能建文件
+  // 每一格都能建出一篇属于那一天的日记：路径不再带日期，归日靠初始正文里的 `date:`
   check(
-    `${year}-${month1} every cell is daily path`,
-    flat.every((c) => isDailyPath(dailyPathOf(c.date, '标题'))),
+    `${year}-${month1} every cell starts a dated note`,
+    flat.every((c) => dailyDateOf(initialDailyContent(c.date)) === c.date),
     true,
   )
   check(

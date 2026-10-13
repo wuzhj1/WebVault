@@ -269,6 +269,28 @@ export async function removeTopDir(name: string): Promise<boolean> {
   }
 }
 
+/**
+ * 尝试删掉一个**空**目录；不递归（`removeEntry` 默认 `recursive: false`）——里面还有文件
+ * （或用户刚放进去别的东西）就整体放弃。目录不存在也算已达成，返回 true。
+ *
+ * 与 `removeTopDir` 的分工：那是给配置目录搬迁用的顶层目录，这个吃任意深度的路径——
+ * 拍平日记日期目录（stores/vault.ts 的 `flattenDailyDirs`）后清场用。应用的文件树只由文件
+ * 构成、看不见空目录，但绑定目录后它们会一直留在用户的文件管理器里。
+ *
+ * 先 `getDirectoryHandle` 再删：`removeEntry` 对文件同样有效，不挡住这一步，
+ * 传错路径就会把一个文件当目录删掉。
+ */
+export async function removeEmptyDir(path: string): Promise<boolean> {
+  try {
+    const { dir, name } = await getFileHandle(await getRoot(), path, false)
+    await dir.getDirectoryHandle(name)
+    await dir.removeEntry(name)
+    return true
+  } catch (err) {
+    return isNotFound(err)
+  }
+}
+
 /** 当前后端（触发一次惰性解析）。设置页与启动流程据此分叉。 */
 export async function currentBackend(): Promise<StorageBackend> {
   const state = await resolveBackend()

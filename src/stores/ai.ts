@@ -281,11 +281,9 @@ export const useAiStore = defineStore('ai', () => {
       ''
     const mark: AiMark = { model: model === '' ? 'unknown' : model, at: new Date().toISOString(), source: 'chat' }
 
-    // 重名退让的判定要与 vault 的「在用」口径一致：墓碑不算占用（删完立刻同名重建是正常操作）。
-    const path = uniqueAiPath(session.title, (p) => {
-      const row = vault.byPath.get(p)
-      return row !== undefined && row.removedLocal === 0
-    })
+    // 重名退让的判定走 store 导出的 occupiedBy：与建日记/重命名同一套口径（墓碑不算占用，
+    // 删完立刻同名重建是正常操作），不在这儿另写一份。
+    const path = uniqueAiPath(session.title, vault.occupiedBy)
     const content = buildAiNoteContent({ mark, title: titleOf(path), body: transcript(session) })
     return vault.createNote(path, content)
   }
