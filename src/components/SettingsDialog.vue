@@ -1061,7 +1061,14 @@ onMounted(() => {
               {{ wipeBusy ? '处理中…' : wipeArmed ? '再点一次确认清空' : '清空并重新下载' }}
             </button>
             <button v-if="wipeArmed" class="btn btn--ghost" type="button" @click="disarm">取消</button>
-            <p v-if="stats.pending > 0" class="field__tip">当前有 {{ stats.pending }} 篇待上传,请先同步。</p>
+            <!-- 禁用理由必须逐条说出口:这颗按钮只在「能从 Gitee 重拉」时才有意义,而它的后果是删光本机正文——
+                 一句都不解释,用户看到的就是一颗无来由的灰按钮,只会以为是应用坏了。 -->
+            <p v-if="!settings.configured" class="field__tip">
+              这个动作是「删光本机正文 + 从 Gitee 重拉」,所以要先在上面配好 Gitee 同步——没配就没有可拉回来的来源。
+            </p>
+            <p v-else-if="stats.pending > 0" class="field__tip">
+              当前有 {{ stats.pending }} 篇待上传,请先同步。
+            </p>
           </div>
         </template>
 
