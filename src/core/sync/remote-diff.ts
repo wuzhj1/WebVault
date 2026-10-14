@@ -19,7 +19,7 @@ export interface PathSet {
  */
 export function findRemoteDeletions(local: readonly NoteMeta[], remotePaths: PathSet): NoteMeta[] {
   return local.filter(
-    (n) => !n.removedLocal && !n.removedRemote && n.remoteSha !== null && !remotePaths.has(n.path),
+    (n) => !n.removedLocal && !n.removedRemote && n.remoteSha !== null && !n.dirty && !remotePaths.has(n.path),
   )
 }
 

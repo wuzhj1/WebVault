@@ -1029,11 +1029,18 @@ export const useVaultStore = defineStore('vault', () => {
       dirty: 1,
       cached: 1,
       removedLocal: 0,
+      // 新路径从未上过远端：若继承旧路径的 remoteSha，会被 findRemoteDeletions
+      // 判成「远端已删」而转墓碑并清掉正文，也会让推送去 update 一个不存在的远端路径。
+      remoteSha: null,
+      baseSha: null,
     }
     // 换了日期就换了正文：sha 与长度必须跟着走，沿用旧值会让推送拿旧 blob 判成「没变过」。
     if (reDate) {
       meta.localSha = await gitBlobSha(text)
       meta.size = text.length
+    } else {
+      // 内容没变的话，沿用本地 sha 仍是正确的；远端标识已清空，推送会用 create/update 语义重建。
+      // 但保留 localSha 让本地哈希核对能走短路。
     }
     await db.notes.put(meta)
 

@@ -63,6 +63,17 @@ export interface SyncSummary {
   autoMerged: number
   conflicts: ConflictRecord[]
   errors: string[]
+  /**
+   * 本轮拉到的远端 .md 路径 → blob sha（pullIndex 填）。push 用它判断某条墓碑的路径
+   * 远端到底还在不在 —— 不在就是「幽灵墓碑」，只做本地清除、绝不发删除请求（发了必被 400 拒掉）。
+   */
+  remotePaths?: Map<string, string>
+  /**
+   * 幽灵墓碑的 remoteSha 集合（pullIndex 填）。拍平重命名会让新路径继承旧路径的 remoteSha，
+   * 于是新路径成了幽灵墓碑、旧路径墓碑却带着同一个 sha。凭这个集合把两者配对，让旧路径那条
+   * 也只做本地清除 —— 远端那个文件还在（是旧目录形态），推删除会真的把它删掉。
+   */
+  phantomSha?: Set<string>
 }
 
 /** 不关心进度时的默认 sink。 */
@@ -143,8 +154,18 @@ export async function pullIndex(cfg: GiteeConfig, summary: SyncSummary, sink: Pr
     remoteMd.set(normalized, entry.sha)
   }
   summary.remoteFiles = remoteMd.size
-
+  summary.remotePaths = remoteMd
   const local = await db.notes.toArray()
+  // 幽灵墓碑：removedLocal 且带 remoteSha、但路径已不在远端树 —— 多半是拍平重命名继承来的假身份。
+  {
+    const phantomSha = new Set<string>()
+    for (const n of local) {
+      if (!n.removedLocal || !n.remoteSha) continue
+      if (!remoteMd.has(n.path)) phantomSha.add(n.remoteSha)
+    }
+    summary.phantomSha = phantomSha
+  }
+
   const localByPath = new Map(local.map((n) => [n.path, n]))
   const toPut: NoteMeta[] = []
 
@@ -276,6 +297,21 @@ export async function applyRemoteDeletions(summary: SyncSummary): Promise<void> 
 }
 
 /**
+ * 就地清除一条「远端无须删除」的墓碑：行与残留正文一起清。
+ * 只删行不删文件是危险的 —— 下次对账会把那个孤儿文件当成索引外的新笔记收养回来，
+ * 标上 `dirty=1` 重新排进上传队列，「待上传」于是不降反升。
+ * 文件删不掉就**不摘行**：留着这条墓碑，下次对账/下轮同步会再试一次。
+ */
+async function clearTombstoneLocally(path: string): Promise<void> {
+  try {
+    await opfs.deleteNote(path) // 不存在也算已达成，deleteNote 自己吞掉
+    await db.notes.delete(path)
+  } catch {
+    await logSync('warn', `清墓碑失败,留待下次重试: ${path}`)
+  }
+}
+
+/**
  * 推送本地变更。两侧都动过的笔记按 sha 取回共同祖先 blob 做三方合并；合不拢的保留本地文本，
  * 把远端文本溢写成同目录 `.conflict-时间戳.md` 副本，绝不静默覆盖任何一侧。
  * 结果按 MAX_ACTIONS_PER_COMMIT 分批提交，每批落地后由 settle 对齐三个 sha。
@@ -293,6 +329,21 @@ export async function push(cfg: GiteeConfig, summary: SyncSummary, sink: Progres
   for (const meta of tombstones) {
     // 远端从未有过的删除无须上传，直接本地清除；否则排一条 delete 动作。
     if (meta.remoteSha) {
+      // 如果这条墓碑对应的路径在远端树里根本就不存在（幽灵墓碑：remoteSha 继承自其它路径），
+      // 那么远端没有东西可删，直接就地清除该墓碑，避免向 Gitee 发不存在路径的删除。
+      const remoteHas = summary.remotePaths?.has(meta.path) ?? false
+      if (!remoteHas) {
+        await clearTombstoneLocally(meta.path)
+        continue
+      }
+      // 拍平搬家时，新路径继承了旧路径的 remoteSha，导致新路径成了「幽灵墓碑」（路径不在远端树），
+      // 同时旧路径墓碑也带着同一个 remoteSha。此时若推送旧路径删除，会把远端文件删掉。
+      // 检查是否存在同 remoteSha 的幽灵墓碑：如果有，就放弃推送旧路径删除，直接清除旧路径墓碑，
+      // 把远端文件保留下来（等下次同步/重拉时再处理），比误删远端安全得多。
+      if (summary.phantomSha?.has(meta.remoteSha)) {
+        await clearTombstoneLocally(meta.path)
+        continue
+      }
       jobs.push({ action: { action: 'delete', path: meta.path }, path: meta.path, content: null })
     } else {
       // 行与残留正文必须一起清：只删行的话，那个孤儿文件会在下次对账被当成新笔记收养回来。
@@ -503,7 +554,7 @@ async function commitBatch(cfg: GiteeConfig, message: string, batch: CommitActio
       return
     } catch (err) {
       const status = err instanceof gitee.GiteeError ? err.status : 0
-      if (status === 404 || status === 405 || status === 406) {
+      if (status === 404 || status === 400 || status === 405 || status === 406) {
         multiCommitBroken = true
         await logSync('warn', `Gitee 多文件提交接口不可用(${status}),已降级为逐文件提交`)
       } else {
@@ -515,7 +566,18 @@ async function commitBatch(cfg: GiteeConfig, message: string, batch: CommitActio
   for (const action of batch) {
     if (action.action === 'delete') {
       const meta = await db.notes.get(action.path)
-      if (meta?.remoteSha) await gitee.deleteRemoteFile(cfg, action.path, meta.remoteSha, message)
+      if (meta?.remoteSha) {
+        try {
+          await gitee.deleteRemoteFile(cfg, action.path, meta.remoteSha, message)
+        } catch (err) {
+          const status = err instanceof gitee.GiteeError ? err.status : 0
+          if (status === 404) {
+            await logSync('warn', `远端文件已不存在,跳过删除: ${action.path}`)
+            continue
+          }
+          throw err
+        }
+      }
       continue
     }
     if (action.action === 'move') continue
