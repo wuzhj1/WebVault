@@ -23,6 +23,7 @@ import { bindingOfEvent, hasMod, isTypingTarget } from './core/hotkeys.ts'
 import { registerAppSW } from './core/pwa.ts'
 import { titleOf } from './core/vault/paths.ts'
 import { useAiSettingsStore } from './stores/aiSettings.ts'
+import { usePropertiesStore } from './stores/properties.ts'
 import { useAiStore } from './stores/ai.ts'
 import { useSyncStore } from './stores/sync.ts'
 import { useUiStore, type ShortcutId } from './stores/ui.ts'
@@ -45,6 +46,7 @@ const sync = useSyncStore()
 const ui = useUiStore()
 /** AI 配置（启动时 load 一次；设置页与面板里的 load 都带重入守卫，只是兜底）。 */
 const aiSettings = useAiSettingsStore()
+const properties = usePropertiesStore()
 /** AI 对话（quoteNote 往里放引用芯片；历史也在启动时读一次）。 */
 const aiStore = useAiStore()
 
@@ -314,6 +316,8 @@ onMounted(async () => {
   await ui.load()
   // AI 配置与对话历史都存 settings 表，早于面板挂载读完，面板/设置页的 load 只是幂等兜底。
   await aiSettings.load()
+  // 属性类型注册表同理：读完它属性条才知道哪些 key 该渲染成下拉/开关，而不是一律文本框。
+  await properties.load()
   await aiStore.load()
   await sync.init()
   startupDone.value = true

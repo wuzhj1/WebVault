@@ -13,6 +13,8 @@
  * AI 的 apiKey 同等待遇：明文存本机 `.webvault/ai.json`，只发往用户自己填的地址（ai tab 顶部同款警告）。
  */
 import { computed, defineComponent, h, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { todayStr } from '@/core/daily.ts'
+import { parseFrontmatter, readRaw, writeKeys } from '@/core/parse/frontmatter.ts'
 import { bindingOfEvent, displayOfBinding } from '@/core/hotkeys.ts'
 // 文件读写在本组件里承担五件维护动作：目录绑定/解除、探测持久化授权、重建索引时逐篇读正文、
 // 清空本机正文、导出 zip 备份；导出本身在 core/vault/backup.ts，本组件只负责按钮与回执。
@@ -155,8 +157,11 @@ const usage = ref<string>('')
 const persisted = ref<boolean | null>(null)
 /** 重建链接/标签索引进行中；按钮文案与 disabled 都靠它。 */
 const reindexing = ref(false)
+/** 补齐创建时间进行中；`backfilled` 为 null 表示还没跑过（与 reindexed 同一套语义）。 */
+const backfilling = ref(false)
 /** 重建索引完成后写入处理篇数；用 null 区分「还没跑过」和「跑了但 0 篇」。 */
 const reindexed = ref<number | null>(null)
+const backfilled = ref<number | null>(null)
 /** 打包导出进行中；按钮文案与 disabled 都靠它。 */
 const exporting = ref(false)
 /** 导出成功后的回执（篇数 / 体积 / 文件名）；失败走 sync.notify，两者不会同时出现。 */
@@ -510,6 +515,41 @@ async function reindex(): Promise<void> {
     sync.notify('error', `重建索引失败: ${err instanceof Error ? err.message : String(err)}`)
   } finally {
     reindexing.value = false
+  }
+}
+
+/**
+ * 给缺 `created` 的存量笔记一次性补上创建时间。
+ *
+ * **取值是文件的最后修改时间，不是真正的创建时间。** OPFS 与浏览器都不暴露文件的 birthtime，
+ * 本机拿不到比这更早的信号；对很久没动过的笔记，这个值 ≈ 它最后一次被编辑的那天，可能比真实的
+ * 创建日期晚很多。所以按钮文案必须把这件事说出来 —— 让它看起来像「找回了创建时间」是撒谎，
+ * 而一个撒谎的元数据字段比没有这个字段更糟。
+ *
+ * 跳过两类：没缓存正文的（无从写起），以及 `created` **已经存在**的 —— 包括 `created: []`
+ * 这种畸形（合并可能造出来）。本函数的语义是「补缺」不是「修坏」，重写畸形行会把原值丢掉。
+ *
+ * 走 `saveBody` 落盘：照常标脏、照常同步，与在属性条里手改一次完全同一条路径，不需要任何旁路。
+ */
+async function backfillCreated(): Promise<void> {
+  backfilling.value = true
+  backfilled.value = null
+  try {
+    let count = 0
+    for (const n of vault.notes) {
+      if (n.removedLocal || !n.cached) continue
+      const body = await opfs.readNote(n.path)
+      if (body === null) continue
+      if (readRaw(parseFrontmatter(body), 'created') !== null) continue
+      const stamp = todayStr(new Date(n.fileMtime || n.mtime))
+      await vault.saveBody(n.path, writeKeys(body, { created: stamp }))
+      count++
+    }
+    backfilled.value = count
+  } catch (err) {
+    sync.notify('error', `补齐创建时间失败: ${err instanceof Error ? err.message : String(err)}`)
+  } finally {
+    backfilling.value = false
   }
 }
 
@@ -1018,6 +1058,29 @@ onMounted(() => {
               </span>
             </div>
             <p v-if="reindexed !== null" class="field__tip">已重新解析 {{ reindexed }} 篇笔记。</p>
+
+            <div class="frow">
+              <span class="frow__label">补齐创建日期<span class="frow__desc">给还没有 <code>created:</code> 的旧笔记补一个</span></span>
+              <span class="frow__ctl">
+                <button class="btn" type="button" :disabled="backfilling" @click="backfillCreated">
+                  {{ backfilling ? '补齐中…' : '补齐创建日期' }}
+                </button>
+              </span>
+            </div>
+            <p v-if="backfilled !== null" class="field__tip">
+              已为 {{ backfilled }} 篇笔记补上创建日期,它们会被标为待上传,同步一次即可推上去。
+            </p>
+            <!-- 取值口径必须自己说出口:这是「最后修改时间」而不是创建时间,浏览器根本拿不到 birthtime。
+                 不写清楚,用户会以为应用找回了并不存在的精度,日后据此做判断就是被这份错觉误导。 -->
+            <details class="disclose">
+              <summary class="disclose__sum">这个日期取自哪里?</summary>
+              <div class="disclose__body">
+                取每个文件的<strong>最后修改时间</strong>。浏览器拿不到文件的创建时间,这是本机唯一可用的信号,
+                所以对很久没改过的笔记,它可能<strong>晚于</strong>真实的创建日期。
+                已有 <code>created:</code> 的笔记一律不动(包括写法异常的那种)。
+                新建的笔记会自动写入当天日期,不需要这个动作。
+              </div>
+            </details>
           </div>
 
           <div class="logs">

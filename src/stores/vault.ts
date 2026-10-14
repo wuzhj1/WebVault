@@ -14,7 +14,7 @@
 import { defineStore } from 'pinia'
 import { computed, ref, shallowRef } from 'vue'
 import { db, putSetting, type CardRow, type DailyRow, type LinkRow, type NoteMeta, type TagRow } from '@/core/db.ts'
-import { dailyDateOf, dailyDirDateOf, dateOfDaily, isDailyPath, uniqueDailyPath } from '@/core/daily.ts'
+import { dailyDateOf, dailyDirDateOf, dateOfDaily, isDailyPath, todayStr, uniqueDailyPath } from '@/core/daily.ts'
 import { flushToFiles, hydrateFromFiles } from '@/core/vault/datafiles.ts'
 // 键名只在 core/vault/config-layout.ts 声明一次，那里同时决定它落进 .webvault/workspace.json。
 import { SETTING_KEYS } from '@/core/vault/config-layout.ts'
@@ -28,7 +28,7 @@ import {
   normalizePath,
   titleOf,
 } from '@/core/vault/paths.ts'
-import { parseFrontmatter, writeKeys } from '@/core/parse/frontmatter.ts'
+import { parseFrontmatter, readRaw, writeKeys } from '@/core/parse/frontmatter.ts'
 import { parseNote } from '@/core/parse/links.ts'
 import { rewriteWikilinks } from '@/core/parse/rewrite.ts'
 import {
@@ -971,25 +971,47 @@ export const useVaultStore = defineStore('vault', () => {
     // 否则 createNote 会在「已有同名行」处早退，返回一个根本没有文件的路径。
     if (occupiedBy(path)) return path
 
-    const fileMtime = await opfs.writeNote(path, content)
-    const sha = await gitBlobSha(content)
+    // 新笔记补一个 created —— **全应用唯一的写入点**（存量补齐走设置页那个一次性动作，
+    // 底层同样调到这儿的同一条 writeKeys 路径）。
+    // 为什么落在 createNote 而不是 initialDailyContent：后者只服务日记，而且它产出的字节被
+    // verify-daily 按精确字符串钉死；createNote 却是全部创建路径（侧栏、日历、AI、链接创建）
+    // 的唯一漏斗，放这儿一处就全覆盖，也不必动那条字节断言。
+    const body = stampCreated(content)
+    const fileMtime = await opfs.writeNote(path, body)
+    const sha = await gitBlobSha(body)
     const meta: NoteMeta = {
       ...newMeta(path),
       localSha: sha,
       baseSha: sha,
-      size: content.length,
+      size: body.length,
       fileMtime,
       cached: 1,
       dirty: 1,
     }
     await db.notes.put(meta)
-    await reindexContent(path, content)
+    await reindexContent(path, body)
     notes.value = replaceMeta(notes.value, meta)
     await refreshDerived()
     // 新建即可编辑：这次是真正写出的文件，紧随其后的 openNote 据此放行。
     // 走到「路径已被占用」早退分支的不算新建，那里不设这个标记。
     unlockOnOpen = path
     return path
+  }
+
+  /**
+   * 给一份正文补上 frontmatter 的 `created:`；已有该 key 时一个字节都不动。
+   *
+   * 用 `readRaw` 而不是 `readScalar` 判存在：`created: []` 这种畸形写法（合并可能造出来）
+   * 在 readScalar 眼里等于「没有」，于是会被当成缺失来补写 —— 那会重写这一行、丢掉原值。
+   * 「key 在就别碰」才是这里的语义，畸形留给用户自己收拾。
+   *
+   * 值用 `todayStr()` 的本地日历日而非 `toISOString()`：后者是 UTC 日，UTC+8 的 0–8 点会退成
+   * 昨天 —— 和 `core/daily.ts` 对同一个坑的说明完全一致。`created` 与 `date` 因此同形，
+   * 也与 Obsidian 的 Date 属性同形。
+   */
+  function stampCreated(content: string): string {
+    if (readRaw(parseFrontmatter(content), 'created') !== null) return content
+    return writeKeys(content, { created: todayStr() })
   }
 
   /**

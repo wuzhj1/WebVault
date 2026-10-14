@@ -9,6 +9,10 @@
  * The load-bearing group is B. A note's frontmatter is its permanent address, it is written into
  * files that get pushed to Gitee, and any stray byte flips `gitBlobSha`, marks the note dirty and
  * widens the three-way merge surface. So the assertions are about bytes, not about shapes.
+ *
+ * H extends B's contract to arbitrary (user-defined) property keys: the same byte-stability,
+ * plus the two new failure modes that openness brings — a key the parser cannot read back, and
+ * an insertion order that depends on the caller's object literal.
  */
 import { parseNote } from '../src/core/parse/links.ts'
 import {
@@ -18,12 +22,14 @@ import {
   encodeScalar,
   frontmatterLostGuard,
   hasFrontmatter,
+  isValidPropertyKey,
   parseFrontmatter,
   readList,
   readRaw,
   readScalar,
   writeKeys,
 } from '../src/core/parse/frontmatter.ts'
+import { inferType, parseTypeRegistry, resolveType } from '../src/core/parse/property-types.ts'
 import type { NoteMeta } from '../src/core/db.ts'
 import { cardFromBody, frontmatterTagRows, isZid, parseCreated } from '../src/core/zettel/card.ts'
 import { buildResolver, preferredLinkText, resolveTarget } from '../src/core/index/resolve.ts'
@@ -326,6 +332,104 @@ check('G6 date is last in KEY_ORDER', KEY_ORDER[KEY_ORDER.length - 1], 'date')
 check('G6 date is writable', writeKeys('---\nid: x\n---\nbody', { date: '2026-10-10' }), '---\nid: x\ndate: 2026-10-10\n---\nbody')
 check('G6 date lands at the block tail, others untouched', writeKeys('---\nslug: s\n# 注释\ntags: [a]\n---\nbody', { date: '2026-10-10' }), '---\nslug: s\n# 注释\ntags: [a]\ndate: 2026-10-10\n---\nbody')
 check('G6 rewriting an existing date changes only that line', writeKeys('---\nid: x\ndate: 2020-01-01\n---\nbody', { date: '2026-10-10' }), '---\nid: x\ndate: 2026-10-10\n---\nbody')
+
+// ------------------------------------------------------- H. arbitrary (user-defined) properties
+
+console.log('\nH. arbitrary properties')
+
+const withCustom = writeKeys(fixtures.five, { slug: 'abc' })
+
+// H1/H2 —— 自定义键写进去、读回来，且只多出它自己那一行。
+check(
+  'H1 a custom key round trips through write then read',
+  readRaw(parseFrontmatter(withCustom), 'slug'),
+  'abc',
+)
+check('H1 and the block grew by exactly one line', withCustom.split('\n').length, fixtures.five.split('\n').length + 1)
+check('H1 removing it reproduces the original byte for byte', writeKeys(withCustom, { slug: null }), fixtures.five)
+
+// H3/H4 —— 落点：自定义键进块尾，owned 键的相对位置一个都不许动。
+check(
+  'H3 a custom key inserts before the closing fence, after every existing line',
+  writeKeys('---\nid: x\n# 注释\ntags: [a]\n---\nbody', { slug: 'abc' }),
+  '---\nid: x\n# 注释\ntags: [a]\nslug: abc\n---\nbody',
+)
+const ownedOnly = '---\nid: x\ntype: fleeting\ncreated: 2026-09-15\ntags: [a]\naliases: [b]\n---\nbody'
+const grown = writeKeys(ownedOnly, { slug: 'abc' })
+check('H4 splicing in a custom key leaves every owned line in place', grown.replace('slug: abc\n', ''), ownedOnly)
+
+// H5 —— 非法键名。写进去就等于写进一行再也读不回来的字，而且在桌面 Obsidian 里同样失效。
+check('H5 a key with a space is rejected', throws(() => writeKeys(fixtures.five, { 'my key': 'v' })), true)
+check('H5 a Chinese key is rejected', throws(() => writeKeys(fixtures.five, { 分类: 'v' })), true)
+check('H5 a key starting with a digit is rejected', throws(() => writeKeys(fixtures.five, { '2024': 'v' })), true)
+check('H5 an empty key is rejected', throws(() => writeKeys(fixtures.five, { '': 'v' })), true)
+check(
+  'H5 dots, dashes and slashes are allowed',
+  writeKeys('---\n---\nbody', { 'a.b-c/d': 'v' }),
+  '---\na.b-c/d: v\n---\nbody',
+)
+
+// H6 —— 键名合法性的正反例。实现直接问 KEY_LINE，所以这里同时钉死「有效 = 解析侧识别得出来」。
+check('H6 plain key', isValidPropertyKey('category'), true)
+check('H6 underscore prefix', isValidPropertyKey('_private'), true)
+check('H6 path-ish key', isValidPropertyKey('meta/version'), true)
+check('H6 leading digit', isValidPropertyKey('2024'), false)
+check('H6 contains space', isValidPropertyKey('my key'), false)
+check('H6 contains colon', isValidPropertyKey('a: b'), false)
+check('H6 contains CJK', isValidPropertyKey('分类'), false)
+check('H6 empty', isValidPropertyKey(''), false)
+
+// H7 —— 顺序必须与调用方怎么写对象字面量无关，否则同一份数据有两种字节、gitBlobSha 成了随机数。
+check(
+  'H7 the same keys in a different order write the identical bytes',
+  writeKeys('', { date: '2026-10-10', created: '2026-10-14' }),
+  writeKeys('', { created: '2026-10-14', date: '2026-10-10' }),
+)
+check('H7 owned keys still precede custom ones when the block is created', writeKeys('', { slug: 'x', id: 'y' }), '---\nid: y\nslug: x\n---\n')
+
+// H8 —— 字节稳定在自定义键上同样成立：空 patch 恒等、同值 patch 恒等。
+check('H8 an empty patch is the identity for a file with custom keys', writeKeys(withCustom, {}), withCustom)
+check('H8 a same-value patch is the identity for a file with custom keys', writeKeys(withCustom, { slug: 'abc' }), withCustom)
+// undefined 不是「值」：跳过而不是写坏。缺 key 才表示不动。
+check('H8 an explicitly undefined value is skipped', writeKeys(fixtures.five, { slug: undefined } as never), fixtures.five)
+
+// H9 —— 重复键仍然一概不碰（同步合并在块里造出来的重复，自定义键同样会中招）。
+const dupCustom = '---\nslug: a\nslug: b\n---\nbody'
+check('H9 a duplicated custom key is left alone', writeKeys(dupCustom, { slug: 'c' }), dupCustom)
+
+// H10 —— 改键名 = 一次改写里同时删旧写新，值不会有一瞬间「哪儿都不在」。
+check(
+  'H10 renaming is one pass: the value is never momentarily absent',
+  writeKeys(withCustom, { slug: null, category: '工作' }),
+  writeKeys(fixtures.five, { category: '工作' }),
+)
+
+// H11 —— 属性类型：注册表优先、按值推断兜底。
+check('H11 flow list', inferType('[a, b]'), 'list')
+check('H11 empty flow list', inferType('[]'), 'list')
+check('H11 bare true', inferType('true'), 'checkbox')
+check('H11 bare false, case-insensitive', inferType('FALSE'), 'checkbox')
+check('H11 date', inferType('2026-10-14'), 'date')
+check('H11 integer', inferType('42'), 'number')
+check('H11 negative decimal', inferType('-3.14'), 'number')
+check('H11 a quoted boolean is a string — the author said so', inferType("'true'"), 'text')
+check('H11 a quoted number stays a string', inferType("'3'"), 'text')
+check('H11 a datetime is text: a date input would truncate the time', inferType('2026-10-14 08:30'), 'text')
+check('H11 an absent key', inferType(null), 'text')
+check('H11 an empty value', inferType('   '), 'text')
+check('H11 an ordinary word', inferType('工作'), 'text')
+
+const hasFlag = (flag: string): ReturnType<typeof parseFrontmatter> => parseFrontmatter(`---\nflag: ${flag}\n---\n`)
+check('H11 resolveType prefers the registry over inference', resolveType(hasFlag('true'), 'flag', { flag: 'text' }), 'text')
+check('H11 and falls back to inference when unregistered', resolveType(hasFlag('true'), 'flag', {}), 'checkbox')
+
+// H12 —— 注册表是 JSON，可能被手改、可能是旧版本写的。拿到什么信什么，控件就会渲染崩掉。
+check(
+  'H12 a hand-edited registry of junk collapses to the sane entries',
+  parseTypeRegistry({ slug: 'dropdown', 'bad key': 'text', ok: 'date', nested: 42 }),
+  { ok: 'date' },
+)
+check('H12 a non-object registry is ignored', [parseTypeRegistry(null), parseTypeRegistry('x'), parseTypeRegistry([1])], [{}, {}, {}])
 
 console.log(`\n${pass} passed, ${fail} failed`)
 process.exit(fail === 0 ? 0 : 1)

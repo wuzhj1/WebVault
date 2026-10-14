@@ -15,6 +15,7 @@
 - 右栏第三个页签是**大纲**：跟着打字实时列出本文标题（级数用缩进与 `#` 的个数表示），点一条就把编辑器滚到那一节并落光标。大纲从**编辑器的 IR DOM** 读而不是解析 markdown 源码——源码那套 ATX 正则抓不到引用块里的 `> # 标题` 和 setext 的 `标题` + `===`，而它们在编辑器里都是真标题，按源码顺序给 DOM 下标必然跳错位；反过来代码围栏里的 `# 代码` 渲染在 `<pre>` 里不是 heading，天然不进大纲
 - 重命名或移动笔记时，全库指向它的 `[[双链]]` 自动改写
 - 旧笔记里遗留的卡片盒元数据块（frontmatter 的 `id` / `type` / `tags` 等）**原样保留、永不改写**，`[[202609151423]]` 这样的永久 ID 链接依旧能解析、改名不断链
+- **属性**（对标 Obsidian Properties）：编辑器上方一条可折叠的属性条，创建日期、标签、分类**以及任意自定义字段**都能就地增删改。字段类型可声明为 文本 / 列表 / 数字 / 勾选 / 日期（存 `.webvault/app.json` 的类型注册表），没声明的按值推断——所以桌面 Obsidian 或 VS Code 里写的属性，回来一样渲染得对。元数据**依然不进编辑器正文**：属性条只发一次改写请求，落盘顺序、缓存同步、并发串行与同步推送全由编辑器收口；分居两处迟早出现两份状态，而过期那份会在下一次自动保存里赢——表现就是「改了属性，打两个字就没了」。`id` 与 `date` 只读（换一天请走「移动笔记」，`date:` 的写入点仍是回填与搬进日期名文件那两处）；`created:` 只在新建时写入，存量笔记用设置 → 数据页的「补齐创建日期」一次性补（取文件最后修改时间，按钮上写明了这个口径）
 - 侧栏是 44px **活动栏**：笔记 / 待建 / 标签 / 日历 / AI 五个图标切换右侧内容面板，图标上挂计数徽标；笔记 / 待建 / 标签 / AI 产出区能过滤，笔记区内**目录 / 置顶 / 最近**三个标签页切换视图（书签不再和目录树混排），点标签行直接全库搜索 `#标签`
 - **日记日历**：归日看 frontmatter 的 `date:`（`date: 2026-10-10`），**搬动、整理、改名都不丢日期**；新建平铺落到 `日记/晨间.md`（同名自动退让成 `日记/晨间 2.md`），存量的一天一目录启动时一次性拍平。侧栏第五个分区**上半是周一开头的月历、下半是那一天的日记列表**，`‹ 年月 ›` 翻页 +「今天」归位；点月历格子选中那天（列表随之切换），点列表里的标题打开那一篇，列表头部「新建」就地输标题建文件，方向键在日期间漫游、跨月自动翻页且**顺带选中**，`Ctrl/⌘+Alt+D` 切到日历分区
 - 中文全文搜索（自研 CJK 单字/双字分词 + MiniSearch），带命中摘要
@@ -41,7 +42,7 @@ pnpm dev           # http://localhost:5173
 自检命令：
 
 ```bash
-pnpm verify        # 18 个验证套件,1242 条断言(配置 / 解析 / frontmatter 与 ID 兼容 / 链接改写 / 三方合并 / 远端删除判定 / 搜索 / 主题 / 路径与标题 / 内容指纹 / 链接解析 / 落盘簿记 / ZIP 打包 / 凭据抹除 / 配置目录形状 / AI 标记与提示词 / 日历日期 / 大纲文本)
+pnpm verify        # 18 个验证套件,1335 条断言(配置 / 解析 / frontmatter 与 ID 兼容 / 自定义属性 / 链接改写 / 三方合并 / 远端删除判定 / 搜索 / 主题 / 路径与标题 / 内容指纹 / 链接解析 / 落盘簿记 / ZIP 打包 / 凭据抹除 / 配置目录形状 / AI 标记与提示词 / 日历日期 / 大纲文本)
 pnpm typecheck     # vue-tsc --noEmit
 pnpm build         # 类型检查 → 生成 PWA 图标与 vditor 静态资源 → 产出 dist/
 ```
@@ -371,7 +372,7 @@ src/
                        zip 打包与导出备份(含凭据抹除)
     editor/            编辑器内双链胶囊的 DOM 装饰(字符原样保留,不影响 Lute 序列化)与大纲读取(IR DOM → 标题序列)
     index/             双链与标签解析、链接目标解析规则(含按 ID 解析)
-    parse/             Markdown 扫描:[[链接]]、#标签、标题锚点;frontmatter 的逐行无损读写
+    parse/             Markdown 扫描:[[链接]]、#标签、标题锚点;frontmatter 的逐行无损读写与属性类型推断
     search/            CJK 分词 + MiniSearch 索引与摘要
     sync/              gitee API、同步引擎、三方合并、远端删除判定
     theme/             主题与强调色注册表、对比度计算
@@ -379,13 +380,14 @@ src/
     zettel/            卡片元数据的 frontmatter 行解析与链接层永久 ID 兼容(card.ts)
   stores/              Pinia:vault(笔记与索引) / sync(同步与通知) /
                        settings / appearance / ui(界面状态、最近/置顶与快捷键绑定持久化) /
-                       aiSettings(AI 连接) 与 ai(对话、流式、沉淀)
+                       properties(属性类型注册表) / aiSettings(AI 连接) 与 ai(对话、流式、沉淀)
   components/          TopBar、SideBar、FileTree、NoteEditor、RightPanel、Modal、
                        SearchPanel、LinkPicker、GraphView、SettingsDialog、Notices、
                        AiPanel(侧栏 AI 分区)、AiSelection(选区浮层)、
+                       PropertiesBar(编辑器上方的属性条,只发改写请求、不自己碰文件)、
                        CalendarPanel(侧栏日历分区:月历 + 当天日记列表)
 scripts/               图标生成、vditor 资源拷贝 + 18 个 Node 验证套件(pnpm verify),CI 见 .github/workflows/
 public/vditor/         自托管的编辑器资源,由 scripts/copy-vditor.mjs 从 node_modules 拷出,不入库
 ```
 
-`core/parse/frontmatter.ts`、`core/zettel/*`、`core/vault/flush-state.ts`、`core/vault/zip.ts`、`core/vault/redact.ts`、`core/vault/config-layout.ts`、`core/daily.ts`、`core/ai/{marks,prompts}.ts` 和 `core/editor/outline.ts` 是纯函数模块，有两条硬约束：**只用相对导入**（验证脚本以 `node scripts/*.mts` 直跑，没有 `@/` 别名解析），且**不得在运行时导入 `db.ts`**（它在模块作用域就构造 Dexie，需要 IndexedDB）。用 `import type` 引类型是安全的，编译后会被擦除。违反任一条，验证脚本会静默失效或直接崩掉。
+`core/parse/frontmatter.ts`、`core/parse/property-types.ts`、`core/zettel/*`、`core/vault/flush-state.ts`、`core/vault/zip.ts`、`core/vault/redact.ts`、`core/vault/config-layout.ts`、`core/daily.ts`、`core/ai/{marks,prompts}.ts` 和 `core/editor/outline.ts` 是纯函数模块，有两条硬约束：**只用相对导入**（验证脚本以 `node scripts/*.mts` 直跑，没有 `@/` 别名解析），且**不得在运行时导入 `db.ts`**（它在模块作用域就构造 Dexie，需要 IndexedDB）。用 `import type` 引类型是安全的，编译后会被擦除。违反任一条，验证脚本会静默失效或直接崩掉。

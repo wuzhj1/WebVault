@@ -48,6 +48,14 @@ export const SETTING_KEYS = {
   aiSettings: 'ai-settings',
   /** AI 对话历史，value 是全部会话合成的一个 JSON（stores/ai.ts）。 */
   aiChatHistory: 'ai-chat-history',
+  /**
+   * 属性类型注册表 `key → text|list|number|checkbox|date`（stores/properties.ts）。
+   *
+   * 没在 `settingsFileOf` 里登记，是有意的：它是静态配置，按「未知键回落 `app.json`」这条规则
+   * 正好落进 `app.json` —— 与 Obsidian 把 `propertyTypes` 放 `.obsidian/app.json` 同一位置。
+   * `app.json` 已在 `TABLE_FILES` 的 settings 清单里，自动落盘、自动进备份，一行都不用改。
+   */
+  propertyTypes: 'property-types',
 } as const
 
 /**

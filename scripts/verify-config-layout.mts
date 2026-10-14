@@ -102,7 +102,7 @@ check('config table is not persisted to files (handle cannot be serialized)', fi
 
 // ---- 3. settings 键名注册表：唯一、非空、值固定 ----
 const keyEntries = Object.entries(SETTING_KEYS)
-check('eight settings keys declared', keyEntries.length, 8)
+check('nine settings keys declared', keyEntries.length, 9)
 check('keys are unique', new Set(keyEntries.map(([, value]) => value)).size, keyEntries.length)
 for (const [name, value] of keyEntries) {
   ok(`SETTING_KEYS.${name} is a non-empty string`, typeof value === 'string' && value.length > 0)
@@ -115,6 +115,10 @@ check('collapsed key', SETTING_KEYS.collapsedDirs, 'ui-collapsed-dirs')
 check('shortcut key', SETTING_KEYS.shortcutBindings, 'ui-shortcut-bindings')
 check('ai settings key', SETTING_KEYS.aiSettings, 'ai-settings')
 check('ai chat history key', SETTING_KEYS.aiChatHistory, 'ai-chat-history')
+check('property types key', SETTING_KEYS.propertyTypes, 'property-types')
+// 属性类型注册表靠「未知键回落 app.json」这条规则落档，不写显式分支 —— 钉死它，
+// 免得有人日后顺手在 settingsFileOf 里给它单开一个文件、把静态配置搬去别处。
+check('property types fall back to app.json', settingsFileOf(SETTING_KEYS.propertyTypes), 'app.json')
 
 // ---- 4. 键 → 档的分流 ----
 const settingsFiles = filesOf('settings')

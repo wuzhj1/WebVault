@@ -10,12 +10,15 @@
  *
  * 读 vault(正文与 resolver)、appearance(明暗翻转)、sync(notify 与 schedulePush / fetchBody)。
  *
- * 编辑器之外本组件还管两件事:IR DOM 装饰(把 `[[双链]]` 包成可点的胶囊、标记光标所在的块)
- * 与斜杠命令 / `[[` 链接补全。装饰只用 span 包裹、不增删字符,否则 IR 模式回序列化 markdown 时会丢内容。
+ * 编辑器之外本组件还管三件事:IR DOM 装饰(把 `[[双链]]` 包成可点的胶囊、标记光标所在的块)、
+ * 斜杠命令 / `[[` 链接补全,以及属性条的元数据改写。装饰只用 span 包裹、不增删字符,否则 IR 模式
+ * 回序列化 markdown 时会丢内容。
  *
  * 两条硬约束:
- * 1. frontmatter 从不进编辑器(`splitFrontmatter` 切掉,保存时原样拼回):本组件对它只读,
- *    没有任何改写入口(元数据条随卡片盒一并移除)。
+ * 1. frontmatter 从不进编辑器(`splitFrontmatter` 切掉,保存时原样拼回)。唯一的改写入口是
+ *    `applyPropertyPatch`,由属性条经 `patch` 事件调进来。它必须留在本组件而不是属性条那边:
+ *    `loadedFm` 的所有权与改写入口要在同一个组件里,分居两处就必然出现两份状态,
+ *    而其中过期的那份会在下一次 `flushSave` 里赢 —— 表现为「改了属性,打两个字就没了」。
  * 2. 任何要落盘的时机都必须 `await` `flushSave()` 并取消挂起的防抖 timer,否则迟到的自动保存会把
  *    刚写进文件的内容覆盖掉。另外换文/重渲染都不能弄丢光标位置,所以有 renderedBody 这层跳过。
  */
@@ -31,9 +34,10 @@ import {
 } from '@/core/editor/wikilink-dom.ts'
 import { HEADING_SELECTOR, outlineOf, type OutlineItem } from '@/core/editor/outline.ts'
 import AiSelection from './AiSelection.vue'
+import PropertiesBar from './PropertiesBar.vue'
 import { slashHint } from '@/core/editor/slash-commands.ts'
 import { clearPendingSave, snapshotPendingSave } from '@/core/editor/pending-save.ts'
-import { splitFrontmatter } from '@/core/parse/frontmatter.ts'
+import { splitFrontmatter, writeKeys, type FrontmatterPatch } from '@/core/parse/frontmatter.ts'
 import { isAttachmentTarget, resolveTarget } from '@/core/index/resolve.ts'
 import { codeThemeFor, type ThemeMode } from '@/core/theme/themes.ts'
 import { useAppearanceStore } from '@/stores/appearance.ts'
@@ -85,7 +89,9 @@ let pendingValue: string | null = null
 /** 当前真正在编辑器里的那篇路径,和 vault.activePath 比较才能判断"是换文还是重载同一篇"。 */
 let loadedPath: string | null = null
 /** 编辑器永远看不见的 `---` 块,每次保存前原样拼回正文前面。 */
-let loadedFm = ''
+// 是 ref 而非普通 let:属性条要按它渲染,写完必须重算 —— 用普通变量的话,
+// 元数据改过的提示会永远停留在旧值上,而那种「界面说改了、文件里是另一回事」正是要避开的。
+const loadedFm = ref('')
 /** 此刻编辑器里的正文原文,重新加载时逐字比对,值没变就不必重排一次、丢一次光标。 */
 let renderedBody: string | null = null
 
@@ -130,10 +136,10 @@ async function flushSave(): Promise<void> {
   // 先把 path/body 取成局部值再 await:期间可能已经换文,不能等回来后再读一次全局状态。
   const path = loadedPath
   const body = editor?.getValue() ?? pendingValue
-  const value = loadedFm + body
+  const value = loadedFm.value + body
   // 自检:`loadedFm` 必须是拼好结果的严格前缀,否则说明这块前言已经和编辑器脱钩了,
   // 与其写坏文件不如回滚到上次渲染的正文并报警(这次待写内容随 pendingValue 一起丢弃)。
-  if (loadedFm !== '' && !value.startsWith(loadedFm)) {
+  if (loadedFm.value !== '' && !value.startsWith(loadedFm.value)) {
     pendingValue = null
     vault.saveState = 'idle'
     sync.notify('warn', '元数据块偏移计算异常，已拒绝保存以防止正文损坏')
@@ -158,6 +164,86 @@ async function flushSave(): Promise<void> {
   vault.saveState = 'saved'
   vault.savedAt = Date.now()
   clearPendingSave(path, value)
+  sync.schedulePush()
+}
+
+/**
+ * 属性条的改写入口：把元数据块的改动写进文件，并保证 `loadedFm` 始终与磁盘同真同假。
+ *
+ * 为什么这一串必须由本组件收口，而属性条不能自己 `saveBody`：`flushSave` 保存时拼的是
+ * `loadedFm + 正文`。属性条若绕过这里直接写文件，`loadedFm` 立刻过期，用户下一次防抖保存
+ * 就会拿**旧块 + 新正文**把刚写的属性静默冲掉 —— 与同步侧那批「幽灵墓碑」是同一类失效，
+ * 只是换了个入口：都是「一份没跟上的缓存覆盖了已经变了的事实」。
+ *
+ * 步骤顺序不可调换，每一步都在为下一步铺垫（详见 runPropertyPatch 里的逐条注释）。
+ *
+ * 并发：每次失焦都发一个 patch，两个同时 await 同一份磁盘状态会互踩（第二个 flushSave 会把
+ * 第一个还没落定的东西一起写掉），所以整条链必须串行。
+ */
+let patchChain: Promise<void> = Promise.resolve()
+function applyPropertyPatch(patch: FrontmatterPatch): void {
+  const run = patchChain.then(() => runPropertyPatch(patch))
+  // 失败不许毒化链子：下一次改写仍要照常执行，否则一次拒绝会让属性条从此哑掉。
+  patchChain = run.catch(() => {})
+}
+
+async function runPropertyPatch(patch: FrontmatterPatch): Promise<void> {
+  const path = loadedPath
+  if (state.value !== 'ready' || path === null) return
+
+  // ① 先把挂起的正文落定。flushSave 失败时会把 pendingValue 放回来 —— 那一刻磁盘仍是旧正文，
+  //    继续改元数据等于在一次失败的保存之上叠加改动，中止让用户先解决保存问题。
+  await flushSave()
+  if (pendingValue !== null) {
+    sync.notify('error', '正文还没保存成功，暂时不能改元数据')
+    return
+  }
+
+  // ② 读磁盘。这里读的是完整文件（含块），不是编辑器里的正文。
+  const raw = await vault.readBody(path)
+  if (raw === null) {
+    sync.notify('error', '正文不在本机，暂时不能改元数据')
+    return
+  }
+
+  // ③ 真安全网：磁盘的块必须与缓存逐字节相同。不等就说明这中间有别的写入方动过文件
+  //    （sync 拉取、别的标签页、外部工具），此时按补丁写下去会把那次改动的一部分盖掉。
+  const { fm: diskFm, body } = splitFrontmatter(raw)
+  if (diskFm !== loadedFm.value) {
+    sync.notify('warn', '元数据块刚被别处改动，已拒绝写入以防止覆盖，稍后重试')
+    return
+  }
+
+  // ④ 应用改写。writeKeys 只碰补丁指定的行，其余字节原样保留。
+  let next: string
+  try {
+    next = writeKeys(raw, patch)
+  } catch (err) {
+    sync.notify('error', err instanceof Error ? err.message : String(err))
+    return
+  }
+
+  // ⑤ 属性条没有任何能力改正文，正文变了就是写坏了 —— 与其落盘不如当场拦下。
+  if (splitFrontmatter(next).body !== body) {
+    sync.notify('warn', '改写元数据时正文意外发生变化，已拒绝写入')
+    return
+  }
+
+  // ⑥ 先更新缓存再落盘，失败则回退：两者要么都是新的、要么都是旧的，中间态就是下一次静默覆盖。
+  loadedFm.value = splitFrontmatter(next).fm
+  vault.saveState = 'saving'
+  try {
+    await vault.saveBody(path, next)
+  } catch (err) {
+    loadedFm.value = diskFm
+    vault.saveState = 'error'
+    sync.notify('error', `保存失败: ${err instanceof Error ? err.message : String(err)}`)
+    return
+  }
+  // saveBody 不 bump bodyRevision，所以 loadActive 不会重跑、正文不重排、光标不动。
+  vault.saveState = 'saved'
+  vault.savedAt = Date.now()
+  // ⑦ 排队推送：属性改动照常标脏，与改正文完全同一条同步路径。
   sync.schedulePush()
 }
 
@@ -217,7 +303,7 @@ async function loadActive(): Promise<void> {
   const path = vault.activePath
   if (!path) {
     loadedPath = null
-    loadedFm = ''
+    loadedFm.value = ''
     state.value = 'empty'
     setContent('', false)
     vault.saveState = 'idle'
@@ -229,7 +315,7 @@ async function loadActive(): Promise<void> {
   const raw = await vault.readBody(path)
   // null = 本机没有这篇的正文(只有云端 stub):禁用编辑防止凭空覆盖,顺手去 Gitee 拉一次。
   if (raw === null) {
-    loadedFm = ''
+    loadedFm.value = ''
     state.value = 'loading'
     setContent('', false)
     if (sync.available) void sync.fetchBody(path)
@@ -237,7 +323,7 @@ async function loadActive(): Promise<void> {
   }
 
   const { fm: block, body } = splitFrontmatter(raw)
-  loadedFm = block
+  loadedFm.value = block
   state.value = 'ready'
   // 同一篇且正文一字未改就别 setValue:重建 IR DOM 会把光标弹回开头。
   // 但正文没变不等于锁态没变(比如 loading 期间用户点了解锁),这里补一次落锁。
@@ -865,6 +951,15 @@ defineExpose({ flushSave, insertLink, insertMarkdown, jumpToHeading })
         <button class="btn btn--primary" @click="emit('pick-link')">打开链接选择器</button>
       </div>
     </div>
+    <!-- 属性条:只在正文就绪时出现 —— 加载态下 `loadedFm` 是空的,渲染出来等于凭空宣称
+         "这篇没有属性",而它其实只是还没下载到本机。挂在这里(编辑区上方)而不是编辑器内部,
+         是 frontmatter 从不进编辑器那条硬约束的直接后果。 -->
+    <PropertiesBar
+      v-if="state === 'ready'"
+      :fm="loadedFm"
+      :editable="vault.editable"
+      @patch="applyPropertyPatch"
+    />
     <!-- Vditor 挂载点用 v-show:DOM 一旦销毁就得整个重建编辑器实例 -->
     <div v-show="state !== 'empty'" ref="host" class="editor__host"></div>
     <!-- 选区 AI 浮层:Teleport 到 body,fixed 跟着选区矩形;插入走 insertMarkdown,打开设置上抛 App -->

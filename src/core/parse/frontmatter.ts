@@ -2,8 +2,8 @@
  * YAML frontmatter 的读取与字节稳定（byte-stable）改写。
  *
  * 这不是一个 YAML 解析器，也永远不能变成一个是。Vault 里的文件同时被其他工具编辑，所以这里的契约
- * 比通用解析更窄、更强：识别文件开头的 `---` 块、从中读出六个 key、把这六个 key 写回去且不动其他任何
- * 一个字节。未知 key、注释行、嵌套结构、引号风格、重复 key、空行都必须原样存活——一次「顺手整理」别人
+ * 比通用解析更窄、更强：识别文件开头的 `---` 块、从中读出顶层 key、把调用方指定的 key 写回去且不动
+ * 其他任何一个字节。未知 key、注释行、嵌套结构、引号风格、重复 key、空行都必须原样存活——一次「顺手整理」别人
  * YAML 的重写就是一次悄悄毁掉它的重写；任何一个多余字节的翻转都会改变 `gitBlobSha`、把笔记标成脏、
  * 并扩大三方合并的冲突面。
  *
@@ -221,8 +221,28 @@ function blockItems(fm: Frontmatter, line: number): number[] {
 /** frontmatter 里能出现的值：标量或字符串列表。 */
 export type FrontmatterValue = string | string[]
 
-/** 一次改写请求；值为 null 表示删除该 key，缺 key 表示不动该 key。 */
-export type FrontmatterPatch = { [K in OwnedKey]?: FrontmatterValue | null }
+/**
+ * 一次改写请求；值为 null 表示删除该 key，缺 key 表示不动该 key。
+ *
+ * 键名是开放的：应用持有的六个 key（`OWNED_KEYS`）与用户自建的任意属性走同一条改写路径。
+ * 开放的代价是这里**必须**校验键名，见 `isValidPropertyKey` —— 写进一个解析侧认不出的键名
+ * 就等于写进一行再也读不回来的字，而且这个失效在桌面 Obsidian、VS Code 里同样成立。
+ */
+export type FrontmatterPatch = { [key: string]: FrontmatterValue | null }
+
+/**
+ * `key` 能否被本模块自己读回来 —— 即它是否是 `KEY_LINE` 认得的顶层键名。
+ *
+ * 实现刻意不去复制一份正则：有效性**定义**就是「解析侧识别得出来」，那就直接问 `KEY_LINE`。
+ * 两份正则各写一遍迟早漂移，而漂移的表现是「UI 说合法、文件写进去、刷新后消失」这种最难查的失效。
+ *
+ * 取值范围因此是 `^[A-Za-z_][A-Za-z0-9_.\-/]*$`：无空格、无中文、不以数字开头。
+ * 支持中文键名得放宽 `KEY_LINE`，那会改变存量文件的解析行为，是另一件事，不在这里顺手做。
+ */
+export function isValidPropertyKey(key: string): boolean {
+  const m = KEY_LINE.exec(`${key}:`)
+  return m !== null && m[1] === key
+}
 
 /**
  * 返回应用了 `patch` 后的 `text`，尽量少改字节。
@@ -230,7 +250,9 @@ export type FrontmatterPatch = { [K in OwnedKey]?: FrontmatterValue | null }
  * - 空 patch 对任何输入都是恒等函数；
  * - 未改动的行保持精确字节，包括缩进、引号风格和注释；
  * - 出现多于一次的 key 一律不碰，不去猜用户指的是哪一个；
- * - 新 key 按 `KEY_ORDER` 落在其他 owned key 之间，绝不重排未知 key；
+ * - 新的 owned key 按 `KEY_ORDER` 落在其他 owned key 之间，**绝不重排既有任何一行**；
+ * - 新的自定义 key 统一落在块尾（`insertBefore`）；
+ * - 键名过不了 `isValidPropertyKey` 直接抛错，不静默跳过：跳过 = 用户输的东西凭空消失且界面无反应；
  * - 没有块的文件会在开头补一个，正文不变，且闭合 `---` 后不留空行（Lute 会吃掉那个空行，
  *   写出来就等于保证笔记第一次保存即产生幻影 diff）。
  *
@@ -241,8 +263,15 @@ export type FrontmatterPatch = { [K in OwnedKey]?: FrontmatterValue | null }
  *   整篇笔记时本来就会把全文件归一成 LF。
  */
 export function writeKeys(text: string, patch: FrontmatterPatch): string {
-  const requested = OWNED_KEYS.filter((k) => k in patch)
+  // 取 Object.keys 而不是 OWNED_KEYS.filter：后者会把自定义属性**静默丢掉**，
+  // 正是「自定义字段写不进去」的根源。值为 undefined 视同未请求（跳过而非写坏）。
+  const requested = ordered(Object.keys(patch).filter((k) => patch[k] !== undefined))
   if (requested.length === 0) return text
+  for (const k of requested) {
+    if (!isValidPropertyKey(k)) {
+      throw new Error(`非法的属性名 ${JSON.stringify(k)}：只能用字母开头，含字母、数字、下划线、点、连字符、斜杠`)
+    }
+  }
 
   const bom = text.startsWith(BOM)
   const lines = (bom ? text.slice(1) : text).split('\n')
@@ -305,20 +334,42 @@ export function writeKeys(text: string, patch: FrontmatterPatch): string {
 }
 
 /**
- * 全新 owned key 的落点：紧跟在 `KEY_ORDER` 中排在它后面的第一个 owned key 之前，
- * 否则落在块尾。落到末尾可以避开属于最后一个条目的任何缩进 `- item` 行。
+ * 全新 key 的落点。两条路：
+ *
+ * - **owned key**：紧跟在 `KEY_ORDER` 中排在它后面的第一个 owned key 之前，否则落在块尾。
+ * - **自定义 key**：一律落块尾。按名次找对它们只会得到 `-1`，循环会停在第一个 owned key 前面
+ *   ——新属性插进 `id`/`type` 这些地址字段中间，既不是用户预期的落点，也等于改动了存量文件
+ *   里 owned key 的相对位置。
+ *
+ * 落到末尾还可以避开属于最后一个条目的任何缩进 `- item` 行（那正是 `date` 走的同一条路径）。
  */
-function insertBefore(fm: Frontmatter, key: OwnedKey): number {
-  const rank = KEY_ORDER.indexOf(key)
+function insertBefore(fm: Frontmatter, key: string): number {
+  const rank = KEY_ORDER.indexOf(key as OwnedKey)
+  if (rank === -1) return fm.closeLine
   for (const e of fm.entries) {
     if (KEY_ORDER.indexOf(e.key as OwnedKey) > rank) return e.line
   }
   return fm.closeLine
 }
 
-/** 把一个 owned key 渲染成 `key: value` 行；列表走 flow list，标量走 encodeScalar。 */
-function renderEntry(key: OwnedKey, value: FrontmatterValue): string {
+/** 把一个 key 渲染成 `key: value` 行；列表走 flow list，标量走 encodeScalar。 */
+function renderEntry(key: string, value: FrontmatterValue): string {
   return `${key}: ${Array.isArray(value) ? encodeList(value) : encodeScalar(value)}`
+}
+
+/**
+ * 把请求的键名排成稳定顺序：owned key 按 `KEY_ORDER`，自定义 key 按它们在 patch 里的出现顺序垫在后面。
+ *
+ * 为什么不能直接用 `Object.keys` 的顺序：补块（`!fm.exists`）与「同一插入点的多个 key」都按这个顺序
+ * 出字节，而 `Object.keys` 反映的是调用方写 `{ ... }` 的手顺。`writeKeys('', { date, created })` 与
+ * `writeKeys('', { created, date })` 必须产出同一份文件 —— 否则同一份数据写出来两种字节，
+ * `gitBlobSha` 就成了随机数。`Array.prototype.sort` 在 ES2019+ 是稳定排序，等秩的自定义 key 因此
+ * 保持原相对顺序。
+ */
+function ordered(keys: readonly string[]): string[] {
+  const rank = new Map<string, number>(OWNED_KEYS.map((k, i) => [k, i] as const))
+  const fallback = OWNED_KEYS.length
+  return [...keys].sort((a, b) => (rank.get(a) ?? fallback) - (rank.get(b) ?? fallback))
 }
 
 /** 重拼输出：若原文件带 BOM 则补回，未改动行的 `\r` 已在 lines 里原样保留。 */
