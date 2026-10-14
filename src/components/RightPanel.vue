@@ -2,40 +2,48 @@
 /**
  * 右侧面板：当前笔记的「链接 / 信息 / 大纲」三个分区。
  * - 链接：反向链接、出链、待创建（unresolved wikilink）、附件。
- * - 信息：路径 / 同步状态 / 字数 / 修改时间 / 标签。
+ * - 信息：**属性**（frontmatter 的元数据字段，可编辑）/ 路径 / 同步状态 / 字数 / 修改时间 / 标签。
  * - 大纲：正文里的标题列表，按下标跳回编辑器。
  *
  * 数据源分工：链接结构来自 vault store；标签、字数这类要从正文算的字段走本地
  * loadDetails() 异步查 Dexie + readBody，因为未下载的笔记（cached=false）根本没有正文可读。
  * 大纲另走一条：它是**未落盘**的编辑器实时状态，只能由 NoteEditor 上抛，本组件只负责渲染。
+ * 属性与大纲同源（都由 NoteEditor 上抛），但性质相反：大纲只读，属性要写回，
+ * 而写回必须经 App 转给编辑器 —— `loadedFm` 的所有权在那边，本组件一次都不自己碰文件。
  *
  * emits：
  * - 'open'(path)：跳转到某篇笔记（反链行、出链行、新建的待建笔记）。
  * - 'jump'(index)：大纲条目被点中。只交下标——这一节在 DOM 里的位置才是权威，
  *   拿标题文字去搜在同名标题时会找错，且右栏拿到的可能是编辑器卸载前的旧值。
+ * - 'patch'(patch)：属性条请求改写元数据块。交 App 转给编辑器的 `applyPropertyPatch`。
  *
- * 依赖 store：vault（当前笔记与链接图）。卡片盒的类型/ID/别名/相关卡片与收集箱待整理
- * 条目已随卡片盒功能一并移除；元数据块只在信息分区做重复键告警，不再读取展示卡片字段。
+ * 依赖 store：vault（当前笔记与链接图）、properties（属性类型注册表，由属性条自己用）。
+ * 卡片盒的类型/ID/别名/相关卡片与收集箱待整理条目已随卡片盒功能一并移除。
  */
 import { computed, ref, watch } from 'vue'
 import { db } from '@/core/db.ts'
 import type { OutlineItem } from '@/core/editor/outline.ts'
-import { parseFrontmatter } from '@/core/parse/frontmatter.ts'
+import { parseFrontmatter, type FrontmatterPatch } from '@/core/parse/frontmatter.ts'
 import { useSyncStore } from '@/stores/sync.ts'
 import { useVaultStore } from '@/stores/vault.ts'
+import PropertiesBar from './PropertiesBar.vue'
 
 const emit = defineEmits<{
   /** 跳转到某篇笔记:反链行、出链行、新建的待建笔记都会发这个事件。 */
   (e: 'open', path: string): void
   /** 大纲条目被点中:交出它的下标,由 App 让编辑器滚到那一节。 */
   (e: 'jump', index: number): void
+  /** 属性条请求改写元数据块:本组件碰不到 `loadedFm`,交 App 转给编辑器收口。 */
+  (e: 'patch', patch: FrontmatterPatch): void
   /** 窄屏下本面板铺满整个 body 区,头部的 × 请求收起(宽屏该按钮不渲染)。 */
   (e: 'close'): void
 }>()
 
-const { outline } = defineProps<{
+const { outline, frontmatter } = defineProps<{
   /** 当前笔记的大纲,App 从 NoteEditor 的 outline 事件转发过来。 */
   outline: OutlineItem[]
+  /** 当前笔记的 frontmatter 块,同样由 NoteEditor 上抛、经 App 转发;空串表示本机还没有这块内容。 */
+  frontmatter: string
 }>()
 
 const vault = useVaultStore()
@@ -88,6 +96,22 @@ const syncState = computed(() => {
   if (m.remoteSha === null) return '仅本地'
   return '已同步'
 })
+
+/**
+ * 属性条的可编辑开关。两把锁缺一不可:
+ * - `vault.editable` 是笔记锁,整篇只读时属性同样不能改——属性也是文件内容;
+ * - `meta.cached` 是「正文在不在本机」。文件根本不在本地时放行编辑,只会让用户敲完
+ *   才在写入那一步撞一次空,不如一开始就说清楚改不了。
+ */
+const propertiesEditable = computed(() => vault.editable && !!meta.value?.cached)
+
+/**
+ * 属性条里的字段数,只给分组标题配个数。
+ * 这里会再解析一次块,但 `parseFrontmatter` 本来就在 loadDetails 里跑过一遍,
+ * 且它是纯扫描、无 IO —— 为了不重复一次微不足道的解析去让属性条反向回报计数,
+ * 那条接线更贵。
+ */
+const propCount = computed(() => parseFrontmatter(frontmatter).entries.length)
 
 /** 行标题:写了别名就显示别名,否则显示链接目标原文。 */
 function labelOf(target: string, alias: string | null): string {
@@ -179,7 +203,9 @@ watch(
     <div class="panel__scroll">
       <!-- 元数据块异常提示:置于各分区之上,切换页签也始终可见 -->
       <p v-if="duplicateKeys.length > 0" class="warn">
-        元数据块里有重复的键 <code>{{ duplicateKeys.join(', ') }}</code>(可能是同步合并造成的)。已保留第一处,请在编辑器里手动删掉多余的行。
+        元数据块里有重复的键 <code>{{ duplicateKeys.join(', ') }}</code>（可能是同步合并造成的）。
+        已保留第一处，属性条里那一行已置灰——重复的 key 一改就会连带动到另一处，
+        要清理得在外部编辑器里删掉多余的行。
       </p>
 
       <p v-if="!meta" class="hint">打开一篇笔记后,这里会显示它的反向链接、笔记信息与大纲。</p>
@@ -278,8 +304,21 @@ watch(
         </section>
       </template>
 
-      <!-- 信息分区:路径、同步状态与从正文算出来的字段(卡片元数据展示已随卡片盒移除) -->
+      <!-- 信息分区:属性在前(最常动手的那部分),文件事实在后。
+           属性条只发 patch,落盘由编辑器经 App 收口——本组件碰不到 `loadedFm`,
+           也就不必担心自己那份和磁盘脱钩。 -->
       <template v-else>
+        <section class="group">
+          <h4 class="group__title">
+            属性
+            <span class="group__count">{{ propCount }}</span>
+          </h4>
+          <PropertiesBar
+            :frontmatter="frontmatter"
+            :editable="propertiesEditable"
+            @patch="emit('patch', $event)"
+          />
+        </section>
         <dl class="info">
           <dt>路径</dt>
           <dd class="mono">{{ meta.path }}</dd>
@@ -520,8 +559,12 @@ watch(
 }
 
 /* —— 信息分区的键值表 —— */
+/* 属性分组之后紧跟它,分隔样式与 `.group + .group` 保持一致,免得信息分区看起来像是
+   属性组的附属说明而不是并列的两块。 */
 .info {
-  margin: 0;
+  margin: 16px 0 0;
+  padding-top: 12px;
+  border-top: 1px dashed var(--border);
   font-size: 12.5px;
 }
 

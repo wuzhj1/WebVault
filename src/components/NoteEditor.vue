@@ -4,9 +4,13 @@
  *
  * props.startupDone 只在空态占位页上用;emits `open-link`(点到的 wikilink 解析成了某个路径,交给
  * App 去打开)、`pick-link`(空态那个按钮要呼出链接选择器)、`open-ai-settings`(选区 AI 浮层的
- * 「去设置」)与 `outline`(本篇的大纲变了,交 App 转给右栏)。父组件通过 defineExpose 的四个方法
- * 反向操控本组件:`flushSave` 落盘、`insertLink` 从选择器插链、`insertMarkdown` 插入带标记的
- * AI 内容(选区浮层与侧栏 AI 面板共用)、`jumpToHeading` 按大纲下标滚到某一节。
+ * 「去设置」)、`outline`(本篇的大纲变了,交 App 转给右栏)与 `frontmatter`(本篇的 `---` 块变了,
+ * 交 App 转给右栏的属性条)。右栏消费的那两个(`outline` 与 `frontmatter`)走的是同一条弯路,
+ * 理由也相同:右栏会被顶栏开关随时关闭重挂,而大纲与 `loadedFm` 只能有一份,
+ * 必须存在比两者生命周期更长的地方。
+ * 父组件通过 defineExpose 的五个方法反向操控本组件:`flushSave` 落盘、`insertLink` 从选择器插链、
+ * `insertMarkdown` 插入带标记的 AI 内容(选区浮层与侧栏 AI 面板共用)、`jumpToHeading` 按大纲下标
+ * 滚到某一节、`applyPropertyPatch` 改写元数据块(右栏属性条经 App 调进来)。
  *
  * 读 vault(正文与 resolver)、appearance(明暗翻转)、sync(notify 与 schedulePush / fetchBody)。
  *
@@ -16,9 +20,10 @@
  *
  * 两条硬约束:
  * 1. frontmatter 从不进编辑器(`splitFrontmatter` 切掉,保存时原样拼回)。唯一的改写入口是
- *    `applyPropertyPatch`,由属性条经 `patch` 事件调进来。它必须留在本组件而不是属性条那边:
+ *    `applyPropertyPatch`,属性条发的 `patch` 经 App 转进来。它必须留在本组件而不是属性条那边:
  *    `loadedFm` 的所有权与改写入口要在同一个组件里,分居两处就必然出现两份状态,
  *    而其中过期的那份会在下一次 `flushSave` 里赢 —— 表现为「改了属性,打两个字就没了」。
+ *    属性条在右栏并不改变这条约束,只是让中转多了一跳。
  * 2. 任何要落盘的时机都必须 `await` `flushSave()` 并取消挂起的防抖 timer,否则迟到的自动保存会把
  *    刚写进文件的内容覆盖掉。另外换文/重渲染都不能弄丢光标位置,所以有 renderedBody 这层跳过。
  */
@@ -34,7 +39,6 @@ import {
 } from '@/core/editor/wikilink-dom.ts'
 import { HEADING_SELECTOR, outlineOf, type OutlineItem } from '@/core/editor/outline.ts'
 import AiSelection from './AiSelection.vue'
-import PropertiesBar from './PropertiesBar.vue'
 import { slashHint } from '@/core/editor/slash-commands.ts'
 import { clearPendingSave, snapshotPendingSave } from '@/core/editor/pending-save.ts'
 import { splitFrontmatter, writeKeys, type FrontmatterPatch } from '@/core/parse/frontmatter.ts'
@@ -56,6 +60,12 @@ const emit = defineEmits<{
    * 状态必须存在比两者生命周期更长的地方。
    */
   (e: 'outline', items: OutlineItem[]): void
+  /**
+   * 本篇的 frontmatter 块变了(换文、属性条改写)。交给 App 转给右栏的属性条——
+   * 与 outline 同一个理由:右栏会被顶栏开关随时关闭重挂,`loadedFm` 却只能有一份,
+   * 留在本组件里一关面板就断了链,留在右栏里则关一次丢一次。
+   */
+  (e: 'frontmatter', block: string): void
 }>()
 
 const props = withDefaults(defineProps<{
@@ -92,6 +102,12 @@ let loadedPath: string | null = null
 // 是 ref 而非普通 let:属性条要按它渲染,写完必须重算 —— 用普通变量的话,
 // 元数据改过的提示会永远停留在旧值上,而那种「界面说改了、文件里是另一回事」正是要避开的。
 const loadedFm = ref('')
+
+/**
+ * 把这块前言同步给右栏的属性条(经 App 中转,见 emit 声明)。`immediate` 保证右栏在
+ * 用户切换页签或重开面板后立刻就有内容,不必等下一次正文改动。
+ */
+watch(loadedFm, (block) => emit('frontmatter', block), { immediate: true })
 /** 此刻编辑器里的正文原文,重新加载时逐字比对,值没变就不必重排一次、丢一次光标。 */
 let renderedBody: string | null = null
 
@@ -933,8 +949,8 @@ function jumpToHeading(index: number): void {
   setRangeAt(target, true)
 }
 
-/** 暴露给父组件的四个反向操控入口:强制落盘、从选择器插链、插入成块 markdown(AI)、大纲跳转。 */
-defineExpose({ flushSave, insertLink, insertMarkdown, jumpToHeading })
+/** 暴露给父组件的五个反向操控入口:强制落盘、从选择器插链、插入成块 markdown(AI)、大纲跳转、改写元数据。 */
+defineExpose({ flushSave, insertLink, insertMarkdown, jumpToHeading, applyPropertyPatch })
 </script>
 
 <template>
@@ -951,15 +967,6 @@ defineExpose({ flushSave, insertLink, insertMarkdown, jumpToHeading })
         <button class="btn btn--primary" @click="emit('pick-link')">打开链接选择器</button>
       </div>
     </div>
-    <!-- 属性条:只在正文就绪时出现 —— 加载态下 `loadedFm` 是空的,渲染出来等于凭空宣称
-         "这篇没有属性",而它其实只是还没下载到本机。挂在这里(编辑区上方)而不是编辑器内部,
-         是 frontmatter 从不进编辑器那条硬约束的直接后果。 -->
-    <PropertiesBar
-      v-if="state === 'ready'"
-      :fm="loadedFm"
-      :editable="vault.editable"
-      @patch="applyPropertyPatch"
-    />
     <!-- Vditor 挂载点用 v-show:DOM 一旦销毁就得整个重建编辑器实例 -->
     <div v-show="state !== 'empty'" ref="host" class="editor__host"></div>
     <!-- 选区 AI 浮层:Teleport 到 body,fixed 跟着选区矩形;插入走 insertMarkdown,打开设置上抛 App -->

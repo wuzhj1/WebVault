@@ -58,6 +58,11 @@ const editorRef = ref<InstanceType<typeof NoteEditor> | null>(null)
  * 也不进 store——它和 `searchQuery` 一样是纯 UI 状态，没有跨组件共享之外的用处。
  */
 const outline = ref<OutlineItem[]>([])
+/**
+ * 当前笔记的 frontmatter 块,由 NoteEditor 的 `frontmatter` 事件喂进来。
+ * 与 outline 同一个理由存在于此而不是右栏本地:右栏关一次就丢一次。
+ */
+const frontmatter = ref('')
 /** 侧栏实例:快捷键要透过它把分区切到 AI / 日历(section 是 SideBar 的本地状态)。 */
 const sidebarRef = ref<InstanceType<typeof SideBar> | null>(null)
 /** 当前挂载的浮层，同一时刻至多一个。 */
@@ -425,6 +430,7 @@ onBeforeUnmount(() => {
             @pick-link="show('picker')"
             @open-ai-settings="show('settings', 'ai')"
             @outline="outline = $event"
+            @frontmatter="frontmatter = $event"
             :startup-done="startupDone"
           />
         </main>
@@ -432,8 +438,10 @@ onBeforeUnmount(() => {
         <aside class="app__right" :class="{ 'app__right--open': rightOpen }">
           <RightPanel
             :outline="outline"
+            :frontmatter="frontmatter"
             @open="openNote"
             @jump="(i) => editorRef?.jumpToHeading(i)"
+            @patch="(patch) => editorRef?.applyPropertyPatch(patch)"
             @close="closePanels"
           />
         </aside>
