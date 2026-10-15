@@ -10,10 +10,17 @@
 import { defineAsyncComponent, onBeforeUnmount, onMounted, ref } from 'vue'
 import NoteEditor from './components/NoteEditor.vue'
 import Notices from './components/Notices.vue'
+import PanelResizer from './components/PanelResizer.vue'
 import RightPanel from './components/RightPanel.vue'
 import SideBar from './components/SideBar.vue'
 import TopBar from './components/TopBar.vue'
 import { getSetting } from './core/db.ts'
+import {
+  PANEL_DEFAULT_W,
+  readStoredWidths,
+  writeWidths,
+  type PanelWidths,
+} from './core/ui/panel-width.ts'
 import { SETTING_KEYS } from './core/vault/config-layout.ts'
 import { splitFrontmatter } from './core/parse/frontmatter.ts'
 import { dropPendingSave, readPendingSave, snapshotPendingSave } from './core/editor/pending-save.ts'
@@ -72,6 +79,14 @@ const searchQuery = ref('')
 /** 左右侧栏显隐：宽屏是折叠面板，窄屏（<960px）是互斥的全屏面板。 */
 const sidebarOpen = ref(true)
 const rightOpen = ref(true)
+/**
+ * 两栏宽度（像素）。拖动由 `<PanelResizer>` 报数，这里负责落到 CSS 变量与 localStorage。
+ * 用变量而不是内联 width：窄屏媒体查询要把两栏改成铺满 body 区的全屏层（`width: auto`），
+ * 变量和它走同一条 cascade、媒体查询照样赢；内联样式则会盖过媒体查询，把窄屏布局压坏。
+ */
+const panelWidths = ref<PanelWidths>({ side: PANEL_DEFAULT_W, right: PANEL_DEFAULT_W })
+/** 落盘防抖定时器：拖动过程每帧都改宽度，停下来写一次快照就够。 */
+let panelTimer: ReturnType<typeof setTimeout> | null = null
 /** 启动流程是否完成，透传给编辑器控制空态占位页何时可见。 */
 const startupDone = ref(false)
 /**
@@ -116,6 +131,33 @@ function toggleRight(): void {
 function closePanels(): void {
   sidebarOpen.value = false
   rightOpen.value = false
+}
+
+/** 把两栏宽度写进 `<html>` 的 CSS 变量；`themes.css` 里的默认值只是没被覆盖时的兜底。 */
+function applyPanelWidths(): void {
+  const root = document.documentElement
+  root.style.setProperty('--sidebar-w', `${panelWidths.value.side}px`)
+  root.style.setProperty('--right-w', `${panelWidths.value.right}px`)
+}
+
+function persistPanelWidths(): void {
+  if (panelTimer) clearTimeout(panelTimer)
+  panelTimer = setTimeout(() => {
+    panelTimer = null
+    writeWidths(panelWidths.value)
+  }, 400)
+}
+
+/** 分隔条报来一个新宽度。整表替换而不是改单栏：响应式更新靠它，顺手把持久化也带上。 */
+function onPanelResize(side: keyof PanelWidths, width: number): void {
+  panelWidths.value = { ...panelWidths.value, [side]: width }
+  applyPanelWidths()
+  persistPanelWidths()
+}
+
+/** 双击复位：拖歪了不必一点点拖回来。 */
+function onPanelReset(side: keyof PanelWidths): void {
+  onPanelResize(side, PANEL_DEFAULT_W)
 }
 
 /** 设置对话框可落位的页签；与 SettingsDialog 的 TABS 保持一致（那边是权威定义）。 */
@@ -304,6 +346,10 @@ async function reloadForUpdate(): Promise<void> {
 
 onMounted(async () => {
   if (window.innerWidth < 1200) rightOpen.value = false
+  // 两栏宽度必须赶在 await 之前就位:vault.init() 一旦把 ready 置真,三栏立刻按
+  // --sidebar-w / --right-w 排版,这里晚一步就会看到「先 300px 再跳到 420px」。
+  panelWidths.value = readStoredWidths()
+  applyPanelWidths()
   window.addEventListener('keydown', onKeydown)
   window.addEventListener('beforeunload', flush)
   document.addEventListener('visibilitychange', onVisibility)
@@ -334,6 +380,12 @@ onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKeydown)
   window.removeEventListener('beforeunload', flush)
   document.removeEventListener('visibilitychange', onVisibility)
+  // 拖完 400ms 内就关标签的话防抖还没触发：补写一次，别让用户最后一次拖动白做。
+  if (panelTimer) {
+    clearTimeout(panelTimer)
+    panelTimer = null
+    writeWidths(panelWidths.value)
+  }
 })
 </script>
 
@@ -409,7 +461,9 @@ onBeforeUnmount(() => {
       </div>
 
       <!-- 主体三栏：左文件树 / 中编辑器 / 右信息面板。窄屏下左右栏铺满整个 body 区，
-           成为互斥的全屏面板（各自的头部带 × 收起），不加遮罩——铺满之后没有「外面」可点 -->
+           成为互斥的全屏面板（各自的头部带 × 收起），不加遮罩——铺满之后没有「外面」可点。
+           分隔条紧贴各自那一栏的后面，`.app__side:not(--open) + .resizer` 靠这个相邻关系
+           在栏收起时把它一起藏掉；顺序换了那条规则就失效，会出现一条拖不动的把手。 -->
       <div class="app__body">
         <aside class="app__side" :class="{ 'app__side--open': sidebarOpen }">
           <SideBar
@@ -422,6 +476,8 @@ onBeforeUnmount(() => {
             @close="closePanels"
           />
         </aside>
+
+        <PanelResizer side="side" :width="panelWidths.side" @resize="onPanelResize('side', $event)" @reset="onPanelReset('side')" />
 
         <main class="app__main">
           <NoteEditor
@@ -445,6 +501,8 @@ onBeforeUnmount(() => {
             @close="closePanels"
           />
         </aside>
+
+        <PanelResizer side="right" :width="panelWidths.right" @resize="onPanelResize('right', $event)" @reset="onPanelReset('right')" />
       </div>
     </template>
 
@@ -510,6 +568,15 @@ onBeforeUnmount(() => {
   flex: none;
   width: var(--right-w);
   min-width: 0;
+}
+
+/* 对应的栏收起时(宽屏下 display:none),它那条分隔条也得跟着消失——否则会留下一条
+   贴在编辑区边缘、拖了却毫无反应的把手。放在 App 而不是分隔条自己的样式里:
+   `.app__side` / `.app__right` 是本组件的元素,加了本组件的 scope 属性,
+   分隔条那边的选择器够不着它们。 */
+.app__side:not(.app__side--open) + .resizer,
+.app__right:not(.app__right--open) + .resizer {
+  display: none;
 }
 
 /* —— 启动加载 / 存储失败的整屏状态 —— */

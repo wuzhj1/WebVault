@@ -220,8 +220,11 @@ html[data-theme='paper'],
   --accent-text: color-mix(in srgb, #fff 24%, var(--accent));
   /* 对勾笔画要压在 --accent 填充上,深色主题下强调色偏亮,所以用近黑而不是白。 */
   --check-mark: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath fill='none' stroke='%23101116' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round' d='M3.6 8.4 6.5 11.3 12.4 4.7'/%3E%3C/svg%3E");
-  /* 布局宽度常量:侧栏与右栏的固定宽度,布局组件统一引用,不在各自样式里再写一遍。
-     侧栏 300 = 44 活动栏 + 256 内容面板(268 的老宽度去掉活动栏后只剩 224,文件树缩进一深就不够看)。 */
+  /* 布局宽度常量:侧栏与右栏的**出厂**宽度,布局组件统一引用,不在各自样式里再写一遍。
+     侧栏 300 = 44 活动栏 + 256 内容面板(268 的老宽度去掉活动栏后只剩 224,文件树缩进一深就不够看)。
+     这两个值只是兜底:用户拖过分隔条之后,App 会把 `--sidebar-w` / `--right-w` 覆盖到 <html> 上
+     (见 core/ui/panel-width.ts)。**必须走变量**——窄屏媒体查询要把两栏改成 width:auto 的
+     全屏覆盖层,变量走同一条 cascade、媒体查询照样赢,内联样式则会盖过它。 */
   --sidebar-w: 300px;
   --right-w: 300px;
 }

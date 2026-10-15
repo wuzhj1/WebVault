@@ -88,6 +88,10 @@ const state = ref<'empty' | 'loading' | 'ready'>('empty')
 
 /** Vditor 实例;`after` 回调触发前为 null。 */
 let editor: Vditor | null = null
+/** 容器宽度观察器:拖侧栏分隔条时让 Vditor 重算内边距,理由见 observeHostSize。 */
+let hostObserver: ResizeObserver | null = null
+/** 上一次量到的容器宽度,用来把「高度变了」挡在门外——只有宽度才影响内边距。 */
+let hostWidth = 0
 /** after 回调之前 Vditor 的 API 一律不可用,所有操作都要等这个标志位。 */
 let editorReady = false
 /** 程序性 setValue 的护栏:IR 模式也会回调 input,不挡住就会把刚读进来的正文再"保存"一遍。 */
@@ -819,6 +823,30 @@ function stopDecorating(): void {
   fullSweep = false
 }
 
+/**
+ * 容器宽度一变就让 Vditor 重算一次内边距。
+ *
+ * Vditor 只把 `setPadding` 挂在 **window** 的 resize 上,而它是按**容器**宽度算的
+ * (`vditor-ir` 父元素的 clientWidth 减 `preview.maxWidth` 的一半,见 vditor/dist/index.js)。
+ * 拖侧栏分隔条时容器宽了、window 却没变,那圈内边距会停在旧值:编辑器越拖越窄,
+ * 内容先被挤成一条缝,再拖就横向溢出。Vditor 没有对外暴露重算入口,所以这里补一个
+ * ResizeObserver,在自己的回调里重新派发一次 window resize,让它走原本那条路。
+ *
+ * 只在宽度真的变了时派发:高度变化(打字机模式、面板开合)不该触发,而且无谓的派发
+ * 会让 SideBar 之类挂在 window resize 上的清理逻辑跟着误触发。
+ */
+function observeHostSize(): void {
+  if (typeof ResizeObserver === 'undefined' || !host.value) return
+  hostWidth = host.value.clientWidth
+  hostObserver = new ResizeObserver(() => {
+    const next = host.value?.clientWidth ?? 0
+    if (next === hostWidth) return
+    hostWidth = next
+    window.dispatchEvent(new Event('resize'))
+  })
+  hostObserver.observe(host.value)
+}
+
 onMounted(async () => {
   if (!host.value) return
   await import('vditor/dist/index.css')
@@ -858,6 +886,9 @@ onMounted(async () => {
     },
     input: onInput,
   })
+  // 实例建好之后再挂观察器:窗口 resize 的监听是 Vditor 在 after 里绑的,
+  // 观察器跑在它前面的话,第一次宽度变化可能派发出去没人接。
+  observeHostSize()
 })
 
 onBeforeUnmount(async () => {
@@ -869,6 +900,8 @@ onBeforeUnmount(async () => {
   host.value?.removeEventListener('mouseup', onEditorMouseUp, true)
   host.value?.removeEventListener('click', onEditorClick, true)
   host.value?.removeEventListener('keydown', onEditorKeydownCapture, true)
+  hostObserver?.disconnect()
+  hostObserver = null
   await flushSave()
   editor?.destroy()
   editor = null
